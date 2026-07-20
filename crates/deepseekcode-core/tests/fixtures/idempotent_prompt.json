@@ -1,0 +1,6 @@
+{
+  "name": "idempotent_prompt",
+  "given": { "session_exists": true, "pending_inbox": 0 },
+  "when": { "action": "sessions.prompt_idempotent", "prompt": "same", "delivery": "queue", "resume": false },
+  "then": { "inbox_count": 1, "history_count": 0, "events": [] }
+}

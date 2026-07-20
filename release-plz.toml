@@ -1,0 +1,52 @@
+# release-plz config — Channel C (crates.io).
+# Disabled via packaging/channels.toml until public API stabilizes.
+
+[workspace]
+changelog_config = "CHANGELOG.md"
+
+[[package]]
+name = "deepseekcode-types"
+publish = false
+
+[[package]]
+name = "deepseekcode-schema"
+publish = false
+
+[[package]]
+name = "deepseekcode-config"
+publish = false
+
+[[package]]
+name = "deepseekcode-telemetry"
+publish = false
+
+[[package]]
+name = "deepseekcode-storage"
+publish = false
+
+[[package]]
+name = "deepseekcode-llm"
+publish = false
+
+[[package]]
+name = "deepseekcode-core"
+publish = false
+
+[[package]]
+name = "deepseekcode-plugin"
+publish = false
+
+[[package]]
+name = "deepseekcode-server"
+publish = false
+
+[[package]]
+name = "deepseekcode-sdk"
+publish = false
+
+[[package]]
+name = "deepseekcode-cli"
+publish = false
+
+# When channels.crates is enabled, set publish = true on the crates you want on crates.io
+# and add a .github/workflows/release-plz.yml job.

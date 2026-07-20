@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build native plugin example
+        run: cargo build -p hello-hook --release
+      - name: Test core crates
+        run: |
+          $env:DEEPSEEKCODE_LOG_CONSOLE = "0"
+          $env:DEEPSEEKCODE_LOG_LEVEL = "debug"
+          $env:DEEPSEEKCODE_DISABLE_KEYRING = "1"
+          cargo test -p deepseekcode-types -p deepseekcode-schema -p deepseekcode-config -p deepseekcode-storage -p deepseekcode-llm -p deepseekcode-core -p deepseekcode-plugin -p deepseekcode-telemetry
+          if ($LASTEXITCODE -ne 0) {
+            Get-ChildItem -Path "$env:LOCALAPPDATA\deepseekcode\logs" -Recurse -Filter app.log -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Tail 80 }
+            exit $LASTEXITCODE
+          }
+          cargo test -p deepseekcode-server -p deepseekcode-sdk -p deepseekcode-cli
+          if ($LASTEXITCODE -ne 0) {
+            Get-ChildItem -Path "$env:LOCALAPPDATA\deepseekcode\logs" -Recurse -Filter app.log -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Tail 80 }
+            exit $LASTEXITCODE
+          }
+          cargo test -p deepseekcode-server --test openapi_contract
+      - name: Test desktop (logic)
+        env:
+          DEEPSEEKCODE_DISABLE_KEYRING: "1"
+        run: cargo test -p deepseekcode-desktop
+      - name: Check desktop
+        run: cargo check -p deepseekcode-desktop
+      - name: Workspace tests
+        env:
+          DEEPSEEKCODE_DISABLE_KEYRING: "1"
+        run: cargo test --workspace --exclude deepseekcode-desktop
+      - name: Bench smoke (startup)
+        env:
+          DEEPSEEKCODE_DISABLE_KEYRING: "1"
+        run: cargo bench -p deepseekcode-sdk --bench startup -- --nocapture
+      - name: Bench smoke (sse_latency)
+        env:
+          DEEPSEEKCODE_DISABLE_KEYRING: "1"
+        run: cargo bench -p deepseekcode-sdk --bench sse_latency -- --nocapture
+      - name: Bench smoke (memory)
+        env:
+          DEEPSEEKCODE_DISABLE_KEYRING: "1"
+        run: cargo bench -p deepseekcode-sdk --bench memory -- --nocapture
+
+  check-unix:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build native plugin example
+        run: cargo build -p hello-hook --release
+      - name: Test (no desktop runtime)
+        env:
+          DEEPSEEKCODE_DISABLE_KEYRING: "1"
+        run: |
+          cargo test -p deepseekcode-types -p deepseekcode-schema -p deepseekcode-config -p deepseekcode-storage -p deepseekcode-llm -p deepseekcode-core -p deepseekcode-plugin -p deepseekcode-telemetry -p deepseekcode-server -p deepseekcode-sdk -p deepseekcode-cli || {
+            find "${HOME}/.local/share/deepseekcode/logs" -name app.log 2>/dev/null | tail -1 | xargs -r tail -n 80
+            exit 1
+          }
+          cargo test -p deepseekcode-server --test openapi_contract
+      - name: Test desktop (logic)
+        env:
+          DEEPSEEKCODE_DISABLE_KEYRING: "1"
+        run: cargo test -p deepseekcode-desktop
+      - name: Workspace tests
+        env:
+          DEEPSEEKCODE_DISABLE_KEYRING: "1"
+        run: cargo test --workspace --exclude deepseekcode-desktop
+      - name: Bench smoke (file_tree)
+        run: cargo bench -p deepseekcode-sdk --bench file_tree -- --nocapture
+      - name: Bench smoke (sse_latency)
+        env:
+          DEEPSEEKCODE_DISABLE_KEYRING: "1"
+        run: cargo bench -p deepseekcode-sdk --bench sse_latency -- --nocapture
+      - name: Bench smoke (memory)
+        env:
+          DEEPSEEKCODE_DISABLE_KEYRING: "1"
+        run: cargo bench -p deepseekcode-sdk --bench memory -- --nocapture
+      - name: Check desktop compiles
+        run: cargo check -p deepseekcode-desktop

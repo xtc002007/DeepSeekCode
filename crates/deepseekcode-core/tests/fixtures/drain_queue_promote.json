@@ -1,0 +1,11 @@
+{
+  "name": "drain_queue_promote",
+  "given": { "session_exists": true, "pending_inbox": 0 },
+  "when": {
+    "action": "runner.drain_queue",
+    "prompt": "first prompt",
+    "delivery": "queue",
+    "resume": false
+  },
+  "then": { "inbox_count": 0, "history_count": 2, "events": [] }
+}

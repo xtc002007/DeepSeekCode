@@ -1,0 +1,6 @@
+{
+  "name": "mandatory_context_unavailable",
+  "given": { "session_exists": true, "pending_inbox": 1 },
+  "when": { "action": "context.unavailable", "prompt": "blocked prompt", "delivery": "queue", "resume": false },
+  "then": { "inbox_count": 1, "history_count": 0, "events": [] }
+}

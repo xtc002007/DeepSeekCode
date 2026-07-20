@@ -1,0 +1,6 @@
+{
+  "name": "context_baseline_available",
+  "given": { "session_exists": true, "pending_inbox": 0 },
+  "when": { "action": "context.baseline", "prompt": "", "delivery": "queue", "resume": false },
+  "then": { "inbox_count": 0, "history_count": 0, "events": [] }
+}

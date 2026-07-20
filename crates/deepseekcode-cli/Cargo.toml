@@ -1,0 +1,26 @@
+[package]
+name = "deepseekcode-cli"
+description = "Command-line interface for DeepSeekCode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "deepseekcode"
+path = "src/main.rs"
+
+[dependencies]
+deepseekcode-types = { workspace = true }
+deepseekcode-schema = { workspace = true }
+deepseekcode-config = { workspace = true }
+deepseekcode-telemetry = { workspace = true }
+deepseekcode-sdk = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+camino = { workspace = true }
+anyhow = { workspace = true }
+dirs = "6.0"
+serde_json = { workspace = true }
+futures = { workspace = true }
+deepseekcode-server = { workspace = true }

@@ -1,0 +1,40 @@
+[package]
+name = "deepseekcode-core"
+description = "Core domain logic: session engine, tools, agents, system context"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+deepseekcode-types = { workspace = true }
+deepseekcode-schema = { workspace = true }
+deepseekcode-config = { workspace = true }
+deepseekcode-telemetry = { workspace = true }
+deepseekcode-storage = { workspace = true }
+deepseekcode-llm = { workspace = true }
+deepseekcode-plugin = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+camino = { workspace = true }
+glob = { workspace = true }
+ignore = { workspace = true }
+walkdir = { workspace = true }
+similar = { workspace = true }
+ulid = { workspace = true }
+keyring = { workspace = true }
+sqlx = { workspace = true }
+reqwest = { workspace = true }
+dirs = "6.0"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }
+wiremock = { workspace = true }
+futures = { workspace = true }

@@ -1,0 +1,56 @@
+[package]
+name = "deepseekcode-desktop"
+description = "DeepSeekCode desktop application built with GPUI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "deepseekcode"
+path = "src/main.rs"
+
+[lib]
+name = "deepseekcode_desktop"
+path = "src/lib.rs"
+
+[build-dependencies]
+winres = "0.1"
+image = "0.25"
+ico = "0.3"
+
+[dependencies]
+deepseekcode-types = { workspace = true }
+deepseekcode-schema = { workspace = true }
+deepseekcode-config = { workspace = true }
+deepseekcode-telemetry = { workspace = true }
+deepseekcode-sdk = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+camino = { workspace = true }
+futures = { workspace = true }
+chrono = { workspace = true }
+similar = { workspace = true }
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", rev = "57261fef89db4ba6767617e74324c682754ff3f4" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui_platform", rev = "57261fef89db4ba6767617e74324c682754ff3f4" }
+rust-embed = { version = "8.5", features = ["interpolate-folder-path"] }
+eventsource-stream = { workspace = true }
+rfd = "0.15"
+tokio-tungstenite = "0.26"
+unicode-segmentation = "1.12"
+pulldown-cmark = { workspace = true }
+dirs = "6.0"
+keyring = { workspace = true }
+tempfile = { workspace = true }
+ropey = "1.6"
+tree-sitter = "0.24"
+tree-sitter-rust = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-typescript = "0.23"
+alacritty_terminal = { workspace = true }
+streaming-iterator = "0.1"

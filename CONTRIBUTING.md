@@ -1,0 +1,53 @@
+# Contributing to DeepSeekCode
+
+Thank you for your interest in contributing. This project is a Rust workspace with a GPUI desktop client, CLI, and embeddable SDK.
+
+## Development Setup
+
+```bash
+cargo test -p deepseekcode-core
+cargo run -p deepseekcode-cli -- serve --directory . --port 4096
+cargo run -p deepseekcode-desktop   # requires GPUI / platform deps
+```
+
+See [AGENTS.md](AGENTS.md) for architecture and session-runtime conventions. Public architecture: [docs/architecture.md](docs/architecture.md).
+
+## Before You Open a PR
+
+1. **Format and lint**
+
+   ```bash
+   cargo fmt --all
+   cargo clippy --all-targets -- -D warnings
+   ```
+
+2. **Run tests** (keyring disabled in CI)
+
+   ```bash
+   $env:DEEPSEEKCODE_DISABLE_KEYRING = "1"   # PowerShell
+   cargo test --workspace
+   ```
+
+3. **Secret scan** (required for release-related changes)
+
+   ```powershell
+   .\scripts\release\scan-secrets.ps1
+   ```
+
+4. **Do not commit**
+   - `.env`, `*.db`, `signing/*.key`, `signing/*.pfx`
+   - `third-party-code/` (local upstream reference only — see [SECURITY.md](SECURITY.md))
+   - Real API keys in `deepseekcode.jsonc`
+
+5. **Before first public release**, set `repository` in root `Cargo.toml` to your GitHub URL.
+
+## Commit Messages
+
+Use clear, imperative subjects focused on **why**:
+
+- `fix: preserve inbox on interrupt per session-runtime spec`
+- `feat: default session export sanitization to true`
+
+## License
+
+By contributing, you agree that your contributions are licensed under the [MIT License](LICENSE).

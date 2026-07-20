@@ -1,0 +1,29 @@
+# cargo-dist workspace config — Channel A (CLI).
+# Disabled via packaging/channels.toml until CLI binary distribution is ready.
+# Run `dist init --yes` after enabling channels.cli in packaging/channels.toml.
+
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.31.0"
+ci = "github"
+# No targets while CLI channel is disabled; CI reads packaging/channels.toml instead.
+targets = []
+installers = ["shell", "powershell"]
+install-updater = false
+github-attestations = true
+pr-run-mode = "skip"
+hosting = "github"
+
+# When CLI channel is enabled, uncomment:
+# targets = [
+#     "x86_64-pc-windows-msvc",
+#     "x86_64-apple-darwin",
+#     "aarch64-apple-darwin",
+#     "x86_64-unknown-linux-gnu",
+# ]
+# pr-run-mode = "plan"
+
+[dist.bin-aliases]
+"deepseekcode" = ["deepseekcode-cli"]

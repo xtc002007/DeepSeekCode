@@ -1,0 +1,57 @@
+{
+  // Copy to deepseekcode.jsonc or .deepseekcode/deepseekcode.jsonc
+  // NEVER commit real API keys — use environment variables instead.
+
+  "model": {
+    "provider": "deepseek",
+    "id": "deepseek-chat"
+  },
+
+  "providers": {
+    "deepseek": {
+      // Prefer: export DEEPSEEK_API_KEY=your-key
+      // "api_key": "YOUR_API_KEY_HERE",
+      "base_url": "https://api.deepseek.com/v1"
+    },
+    "openai": {
+      // Prefer: export OPENAI_API_KEY=your-key
+      "base_url": "https://api.openai.com/v1"
+    }
+  },
+
+  "policy_mode": "interactive",
+
+  "policy": {
+    "rules": {
+      "read": { "*": "permit", "*.env": "block" },
+      "write": { "*": "prompt" },
+      "bash": { "*": "prompt" }
+    }
+  },
+
+  "logging": {
+    "level": "info",
+    "console": true,
+    "file": true,
+    "audit": {
+      "enabled": true,
+      "include_tool_output": false,
+      "include_prompts": false
+    }
+  },
+
+  "websearch": {
+    // "provider": "brave" requires BRAVE_SEARCH_API_KEY env var
+    "provider": "duckduckgo"
+  },
+
+  "mcp": {
+    "servers": {
+      // "example": {
+      //   "command": "npx",
+      //   "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"],
+      //   "enabled": true
+      // }
+    }
+  }
+}

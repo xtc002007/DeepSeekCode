@@ -1,0 +1,42 @@
+[package]
+name = "deepseekcode-server"
+description = "Axum HTTP server with SSE and WebSocket for DeepSeekCode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+deepseekcode-types = { workspace = true }
+deepseekcode-schema = { workspace = true }
+deepseekcode-config = { workspace = true }
+deepseekcode-core = { workspace = true }
+deepseekcode-plugin = { workspace = true }
+deepseekcode-storage = { workspace = true }
+deepseekcode-telemetry = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+utoipa = { workspace = true }
+ignore = { workspace = true }
+portable-pty = { workspace = true }
+chrono = { workspace = true }
+camino = { workspace = true }
+similar = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }
+base64 = "0.22"
+ulid = { workspace = true }
+
+[dev-dependencies]
+deepseekcode-core = { workspace = true }
+deepseekcode-config = { workspace = true }
+reqwest = { workspace = true }
+tempfile = { workspace = true }
+wiremock = { workspace = true }
+futures = { workspace = true }
+deepseekcode-schema = { workspace = true }

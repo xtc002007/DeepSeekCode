@@ -1,0 +1,11 @@
+{
+  "name": "steer_mid_turn",
+  "given": { "session_exists": true, "pending_inbox": 0 },
+  "when": {
+    "action": "runner.steer_mid_turn",
+    "prompt": "urgent mid-turn steer",
+    "delivery": "steer",
+    "resume": false
+  },
+  "then": { "inbox_count": 1, "history_count": 1, "events": [] }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "activity_turn_summary",
+  "given": { "session_exists": true, "pending_inbox": 0 },
+  "when": { "action": "activity.project", "prompt": "", "delivery": "queue", "resume": false },
+  "then": { "inbox_count": 0, "history_count": 0, "events": ["provider.turn.started", "session.idle"] }
+}

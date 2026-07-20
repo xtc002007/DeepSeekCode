@@ -1,0 +1,6 @@
+{
+  "name": "revert_stage",
+  "given": { "session_exists": true, "pending_inbox": 0 },
+  "when": { "action": "sessions.revert_stage", "prompt": "edit file", "delivery": "queue", "resume": false },
+  "then": { "inbox_count": 0, "history_count": 1, "events": [] }
+}

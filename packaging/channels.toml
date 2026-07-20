@@ -1,0 +1,76 @@
+# DeepSeekCode release channels — single source of truth for CI and local scripts.
+# Three independent channels share workspace version (Cargo.toml [workspace.package].version).
+
+[channels.cli]
+# cargo-dist: cross-platform CLI archives + shell/powershell installers.
+enabled = false
+tool = "cargo-dist"
+package = "deepseekcode-cli"
+binary = "deepseekcode"
+# Targets to build when enabled (Rust triple syntax):
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+]
+
+[channels.desktop]
+# GPUI desktop application — platform-specific installers.
+enabled = true
+package = "deepseekcode-desktop"
+binary = "deepseekcode"
+
+[[channels.desktop.platforms]]
+id = "windows-x64"
+enabled = true
+rust_target = "x86_64-pc-windows-msvc"
+runner = "windows-latest"
+installer = "nsis"
+
+[[channels.desktop.platforms]]
+id = "macos-x64"
+enabled = false
+rust_target = "x86_64-apple-darwin"
+runner = "macos-latest"
+installer = "dmg"
+
+[[channels.desktop.platforms]]
+id = "macos-arm64"
+enabled = false
+rust_target = "aarch64-apple-darwin"
+runner = "macos-latest"
+installer = "dmg"
+
+[[channels.desktop.platforms]]
+id = "linux-x64"
+enabled = false
+rust_target = "x86_64-unknown-linux-gnu"
+runner = "ubuntu-latest"
+installer = "deb"
+
+[channels.crates]
+# release-plz: publish library crates to crates.io (binary crates stay publish=false).
+enabled = false
+tool = "release-plz"
+packages = [
+    "deepseekcode-types",
+    "deepseekcode-schema",
+    "deepseekcode-config",
+    "deepseekcode-telemetry",
+    "deepseekcode-storage",
+    "deepseekcode-llm",
+    "deepseekcode-core",
+    "deepseekcode-plugin",
+    "deepseekcode-server",
+    "deepseekcode-sdk",
+    "deepseekcode-cli",
+]
+
+[signing]
+# minisign ed25519 — private key in signing/ (gitignored), public key committed for verification.
+private_key_path = "signing/deepseekcode.key"
+public_key_path = "signing/deepseekcode.key.pub"
+# Optional Authenticode for Windows installer trust (PFX base64 in CI secret).
+authenticode_secret = "DEEPSEEKCODE_WINDOWS_PFX_BASE64"
+authenticode_password_secret = "DEEPSEEKCODE_WINDOWS_PFX_PASSWORD"

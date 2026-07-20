@@ -1,0 +1,20 @@
+[package]
+name = "deepseekcode-config"
+description = "Configuration loading for DeepSeekCode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+deepseekcode-types = { workspace = true }
+deepseekcode-schema = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+jsonc-parser = { workspace = true }
+thiserror = { workspace = true }
+camino = { workspace = true }
+dirs = "6.0"
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

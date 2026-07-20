@@ -1,0 +1,21 @@
+[package]
+name = "deepseekcode-plugin"
+description = "Plugin host with Rust native and WASM sandbox support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+deepseekcode-types = { workspace = true }
+deepseekcode-schema = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+wasmtime = { workspace = true }
+tracing = { workspace = true }
+deepseekcode-telemetry = { workspace = true }
+libloading = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

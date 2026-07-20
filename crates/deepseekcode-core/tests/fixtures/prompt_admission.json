@@ -1,0 +1,18 @@
+{
+  "name": "prompt_admission",
+  "given": {
+    "session_exists": true,
+    "pending_inbox": 0
+  },
+  "when": {
+    "action": "sessions.prompt",
+    "prompt": "hello",
+    "delivery": "queue",
+    "resume": false
+  },
+  "then": {
+    "inbox_count": 1,
+    "history_count": 0,
+    "events": ["prompt.admitted"]
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "tool_metadata_diff",
+  "given": { "session_exists": true, "pending_inbox": 0 },
+  "when": { "action": "tool.completed", "prompt": "", "delivery": "queue", "resume": false },
+  "then": { "inbox_count": 0, "history_count": 0, "events": ["tool.completed"] }
+}

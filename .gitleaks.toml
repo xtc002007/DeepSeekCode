@@ -1,0 +1,27 @@
+title = "DeepSeekCode gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known false positives"
+paths = [
+  '''(?i)deepseekcode-telemetry/src/redact\.rs''',
+  '''(?i)credentials_store\.rs''',
+  '''(?i)integration_test\.rs''',
+  '''(?i)\.env\.example''',
+  '''(?i)deepseekcode\.jsonc\.example''',
+  '''(?i)SECURITY\.md''',
+  '''(?i)docs/packaging\.md''',
+  '''(?i)signing/README\.md''',
+]
+regexes = [
+  '''sk-test-secret''',
+  '''sk-persist-me''',
+  '''sk-\[REDACTED\]''',
+  '''test-key''',
+  '''YOUR_API_KEY_HERE''',
+  '''your-key''',
+  '''your-org/deepseekcode''',
+  '''your-password-or-empty''',
+]

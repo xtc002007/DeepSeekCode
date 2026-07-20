@@ -1,0 +1,75 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+*.pdb
+
+# SQLite (session / permission stores)
+**/*.db
+**/*.db-*
+
+# DeepSeekCode local runtime (generated)
+.deepseekcode/snapshots/
+.deepseekcode/tool-output/
+.deepseekcode/worktrees/
+.deepseekcode/plugins/*.wasm
+.deepseekcode/plugins/*.dll
+.deepseekcode/plugins/*.so
+.deepseekcode/plugins/*.dylib
+
+# CodeVibe legacy runtime (migration compat)
+.codevibe/snapshots/
+.codevibe/tool-output/
+.codevibe/worktrees/
+
+# Secrets & local env
+.env
+.env.*
+!.env.example
+
+# Release signing (private keys only — public .pub may be committed)
+signing/*.key
+signing/*.pfx
+!signing/README.md
+!signing/*.key.pub
+
+# Desktop packaging staging (generated)
+packaging/desktop/windows/staging/
+packaging/desktop/windows/dist/
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# Editors & IDEs
+.idea/
+.vscode/
+.cursor/
+*.swp
+*.swo
+*~
+
+# Python (test fixtures, scripts)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Profiling / coverage
+*.profraw
+*.profdata
+coverage/
+*.gcno
+*.gcda
+
+# Cursor agent plans (local scratch)
+*.plan.md
+vibecodor-update-plan.md
+
+# Secret scan tooling (downloaded by scripts/release/scan-secrets.ps1)
+.tools/

@@ -1,0 +1,6 @@
+{
+  "name": "steer_delivery_pending",
+  "given": { "session_exists": true, "pending_inbox": 0 },
+  "when": { "action": "sessions.prompt", "prompt": "steer me", "delivery": "steer", "resume": false },
+  "then": { "inbox_count": 1, "history_count": 0, "events": [] }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "compaction_epoch",
+  "given": { "session_exists": true, "pending_inbox": 0 },
+  "when": { "action": "context.compaction_epoch", "prompt": "", "delivery": "queue", "resume": false },
+  "then": { "inbox_count": 0, "history_count": 0, "events": [] }
+}

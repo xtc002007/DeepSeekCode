@@ -1,0 +1,6 @@
+{
+  "name": "double_queue",
+  "given": { "session_exists": true, "pending_inbox": 0 },
+  "when": { "action": "sessions.prompt_double", "prompt": "first", "delivery": "queue", "resume": false },
+  "then": { "inbox_count": 2, "history_count": 0, "events": [] }
+}

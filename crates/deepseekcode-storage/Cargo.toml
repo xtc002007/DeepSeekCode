@@ -1,0 +1,29 @@
+[package]
+name = "deepseekcode-storage"
+description = "SQLite persistence and event store for DeepSeekCode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+deepseekcode-types = { workspace = true }
+deepseekcode-schema = { workspace = true }
+sqlx = { workspace = true }
+refinery = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+deepseekcode-telemetry = { workspace = true }
+camino = { workspace = true }
+keyring = { workspace = true }
+aes-gcm = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+ulid = { workspace = true }
+getrandom = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

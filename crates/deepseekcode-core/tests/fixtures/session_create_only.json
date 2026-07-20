@@ -1,0 +1,6 @@
+{
+  "name": "session_create_only",
+  "given": { "session_exists": false, "pending_inbox": 0 },
+  "when": { "action": "sessions.create", "prompt": "", "delivery": "queue", "resume": false },
+  "then": { "inbox_count": 0, "history_count": 0, "events": [] }
+}

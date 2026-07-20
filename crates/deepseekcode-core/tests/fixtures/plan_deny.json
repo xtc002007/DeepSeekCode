@@ -1,0 +1,6 @@
+{
+  "name": "plan_deny",
+  "given": { "session_exists": true, "pending_inbox": 0 },
+  "when": { "action": "permission.plan_deny", "prompt": "", "delivery": "queue", "resume": false },
+  "then": { "inbox_count": 0, "history_count": 0, "events": [] }
+}

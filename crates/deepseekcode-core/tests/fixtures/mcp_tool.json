@@ -1,0 +1,6 @@
+{
+  "name": "mcp_tool",
+  "given": { "session_exists": false, "pending_inbox": 0 },
+  "when": { "action": "mcp.tool_bridge", "prompt": "", "delivery": "queue", "resume": false },
+  "then": { "inbox_count": 0, "history_count": 0, "events": [] }
+}

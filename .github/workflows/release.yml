@@ -1,0 +1,237 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag (e.g. v0.1.0)"
+        required: true
+        type: string
+      draft:
+        description: "Publish as draft release"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+  RUST_TARGET_WINDOWS: x86_64-pc-windows-msvc
+
+jobs:
+  # ── Channel config (packaging/channels.toml) ───────────────────────────────
+  channels:
+    name: Read release channels
+    runs-on: ubuntu-latest
+    outputs:
+      cli_enabled: ${{ steps.read.outputs.cli_enabled }}
+      desktop_enabled: ${{ steps.read.outputs.desktop_enabled }}
+      desktop_windows_enabled: ${{ steps.read.outputs.desktop_windows_enabled }}
+      crates_enabled: ${{ steps.read.outputs.crates_enabled }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse packaging/channels.toml
+        id: read
+        shell: pwsh
+        run: |
+          $c = & ./scripts/release/read-channels.ps1
+          echo "cli_enabled=$($c.CliEnabled.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          echo "desktop_enabled=$($c.DesktopEnabled.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          echo "desktop_windows_enabled=$($c.DesktopWindowsEnabled.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          echo "crates_enabled=$($c.CratesEnabled.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+
+  validate:
+    name: Validate release version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - name: Check tag matches Cargo.toml
+        shell: pwsh
+        run: ./scripts/release/validate-version.ps1 -TagName "${{ env.RELEASE_TAG }}"
+
+  # ── Channel B: Desktop (Windows NSIS) — active ─────────────────────────────
+  desktop-windows:
+    name: Desktop Windows (NSIS)
+    needs: [channels, validate]
+    if: needs.channels.outputs.desktop_windows_enabled == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.RUST_TARGET_WINDOWS }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: "release-desktop-windows"
+
+      - name: Extract version
+        id: version
+        shell: pwsh
+        run: |
+          $ver = "${{ env.RELEASE_TAG }}" -replace '^v', ''
+          echo "version=$ver" >> $env:GITHUB_OUTPUT
+
+      - name: Build desktop release binary
+        run: cargo build --release -p deepseekcode-desktop --target ${{ env.RUST_TARGET_WINDOWS }}
+
+      - name: Install NSIS
+        uses: negrutiu/nsis-install@v2
+
+      - name: Install minisign
+        run: cargo install minisign --locked
+
+      - name: Require release signing secrets
+        shell: pwsh
+        env:
+          SIGNING_KEY: ${{ secrets.DEEPSEEKCODE_SIGNING_PRIVATE_KEY }}
+        run: |
+          if (-not $env:SIGNING_KEY) {
+            Write-Error "Repository secret DEEPSEEKCODE_SIGNING_PRIVATE_KEY is missing. Run scripts/release/set-github-secrets.ps1"
+          }
+
+      - name: Build NSIS installer
+        shell: pwsh
+        env:
+          DEEPSEEKCODE_SIGNING_PRIVATE_KEY: ${{ secrets.DEEPSEEKCODE_SIGNING_PRIVATE_KEY }}
+          DEEPSEEKCODE_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.DEEPSEEKCODE_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          ./packaging/desktop/windows/build-installer.ps1 -Version "${{ steps.version.outputs.version }}" -SkipSign
+          $installer = "packaging/desktop/windows/dist/DeepSeekCode-${{ steps.version.outputs.version }}-x64-setup.exe"
+          ./scripts/release/sign-artifact.ps1 -ArtifactPath $installer -Required
+
+      - name: Authenticode sign installer (optional)
+        shell: pwsh
+        env:
+          DEEPSEEKCODE_WINDOWS_PFX_BASE64: ${{ secrets.DEEPSEEKCODE_WINDOWS_PFX_BASE64 }}
+          DEEPSEEKCODE_WINDOWS_PFX_PASSWORD: ${{ secrets.DEEPSEEKCODE_WINDOWS_PFX_PASSWORD }}
+        run: |
+          $installer = "packaging/desktop/windows/dist/DeepSeekCode-${{ steps.version.outputs.version }}-x64-setup.exe"
+          ./scripts/release/sign-authenticode.ps1 -ArtifactPath $installer
+
+      - name: Create updater manifest
+        shell: pwsh
+        env:
+          DEEPSEEKCODE_SIGNING_PUBLIC_KEY: ${{ secrets.DEEPSEEKCODE_SIGNING_PUBLIC_KEY }}
+        run: |
+          $ver = "${{ steps.version.outputs.version }}"
+          $installer = "DeepSeekCode-$ver-x64-setup.exe"
+          $hash = (Get-Content "packaging/desktop/windows/dist/DeepSeekCode-$ver-x64-setup.sha256" -Raw).Split()[0]
+          ./scripts/release/create-updater-manifest.ps1 `
+            -Version $ver `
+            -InstallerName $installer `
+            -Sha256 $hash `
+            -OutputPath "packaging/desktop/windows/dist/latest.json"
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows-x64
+          path: |
+            packaging/desktop/windows/dist/DeepSeekCode-*-x64-setup.exe
+            packaging/desktop/windows/dist/DeepSeekCode-*-x64-setup.exe.minisig
+            packaging/desktop/windows/dist/DeepSeekCode-*-x64-setup.sha256
+            packaging/desktop/windows/dist/latest.json
+          if-no-files-found: error
+
+  # ── Channel A: CLI (cargo-dist) — configured, disabled ─────────────────────
+  cli-dist:
+    name: CLI (cargo-dist)
+    needs: [channels, validate]
+    if: needs.channels.outputs.cli_enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - name: CLI channel disabled or not implemented in CI yet
+        run: |
+          echo "Enable channels.cli in packaging/channels.toml and run: dist init --yes"
+          exit 1
+
+  # ── Channel C: crates.io (release-plz) — configured, disabled ──────────────
+  crates-publish:
+    name: Crates (release-plz)
+    needs: [channels, validate]
+    if: needs.channels.outputs.crates_enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - name: Crates channel disabled
+        run: |
+          echo "Enable channels.crates in packaging/channels.toml and configure release-plz.toml publish flags"
+          exit 1
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [channels, validate, desktop-windows]
+    if: |
+      always() &&
+      needs.validate.result == 'success' &&
+      (needs.desktop-windows.result == 'success' || needs.desktop-windows.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f CHANGELOG.md ]; then
+            sed -n "/^## .*${RELEASE_TAG#v}/,/^## /p" CHANGELOG.md | head -n -1 > release-notes.md || true
+          fi
+          if [ ! -s release-notes.md ]; then
+            printf '## DeepSeekCode %s\n\n- Windows desktop installer (NSIS)\n' "${RELEASE_TAG}" > release-notes.md
+          fi
+
+      - name: Collect release files
+        id: files
+        shell: bash
+        run: |
+          set -euo pipefail
+          find release-assets -type f | sort > release-files.txt
+          if [ ! -s release-files.txt ]; then
+            echo "::error::No release artifacts found"
+            exit 1
+          fi
+          {
+            echo 'paths<<EOF'
+            cat release-files.txt
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: DeepSeekCode ${{ env.RELEASE_TAG }}
+          body_path: release-notes.md
+          draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
+          files: ${{ steps.files.outputs.paths }}
