@@ -379,7 +379,7 @@ fn agent_allowed_tools(
             "plan_complete".into(),
         ],
         _ => {
-            let mut tools = vec![
+            let base = vec![
                 "read".into(),
                 "write".into(),
                 "edit".into(),
@@ -399,8 +399,15 @@ fn agent_allowed_tools(
                 "lsp".into(),
             ];
             #[cfg(windows)]
-            tools.push("powershell".into());
-            tools
+            {
+                let mut tools = base;
+                tools.push("powershell".into());
+                tools
+            }
+            #[cfg(not(windows))]
+            {
+                base
+            }
         }
     }
 }

@@ -1,0 +1,7 @@
+﻿cargo :     Finished `dev` profile [optimized + debuginfo] target(s) in 35.24s
+所在位置 C:\Users\Administrator\AppData\Local\Temp\ps-script-5b875377-38f0-4560-806d-26f736be23ef.ps1:7 字符: 80
++ ... o fmt --all }; cargo clippy --all-targets -- -D warnings 2>&1 | Out-F ...
++                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `d...et(s) in 35.24s:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
