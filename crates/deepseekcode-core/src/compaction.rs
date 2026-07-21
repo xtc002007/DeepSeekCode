@@ -187,8 +187,7 @@ async fn compact_overflow(
         return Ok(false);
     }
 
-    let summary_prompt =
-        build_summary_prompt(ctx, previous_summary.as_deref(), &selected).await;
+    let summary_prompt = build_summary_prompt(ctx, previous_summary.as_deref(), &selected).await;
     let summary_output = output_tokens.min(SUMMARY_OUTPUT_TOKENS);
     if estimate_str(&summary_prompt) > context_window.saturating_sub(summary_output) {
         tracing::warn!(
@@ -533,7 +532,10 @@ fn truncate_for_summary(value: &str) -> String {
     } else {
         format!(
             "{}…\n[truncated]",
-            value.chars().take(TOOL_OUTPUT_MAX_CHARS).collect::<String>()
+            value
+                .chars()
+                .take(TOOL_OUTPUT_MAX_CHARS)
+                .collect::<String>()
         )
     }
 }

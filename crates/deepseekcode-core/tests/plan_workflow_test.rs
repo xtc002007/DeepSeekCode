@@ -78,11 +78,7 @@ async fn plan_agent_permits_absolute_write_in_plan_dir() {
     let project = std::env::temp_dir().join("deepseekcode-plan-policy-test");
     let _ = std::fs::create_dir_all(&project);
     let project_dir = project.to_string_lossy().into_owned();
-    let permissions = Arc::new(PolicyService::new(
-        &config,
-        project_dir.clone(),
-        None,
-    ));
+    let permissions = Arc::new(PolicyService::new(&config, project_dir.clone(), None));
     let session_id = SessionId::new();
     let abs = project
         .join(".deepseekcode")
@@ -145,7 +141,10 @@ async fn plan_complete_discovers_existing_plan_dir() {
     assert_eq!(output["plan_id"], "UI-redesign");
     assert_eq!(output["status"], "completed");
 
-    let tail = events.tail_filtered(0, 100, Some(session_id)).await.unwrap();
+    let tail = events
+        .tail_filtered(0, 100, Some(session_id))
+        .await
+        .unwrap();
     assert!(tail.iter().any(|e| e.kind == EventKind::PlanCompleted));
 }
 
@@ -190,6 +189,9 @@ async fn plan_complete_emits_event_and_validates_file() {
     .await;
     assert_eq!(output["status"], "completed");
 
-    let tail = events.tail_filtered(0, 100, Some(session_id)).await.unwrap();
+    let tail = events
+        .tail_filtered(0, 100, Some(session_id))
+        .await
+        .unwrap();
     assert!(tail.iter().any(|e| e.kind == EventKind::PlanCompleted));
 }

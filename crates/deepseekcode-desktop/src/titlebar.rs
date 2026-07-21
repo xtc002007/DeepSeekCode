@@ -67,26 +67,18 @@ impl TitlebarView {
                                     .flex()
                                     .items_center()
                                     .gap_1()
-                                    .child(
-                                        div()
-                                            .w(px(8.))
-                                            .h(px(8.))
-                                            .rounded_full()
-                                            .bg(if health_ok {
-                                                theme.success
-                                            } else {
-                                                theme.error
-                                            }),
-                                    )
+                                    .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(
+                                        if health_ok {
+                                            theme.success
+                                        } else {
+                                            theme.error
+                                        },
+                                    ))
                                     .child(
                                         div()
                                             .text_xs()
                                             .text_color(theme.text_muted)
-                                            .child(if health_ok {
-                                                "Connected"
-                                            } else {
-                                                "Offline"
-                                            }),
+                                            .child(if health_ok { "Connected" } else { "Offline" }),
                                     ),
                             )
                             .child(
@@ -131,23 +123,32 @@ fn render_window_controls(window: &Window, theme: &crate::theme::ThemeTokens) ->
 }
 
 #[cfg(target_os = "windows")]
-fn render_windows_controls(
-    window: &Window,
-    theme: &crate::theme::ThemeTokens,
-) -> impl IntoElement {
+fn render_windows_controls(window: &Window, theme: &crate::theme::ThemeTokens) -> impl IntoElement {
     div()
         .id("windows-window-controls")
         .font_family("Segoe Fluent Icons")
         .flex()
         .flex_row()
         .h(px(36.))
-        .child(caption_button("minimize", "\u{e921}", WindowControlArea::Min, false, theme))
+        .child(caption_button(
+            "minimize",
+            "\u{e921}",
+            WindowControlArea::Min,
+            false,
+            theme,
+        ))
         .child(if window.is_maximized() {
             caption_button("restore", "\u{e923}", WindowControlArea::Max, false, theme)
         } else {
             caption_button("maximize", "\u{e922}", WindowControlArea::Max, false, theme)
         })
-        .child(caption_button("close", "\u{e8bb}", WindowControlArea::Close, true, theme))
+        .child(caption_button(
+            "close",
+            "\u{e8bb}",
+            WindowControlArea::Close,
+            true,
+            theme,
+        ))
 }
 
 #[cfg(target_os = "windows")]
@@ -170,7 +171,9 @@ fn caption_button(
         .text_color(theme.text_secondary)
         .hover(|style| {
             if is_close {
-                style.bg(theme.window_close_hover).text_color(theme.text_on_accent)
+                style
+                    .bg(theme.window_close_hover)
+                    .text_color(theme.text_on_accent)
             } else {
                 style.bg(theme.bg_hover)
             }

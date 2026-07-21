@@ -31,7 +31,11 @@ impl SigV4Auth {
         DeepSeekCodeError::Llm("SigV4 authentication is not supported in this build".into())
     }
 
-    pub fn apply_or_error(&self, _builder: RequestBuilder, _api_key: &str) -> Result<RequestBuilder, DeepSeekCodeError> {
+    pub fn apply_or_error(
+        &self,
+        _builder: RequestBuilder,
+        _api_key: &str,
+    ) -> Result<RequestBuilder, DeepSeekCodeError> {
         Err(Self::unsupported())
     }
 }
@@ -54,7 +58,11 @@ impl OAuthAuth {
         DeepSeekCodeError::Llm("OAuth authentication is not supported in this build".into())
     }
 
-    pub fn apply_or_error(&self, _builder: RequestBuilder, _token: &str) -> Result<RequestBuilder, DeepSeekCodeError> {
+    pub fn apply_or_error(
+        &self,
+        _builder: RequestBuilder,
+        _token: &str,
+    ) -> Result<RequestBuilder, DeepSeekCodeError> {
         Err(Self::unsupported())
     }
 }

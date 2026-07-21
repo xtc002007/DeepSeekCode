@@ -55,17 +55,16 @@ pub fn token_usage_from_payload(payload: &Value) -> Option<(u32, u32, u32)> {
 }
 
 /// Latest context fill from session events (`input_tokens` on the most recent completed message).
-pub fn latest_context_usage_from_events(events: &[deepseekcode_schema::event::EventEnvelope]) -> Option<(u32, u32, u32)> {
+pub fn latest_context_usage_from_events(
+    events: &[deepseekcode_schema::event::EventEnvelope],
+) -> Option<(u32, u32, u32)> {
     use deepseekcode_schema::event::EventKind;
-    events
-        .iter()
-        .rev()
-        .find_map(|event| {
-            if event.kind != EventKind::MessageCompleted {
-                return None;
-            }
-            token_usage_from_payload(&event.payload)
-        })
+    events.iter().rev().find_map(|event| {
+        if event.kind != EventKind::MessageCompleted {
+            return None;
+        }
+        token_usage_from_payload(&event.payload)
+    })
 }
 
 pub fn parse_unified_diff_rows(hunks: &str) -> usize {
@@ -168,10 +167,7 @@ pub fn sessions_for_project(
 pub fn extract_tool_path(tool_name: &str, input: &Value) -> Option<String> {
     let input = &deepseekcode_types::normalize_tool_arguments(input);
     match tool_name {
-        "read" | "write" | "edit" => input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(String::from),
+        "read" | "write" | "edit" => input.get("path").and_then(|v| v.as_str()).map(String::from),
         _ => None,
     }
 }
@@ -182,8 +178,8 @@ pub fn event_affects_activity_tree(kind: EventKind) -> bool {
 }
 
 pub use deepseekcode_sdk::{
-    patch_assistant_message_completed, patch_assistant_message_delta, patch_running_tool_leaf_preview,
-    patch_tool_completed, patch_tool_started,
+    patch_assistant_message_completed, patch_assistant_message_delta,
+    patch_running_tool_leaf_preview, patch_tool_completed, patch_tool_started,
 };
 
 /// Planned right-panel route for an activity leaf click (unit-testable).
@@ -226,19 +222,16 @@ pub fn plan_activity_click_route(
             | ActivityKind::Edit
             | ActivityKind::ApplyPatch,
             ActivityTargetKind::File {
-                path,
-                line_start,
-                ..
+                path, line_start, ..
             },
         ) => ActivityClickRoute::Editor {
             path: path.clone(),
             line: *line_start,
         },
         (ActivityKind::Grep, ActivityTargetKind::Pattern { .. }) => {
-            if let (Some(path), Some(line)) = (
-                meta.first_match_path.as_deref(),
-                meta.first_match_line,
-            ) {
+            if let (Some(path), Some(line)) =
+                (meta.first_match_path.as_deref(), meta.first_match_line)
+            {
                 ActivityClickRoute::Editor {
                     path: path.to_string(),
                     line: Some(line),
@@ -267,31 +260,32 @@ pub fn plan_activity_click_route(
             }
         }
         (ActivityKind::WebFetch, ActivityTargetKind::Url { url })
-        | (ActivityKind::WebSearch, ActivityTargetKind::Url { url }) => ActivityClickRoute::WebPreview {
-            url: url.clone(),
-            detail_ref: detail_ref.map(String::from),
-        },
+        | (ActivityKind::WebSearch, ActivityTargetKind::Url { url }) => {
+            ActivityClickRoute::WebPreview {
+                url: url.clone(),
+                detail_ref: detail_ref.map(String::from),
+            }
+        }
         (ActivityKind::Glob | ActivityKind::List, ActivityTargetKind::Pattern { .. }) => {
             ActivityClickRoute::Files {
                 path: meta.first_match_path.clone(),
             }
         }
-        (ActivityKind::Mcp, ActivityTargetKind::File { path, line_start, .. }) => {
-            ActivityClickRoute::Editor {
-                path: path.clone(),
-                line: *line_start,
-            }
-        }
+        (
+            ActivityKind::Mcp,
+            ActivityTargetKind::File {
+                path, line_start, ..
+            },
+        ) => ActivityClickRoute::Editor {
+            path: path.clone(),
+            line: *line_start,
+        },
         (ActivityKind::Mcp, ActivityTargetKind::Url { url }) => ActivityClickRoute::WebPreview {
             url: url.clone(),
             detail_ref: detail_ref.map(String::from),
         },
         (ActivityKind::Mcp, _) => {
-            if let Some(path) = meta
-                .first_match_path
-                .as_deref()
-                .filter(|p| !p.is_empty())
-            {
+            if let Some(path) = meta.first_match_path.as_deref().filter(|p| !p.is_empty()) {
                 ActivityClickRoute::Editor {
                     path: path.to_string(),
                     line: meta.first_match_line,
@@ -346,7 +340,10 @@ pub fn todo_index_for_leaf(tree: &ActivityTree, leaf_id: &str) -> Option<usize> 
             match node {
                 ActivityNode::Leaf(leaf)
                     if leaf.id == leaf_id
-                        && matches!(leaf.kind, ActivityKind::TodoWrite | ActivityKind::TodoRead) =>
+                        && matches!(
+                            leaf.kind,
+                            ActivityKind::TodoWrite | ActivityKind::TodoRead
+                        ) =>
                 {
                     *found = leaf.meta.todo_focus_index.map(|i| i as usize);
                 }
@@ -363,7 +360,12 @@ pub fn todo_index_for_leaf(tree: &ActivityTree, leaf_id: &str) -> Option<usize> 
 pub fn find_todo_leaf_id_for_index(tree: &ActivityTree, index: usize) -> Option<String> {
     let mut match_id = None;
     let mut latest = None;
-    fn walk(nodes: &[ActivityNode], index: usize, match_id: &mut Option<String>, latest: &mut Option<String>) {
+    fn walk(
+        nodes: &[ActivityNode],
+        index: usize,
+        match_id: &mut Option<String>,
+        latest: &mut Option<String>,
+    ) {
         for node in nodes {
             match node {
                 ActivityNode::Leaf(leaf)
@@ -488,7 +490,8 @@ pub fn activity_visible_row_index(
             match node {
                 ActivityNode::Group(group) => {
                     *row += 1;
-                    let expanded = is_activity_group_expanded(group, expanded_groups, collapsed_groups);
+                    let expanded =
+                        is_activity_group_expanded(group, expanded_groups, collapsed_groups);
                     if expanded {
                         if group.summary.is_some() {
                             *row += 1;
@@ -603,11 +606,41 @@ pub struct GitStatusEntry {
 
 fn git_status_label(code: char, staged: bool) -> String {
     match code {
-        'M' => if staged { "Staged modified".into() } else { "Modified".into() },
-        'A' => if staged { "Staged added".into() } else { "Added".into() },
-        'D' => if staged { "Staged deleted".into() } else { "Deleted".into() },
-        'R' => if staged { "Staged renamed".into() } else { "Renamed".into() },
-        'C' => if staged { "Staged copied".into() } else { "Copied".into() },
+        'M' => {
+            if staged {
+                "Staged modified".into()
+            } else {
+                "Modified".into()
+            }
+        }
+        'A' => {
+            if staged {
+                "Staged added".into()
+            } else {
+                "Added".into()
+            }
+        }
+        'D' => {
+            if staged {
+                "Staged deleted".into()
+            } else {
+                "Deleted".into()
+            }
+        }
+        'R' => {
+            if staged {
+                "Staged renamed".into()
+            } else {
+                "Renamed".into()
+            }
+        }
+        'C' => {
+            if staged {
+                "Staged copied".into()
+            } else {
+                "Copied".into()
+            }
+        }
         'U' => "Updated".into(),
         '?' => "Untracked".into(),
         _ => String::new(),
@@ -668,8 +701,8 @@ pub fn find_latest_todo_leaf_id(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
     use serde_json::json;
+    use std::str::FromStr;
 
     #[test]
     fn truncate_preview_respects_limit() {
@@ -721,10 +754,10 @@ mod tests {
 
     #[test]
     fn sessions_for_project_sorts_newest_first() {
+        use chrono::Utc;
         use deepseekcode_schema::agent::AgentKind;
         use deepseekcode_schema::session::Session;
         use deepseekcode_types::{LocationId, SessionId};
-        use chrono::Utc;
 
         let id_old = SessionId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
         let id_new = SessionId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAW").unwrap();
@@ -752,7 +785,11 @@ mod tests {
                 updated_at: Utc::now(),
             },
         ];
-        let items = sessions_for_project(&sessions, &HashSet::new(), &std::collections::HashMap::new());
+        let items = sessions_for_project(
+            &sessions,
+            &HashSet::new(),
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].id, id_new);
         assert_eq!(items[0].title, "New chat");
@@ -803,10 +840,10 @@ mod tests {
 
     #[test]
     fn session_display_title_from_prompt() {
+        use chrono::Utc;
         use deepseekcode_schema::agent::AgentKind;
         use deepseekcode_schema::session::Session;
         use deepseekcode_types::{LocationId, SessionId};
-        use chrono::Utc;
 
         let session = Session {
             id: SessionId::new(),
@@ -825,10 +862,10 @@ mod tests {
 
     #[test]
     fn session_display_title_defaults_to_new_session_label() {
+        use chrono::Utc;
         use deepseekcode_schema::agent::AgentKind;
         use deepseekcode_schema::session::Session;
         use deepseekcode_types::{LocationId, SessionId};
-        use chrono::Utc;
 
         let session = Session {
             id: SessionId::new(),
@@ -886,7 +923,10 @@ mod tests {
 
     #[test]
     fn patch_assistant_message_delta_updates_running_leaf() {
-        use deepseekcode_schema::activity::{ActivityKind, ActivityMeta, ActivityNode, ActivityStatus, ActivityTargetKind, ActivityTree};
+        use deepseekcode_schema::activity::{
+            ActivityKind, ActivityMeta, ActivityNode, ActivityStatus, ActivityTargetKind,
+            ActivityTree,
+        };
         let mut tree = ActivityTree::default();
         assert!(patch_assistant_message_delta(&mut tree, "msg-1", "Hello"));
         assert!(patch_assistant_message_delta(&mut tree, "msg-1", " world"));
@@ -974,7 +1014,11 @@ mod tests {
                 text: None,
             })],
         };
-        assert!(patch_running_tool_leaf_preview(&mut tree, "bash-1", "[stdout] installing"));
+        assert!(patch_running_tool_leaf_preview(
+            &mut tree,
+            "bash-1",
+            "[stdout] installing"
+        ));
         let ActivityNode::Leaf(leaf) = &tree.roots[0] else {
             panic!("expected leaf");
         };
@@ -1017,7 +1061,10 @@ mod tests {
                 }),
             ],
         };
-        assert_eq!(find_todo_leaf_id_for_index(&tree, 2).as_deref(), Some("todo-9"));
+        assert_eq!(
+            find_todo_leaf_id_for_index(&tree, 2).as_deref(),
+            Some("todo-9")
+        );
         assert_eq!(todo_index_for_leaf(&tree, "todo-9"), Some(2));
     }
 

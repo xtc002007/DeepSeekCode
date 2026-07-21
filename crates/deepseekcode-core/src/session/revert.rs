@@ -46,7 +46,11 @@ impl RevertManager {
         row.map(|r| r.into_state()).transpose()
     }
 
-    pub async fn stage(&self, session_id: SessionId, message_id: MessageId) -> Result<StagedRevert> {
+    pub async fn stage(
+        &self,
+        session_id: SessionId,
+        message_id: MessageId,
+    ) -> Result<StagedRevert> {
         if self.get_staged(session_id).await?.is_some() {
             return Err(DeepSeekCodeError::Other(
                 "revert already staged; call clear or commit first".into(),
@@ -119,9 +123,7 @@ impl RevertManager {
 
         if let Some(files) = diff.get("files").and_then(|f| f.as_array()) {
             for file in files {
-                if let Some(original_id) = file
-                    .get("original_snapshot_id")
-                    .and_then(|v| v.as_str())
+                if let Some(original_id) = file.get("original_snapshot_id").and_then(|v| v.as_str())
                 {
                     if let Some(snap) = self.snapshots.get(original_id).await? {
                         self.snapshots.restore_entry(&snap)?;
@@ -142,7 +144,9 @@ impl RevertManager {
 
     pub async fn commit(&self, session_id: SessionId) -> Result<StagedRevert> {
         let Some(state) = self.get_staged(session_id).await? else {
-            return Err(DeepSeekCodeError::Other("no staged revert to commit".into()));
+            return Err(DeepSeekCodeError::Other(
+                "no staged revert to commit".into(),
+            ));
         };
 
         let boundary_seq = self

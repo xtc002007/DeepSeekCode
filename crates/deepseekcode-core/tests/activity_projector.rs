@@ -73,13 +73,10 @@ fn todo_updated_inserts_todo_leaf_with_focus_index() {
         .roots
         .iter()
         .filter_map(|n| match n {
-            ActivityNode::Group(g) => g
-                .children
-                .iter()
-                .find_map(|c| match c {
-                    ActivityNode::Leaf(l) if l.kind == ActivityKind::TodoWrite => Some(l),
-                    _ => None,
-                }),
+            ActivityNode::Group(g) => g.children.iter().find_map(|c| match c {
+                ActivityNode::Leaf(l) if l.kind == ActivityKind::TodoWrite => Some(l),
+                _ => None,
+            }),
             _ => None,
         })
         .next()
@@ -245,17 +242,18 @@ fn task_subagent_nests_child_session_events() {
         .roots
         .iter()
         .find_map(|n| match n {
-            ActivityNode::Group(g) if g.kind == ActivityGroupKind::ProviderTurn => g
-                .children
-                .iter()
-                .find_map(|c| match c {
-                    ActivityNode::Group(sg) if sg.kind == ActivityGroupKind::TaskSubagent => Some(sg),
+            ActivityNode::Group(g) if g.kind == ActivityGroupKind::ProviderTurn => {
+                g.children.iter().find_map(|c| match c {
+                    ActivityNode::Group(sg) if sg.kind == ActivityGroupKind::TaskSubagent => {
+                        Some(sg)
+                    }
                     _ => None,
-                }),
+                })
+            }
             _ => None,
         })
         .expect("task group");
-        assert!(group.children.len() >= 2);
+    assert!(group.children.len() >= 2);
 }
 
 #[test]
@@ -419,10 +417,7 @@ fn message_completed_prefers_buffered_stream_when_event_content_empty() {
         })
         .next()
         .expect("assistant leaf");
-    assert_eq!(
-        leaf.text.as_deref(),
-        Some("Full streamed analysis body.")
-    );
+    assert_eq!(leaf.text.as_deref(), Some("Full streamed analysis body."));
 }
 
 #[test]
@@ -481,7 +476,10 @@ fn user_messages_appear_before_session_meta_not_at_end() {
             )
         })
         .expect("session idle");
-    assert!(user_idx < idle_idx, "user message should precede session idle");
+    assert!(
+        user_idx < idle_idx,
+        "user message should precede session idle"
+    );
 }
 
 #[test]
@@ -570,14 +568,18 @@ async fn project_real_session_preserves_full_final_assistant_text() {
     use deepseekcode_storage::{Database, EventStore, SessionStore};
     use deepseekcode_types::SessionId;
 
-    let db = Database::open(&format!("sqlite://{}", db_path.display())).await.unwrap();
+    let db = Database::open(&format!("sqlite://{}", db_path.display()))
+        .await
+        .unwrap();
     let pool = db.pool().clone();
     let sessions = SessionStore::new(pool.clone());
     let events = EventStore::new(pool);
-    let session_id =
-        SessionId::from_str("01KXFRRZGGB8ZJKBX6DYABTRAA").expect("session id");
+    let session_id = SessionId::from_str("01KXFRRZGGB8ZJKBX6DYABTRAA").expect("session id");
 
-    let evs = events.tail_filtered(0, 10_000, Some(session_id)).await.unwrap();
+    let evs = events
+        .tail_filtered(0, 10_000, Some(session_id))
+        .await
+        .unwrap();
     let messages = sessions.list_messages(session_id).await.unwrap();
     let tree = ActivityProjector::project(&evs, &messages);
 

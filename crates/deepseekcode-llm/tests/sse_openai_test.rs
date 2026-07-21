@@ -106,7 +106,9 @@ async fn openai_sse_stream_emits_tool_call_deltas() {
     let mut completed = false;
     while let Some(event) = stream.next().await {
         match event.expect("event ok") {
-            LlmEvent::ToolCallDelta { name, arguments, .. } => {
+            LlmEvent::ToolCallDelta {
+                name, arguments, ..
+            } => {
                 tool_deltas.push((name, arguments));
             }
             LlmEvent::Completed => completed = true,

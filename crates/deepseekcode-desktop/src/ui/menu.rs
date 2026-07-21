@@ -16,8 +16,11 @@ pub fn menu_row(
         .text_color(theme.text_primary)
         .cursor_pointer()
         .hover(|s| s.bg(theme.bg_hover))
-        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-            action(this, cx);
-        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, _, cx| {
+                action(this, cx);
+            }),
+        )
         .child(label)
 }

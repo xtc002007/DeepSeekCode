@@ -24,12 +24,7 @@ pub fn render_panel_header(
                 .text_color(theme.text_muted)
                 .child(title.into()),
         )
-        .child(
-            div()
-                .flex()
-                .gap(px(4.))
-                .children(actions),
-        )
+        .child(div().flex().gap(px(4.)).children(actions))
 }
 
 pub fn render_panel_header_icon_button<F>(

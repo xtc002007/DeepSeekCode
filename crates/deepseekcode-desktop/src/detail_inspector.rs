@@ -17,12 +17,7 @@ impl DetailInspector {
                 .text_color(theme.text_muted)
                 .child("Select an activity row to inspect details."),
             Some(d) => {
-                let mut body = div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_3()
-                    .overflow_hidden();
+                let mut body = div().flex().flex_col().gap_2().p_3().overflow_hidden();
                 if let Some(title) = &d.title {
                     body = body.child(
                         div()

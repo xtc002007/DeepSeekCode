@@ -1,5 +1,5 @@
-use deepseekcode_schema::todo::TodoItem;
 use crate::ui::icon::{render_icon_rgba, IconName};
+use deepseekcode_schema::todo::TodoItem;
 use gpui::*;
 
 pub struct TodoPanel;
@@ -71,9 +71,12 @@ impl TodoPanel {
             .border_b_1()
             .border_color(theme.border_default)
             .hover(|s| s.bg(theme.bg_hover))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.toggle_composer_todo_expanded(cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.toggle_composer_todo_expanded(cx);
+                }),
+            )
             .child(render_icon_rgba(chevron, px(12.), theme.text_muted))
             .child(
                 div()
@@ -82,12 +85,7 @@ impl TodoPanel {
                     .text_color(theme.text_secondary)
                     .child("Tasks"),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.text_muted)
-                    .child(summary),
-            );
+            .child(div().text_xs().text_color(theme.text_muted).child(summary));
 
         let mut strip = div()
             .id("composer-todo-strip")

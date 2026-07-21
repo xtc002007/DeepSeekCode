@@ -73,8 +73,20 @@ impl GitPanel {
         } else {
             list = list
                 .child(render_section(cx, "Staged", staged, theme.success, &theme))
-                .child(render_section(cx, "Unstaged", unstaged, theme.warning, &theme))
-                .child(render_section(cx, "Untracked", untracked, theme.text_muted, &theme));
+                .child(render_section(
+                    cx,
+                    "Unstaged",
+                    unstaged,
+                    theme.warning,
+                    &theme,
+                ))
+                .child(render_section(
+                    cx,
+                    "Untracked",
+                    untracked,
+                    theme.text_muted,
+                    &theme,
+                ));
         }
         if !log.is_empty() {
             list = list.child(

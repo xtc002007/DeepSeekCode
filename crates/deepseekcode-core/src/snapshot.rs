@@ -180,9 +180,7 @@ impl FileSnapshotStore {
         let mut by_path: std::collections::BTreeMap<String, FileSnapshot> =
             std::collections::BTreeMap::new();
         for snap in snapshots {
-            by_path
-                .entry(snap.file_path.clone())
-                .or_insert(snap);
+            by_path.entry(snap.file_path.clone()).or_insert(snap);
         }
         by_path.into_values().collect()
     }
@@ -201,7 +199,11 @@ impl FileSnapshotStore {
 }
 
 /// Extract filesystem paths from mutating builtin tool arguments.
-pub fn mutating_tool_paths(tool_name: &str, input: &Value, working_directory: &str) -> Vec<PathBuf> {
+pub fn mutating_tool_paths(
+    tool_name: &str,
+    input: &Value,
+    working_directory: &str,
+) -> Vec<PathBuf> {
     let base = PathBuf::from(working_directory);
     let resolve = |rel: &str| {
         let p = PathBuf::from(rel);
@@ -213,11 +215,7 @@ pub fn mutating_tool_paths(tool_name: &str, input: &Value, working_directory: &s
     };
 
     match tool_name {
-        "write" | "edit" => input["path"]
-            .as_str()
-            .map(resolve)
-            .into_iter()
-            .collect(),
+        "write" | "edit" => input["path"].as_str().map(resolve).into_iter().collect(),
         "apply_patch" => {
             let patch = input["patch"].as_str().unwrap_or("");
             let mut paths = Vec::new();
@@ -291,7 +289,9 @@ mod tests {
         let file = dir.path().join("hello.txt");
         std::fs::write(&file, "before").unwrap();
 
-        let db = deepseekcode_storage::Database::open_in_memory().await.unwrap();
+        let db = deepseekcode_storage::Database::open_in_memory()
+            .await
+            .unwrap();
         let store = FileSnapshotStore::new(db.pool().clone(), dir.path(), true);
         let session_id = SessionId::new();
 

@@ -19,22 +19,14 @@ impl SyntaxHighlighter {
             .and_then(|e| e.to_str())
             .unwrap_or("");
         match ext {
-            "rs" => Self::for_language(
-                tree_sitter_rust::LANGUAGE.into(),
-                RUST_QUERY,
-            ),
-            "js" | "jsx" | "mjs" | "cjs" => Self::for_language(
-                tree_sitter_javascript::LANGUAGE.into(),
-                JS_QUERY,
-            ),
-            "ts" | "tsx" => Self::for_language(
-                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-                TS_QUERY,
-            ),
-            "py" | "pyw" => Self::for_language(
-                tree_sitter_python::LANGUAGE.into(),
-                PY_QUERY,
-            ),
+            "rs" => Self::for_language(tree_sitter_rust::LANGUAGE.into(), RUST_QUERY),
+            "js" | "jsx" | "mjs" | "cjs" => {
+                Self::for_language(tree_sitter_javascript::LANGUAGE.into(), JS_QUERY)
+            }
+            "ts" | "tsx" => {
+                Self::for_language(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), TS_QUERY)
+            }
+            "py" | "pyw" => Self::for_language(tree_sitter_python::LANGUAGE.into(), PY_QUERY),
             _ => None,
         }
     }

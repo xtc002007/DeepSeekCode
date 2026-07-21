@@ -31,12 +31,7 @@ impl FileEditorInput {
         cx.notify();
     }
 
-    fn on_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         if keystroke.modifiers.control || keystroke.modifiers.platform {
             return;
@@ -98,17 +93,13 @@ impl Render for FileEditorInput {
                             .text_align(TextAlign::Right)
                             .child(format!("{line_no}")),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .px_2()
-                            .text_color(theme.text_primary)
-                            .child(if line.is_empty() && lines.len() == 1 && self.content.is_empty() {
-                                "(empty file)".to_string()
-                            } else {
-                                line.clone()
-                            }),
-                    ),
+                    .child(div().flex_1().px_2().text_color(theme.text_primary).child(
+                        if line.is_empty() && lines.len() == 1 && self.content.is_empty() {
+                            "(empty file)".to_string()
+                        } else {
+                            line.clone()
+                        },
+                    )),
             );
         }
 

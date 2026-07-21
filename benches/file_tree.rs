@@ -17,7 +17,10 @@ fn main() {
     let count = walker.flatten().count();
     let elapsed = start.elapsed();
 
-    println!("file_tree_entries={count} elapsed_ms={}", elapsed.as_millis());
+    println!(
+        "file_tree_entries={count} elapsed_ms={}",
+        elapsed.as_millis()
+    );
 
     let threshold = if std::env::var("CI").is_ok() {
         Duration::from_millis(2_000)

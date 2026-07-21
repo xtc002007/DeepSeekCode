@@ -48,14 +48,14 @@ pub fn elevated_surface(theme: &ThemeTokens) -> impl Fn(Div) -> Div + Clone {
 }
 
 /// Focus ring for interactive controls.
-pub fn focus_ring(theme: &ThemeTokens, focused: bool) -> impl Fn(Stateful<Div>) -> Stateful<Div> + Clone {
+pub fn focus_ring(
+    theme: &ThemeTokens,
+    focused: bool,
+) -> impl Fn(Stateful<Div>) -> Stateful<Div> + Clone {
     let border_focus = theme.border_focus;
     let transparent: Rgba = hsla(0., 0., 0., 0.).into();
     move |el: Stateful<Div>| {
-        el.border_1().border_color(if focused {
-            border_focus
-        } else {
-            transparent
-        })
+        el.border_1()
+            .border_color(if focused { border_focus } else { transparent })
     }
 }

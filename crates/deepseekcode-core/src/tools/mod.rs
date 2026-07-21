@@ -9,4 +9,4 @@ pub mod task;
 pub mod websearch;
 
 pub use registry::ToolRegistry;
-pub use services::{ToolServices, ToolProgressSink, EventToolProgressSink};
+pub use services::{EventToolProgressSink, ToolProgressSink, ToolServices};

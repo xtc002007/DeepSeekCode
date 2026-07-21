@@ -46,13 +46,7 @@ impl Tool for TaskTool {
             message: "task spawner not configured".into(),
             retryable: false,
         })?;
-        emit_task_progress(
-            &services,
-            ctx.session_id,
-            &ctx.tool_call_id,
-            "spawning",
-        )
-        .await;
+        emit_task_progress(&services, ctx.session_id, &ctx.tool_call_id, "spawning").await;
         let child_id = spawner
             .spawn_task(ctx.session_id, &agent, &prompt)
             .await

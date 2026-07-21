@@ -3,7 +3,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 
-use super::dropdown::{DropdownOption, DropDirection};
+use super::dropdown::{DropDirection, DropdownOption};
 
 pub fn menu_width_for_labels(labels: impl IntoIterator<Item = impl AsRef<str>>) -> Pixels {
     let max_chars = labels
@@ -41,7 +41,8 @@ pub fn render_menu_panel(
             &mut crate::workspace::WorkspaceView,
             String,
             &mut Context<crate::workspace::WorkspaceView>,
-        ) + 'static
+        )
+        + 'static
         + Clone,
     cx: &mut Context<crate::workspace::WorkspaceView>,
 ) -> impl IntoElement {
@@ -143,14 +144,17 @@ pub fn render_project_remove_row(
                 .text_xs()
                 .text_color(theme.error)
                 .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    let path = path.clone();
-                    cx.defer_in(window, move |this, _, cx| {
-                        this.close_project_context_menu(cx);
-                        this.remove_project_from_sidebar(path, cx);
-                    });
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        let path = path.clone();
+                        cx.defer_in(window, move |this, _, cx| {
+                            this.close_project_context_menu(cx);
+                            this.remove_project_from_sidebar(path, cx);
+                        });
+                    }),
+                )
                 .child("Remove from sidebar"),
         )
 }
@@ -184,12 +188,15 @@ pub fn render_session_delete_row(
                 .text_color(theme.text_primary)
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.bg_hover))
-                .on_mouse_down(MouseButton::Left, cx.listener(move |_this, _, window, cx| {
-                    cx.stop_propagation();
-                    cx.defer_in(window, move |this, _, cx| {
-                        this.delete_session_by_id(session_id, cx);
-                    });
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |_this, _, window, cx| {
+                        cx.stop_propagation();
+                        cx.defer_in(window, move |this, _, cx| {
+                            this.delete_session_by_id(session_id, cx);
+                        });
+                    }),
+                )
                 .child("Delete session"),
         )
 }
@@ -227,27 +234,31 @@ pub fn render_context_row(
                 .text_color(theme.text_primary)
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.bg_hover))
-                .on_mouse_down(MouseButton::Left, cx.listener(move |_this, _, window, cx| {
-                    cx.stop_propagation();
-                    let action = action.clone();
-                    cx.defer_in(window, move |this, _, cx| {
-                        action(this, cx);
-                    });
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |_this, _, window, cx| {
+                        cx.stop_propagation();
+                        let action = action.clone();
+                        cx.defer_in(window, move |this, _, cx| {
+                            action(this, cx);
+                        });
+                    }),
+                )
                 .child(label),
         )
 }
 
-pub fn render_dismiss_layer(
-    cx: &mut Context<crate::workspace::WorkspaceView>,
-) -> impl IntoElement {
+pub fn render_dismiss_layer(cx: &mut Context<crate::workspace::WorkspaceView>) -> impl IntoElement {
     div()
         .id("popover-dismiss")
         .absolute()
         .inset_0()
-        .on_mouse_down(MouseButton::Left, cx.listener(|_this, _, window, cx| {
-            cx.defer_in(window, |this, _, cx| {
-                this.close_popover(cx);
-            });
-        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|_this, _, window, cx| {
+                cx.defer_in(window, |this, _, cx| {
+                    this.close_popover(cx);
+                });
+            }),
+        )
 }

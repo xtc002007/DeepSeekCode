@@ -2,10 +2,10 @@ use crate::preferences::ThemeId;
 use crate::theme::ThemeTokens;
 use crate::ui::scrollbar::render_flex_scroll_viewport;
 use deepseekcode_config::PolicyMode;
-use deepseekcode_types::{CONFIG_FILE, PRODUCT_NAME};
 use deepseekcode_schema::policy::{PolicyAction, PolicyGrant};
-use deepseekcode_schema::session::PromptDelivery;
 use deepseekcode_schema::provider::ProviderInfo;
+use deepseekcode_schema::session::PromptDelivery;
+use deepseekcode_types::{CONFIG_FILE, PRODUCT_NAME};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use serde_json::Value;
@@ -18,8 +18,22 @@ pub struct PolicyRuleRow {
 }
 
 pub(crate) const POLICY_SCOPES: &[&str] = &[
-    "bash", "read", "edit", "write", "grep", "glob", "list", "outside_workspace", "loop_guard",
-    "webfetch", "websearch", "skill", "task", "lsp", "question", "*",
+    "bash",
+    "read",
+    "edit",
+    "write",
+    "grep",
+    "glob",
+    "list",
+    "outside_workspace",
+    "loop_guard",
+    "webfetch",
+    "websearch",
+    "skill",
+    "task",
+    "lsp",
+    "question",
+    "*",
 ];
 
 #[derive(Clone, Debug, Default)]
@@ -131,7 +145,10 @@ impl SettingsView {
     }
 }
 
-fn render_sidebar(cx: &Context<crate::workspace::WorkspaceView>, section: SettingsSection) -> impl IntoElement {
+fn render_sidebar(
+    cx: &Context<crate::workspace::WorkspaceView>,
+    section: SettingsSection,
+) -> impl IntoElement {
     let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
     div()
         .w(px(200.))
@@ -233,9 +250,12 @@ fn render_close_button(cx: &Context<crate::workspace::WorkspaceView>) -> impl In
         .font_weight(FontWeight::BOLD)
         .text_color(theme.error)
         .hover(|style| style.bg(theme.bg_hover))
-        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-            this.close_settings(cx);
-        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                this.close_settings(cx);
+            }),
+        )
         .child("✕")
 }
 
@@ -264,12 +284,7 @@ fn nav_item(
             cx.listener(move |this, _, _, cx| this.open_settings_section(target, cx)),
         )
         .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme.text_muted)
-                .child(subtitle),
-        )
+        .child(div().text_xs().text_color(theme.text_muted).child(subtitle))
 }
 
 fn render_content(
@@ -306,16 +321,11 @@ fn render_content(
             selected_provider,
         )
         .into_any_element(),
-        SettingsSection::General => render_general_section(
-            cx,
-            prompt_delivery,
-            server_url_input,
-            server_password_input,
-        )
-        .into_any_element(),
-        SettingsSection::Project => {
-            render_project_section(cx, catalog).into_any_element()
+        SettingsSection::General => {
+            render_general_section(cx, prompt_delivery, server_url_input, server_password_input)
+                .into_any_element()
         }
+        SettingsSection::Project => render_project_section(cx, catalog).into_any_element(),
         SettingsSection::Permissions => render_permissions_section(
             cx,
             catalog,
@@ -329,13 +339,13 @@ fn render_content(
         SettingsSection::Integrations => {
             render_integrations_section(cx, catalog).into_any_element()
         }
-        SettingsSection::Worktrees => render_worktrees_only_section(cx, catalog, worktree_branch_input)
-            .into_any_element(),
-        SettingsSection::Diagnostics => {
-            render_diagnostics_section(cx, catalog).into_any_element()
+        SettingsSection::Worktrees => {
+            render_worktrees_only_section(cx, catalog, worktree_branch_input).into_any_element()
         }
-        SettingsSection::Advanced => render_advanced_section(cx, catalog, export_sanitize)
-            .into_any_element(),
+        SettingsSection::Diagnostics => render_diagnostics_section(cx, catalog).into_any_element(),
+        SettingsSection::Advanced => {
+            render_advanced_section(cx, catalog, export_sanitize).into_any_element()
+        }
     };
 
     div()
@@ -391,16 +401,12 @@ fn render_appearance_section(
     for id in ThemeId::ALL {
         row = row.child(theme_choice(cx, id, current_theme, &theme));
     }
-    div()
-        .flex()
-        .flex_col()
-        .gap_4()
-        .child(settings_group(
-            &theme,
-            "Theme",
-            "Choose the application color scheme. System follows your OS preference when supported.",
-            row,
-        ))
+    div().flex().flex_col().gap_4().child(settings_group(
+        &theme,
+        "Theme",
+        "Choose the application color scheme. System follows your OS preference when supported.",
+        row,
+    ))
 }
 
 fn theme_choice(
@@ -704,9 +710,12 @@ fn render_project_section(
                 .bg(theme.bg_elevated)
                 .text_sm()
                 .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    this.open_agents_md(cx);
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.open_agents_md(cx);
+                    }),
+                )
                 .child("Open AGENTS.md"),
         ))
         .child(settings_group(
@@ -722,9 +731,12 @@ fn render_project_section(
                 .bg(theme.bg_elevated)
                 .text_sm()
                 .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    this.open_project_config(cx);
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.open_project_config(cx);
+                    }),
+                )
                 .child(format!("Open {PRODUCT_NAME} config")),
         ))
 }
@@ -959,9 +971,12 @@ fn policy_mode_button(
             theme.text_secondary
         })
         .cursor_pointer()
-        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-            this.set_policy_auto_mode(auto, cx);
-        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, _, cx| {
+                this.set_policy_auto_mode(auto, cx);
+            }),
+        )
         .child(label)
 }
 
@@ -1079,9 +1094,12 @@ fn policy_preset_button(
         .text_xs()
         .text_color(theme.text_secondary)
         .cursor_pointer()
-        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-            this.apply_policy_preset(preset, cx);
-        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, _, cx| {
+                this.apply_policy_preset(preset, cx);
+            }),
+        )
         .child(label)
 }
 
@@ -1125,9 +1143,12 @@ fn render_integrations_section(
                         .text_xs()
                         .text_center()
                         .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.refresh_mcp_servers(cx);
-                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.refresh_mcp_servers(cx);
+                            }),
+                        )
                         .child("Refresh MCP list"),
                 )
                 .child(render_mcp_list(cx, catalog)),
@@ -1142,7 +1163,12 @@ fn render_integrations_section(
             &theme,
             "Plugins",
             "Loaded plugin hooks for this workspace.",
-            render_string_list(&theme, &catalog.plugins, catalog.loaded, "No plugins loaded"),
+            render_string_list(
+                &theme,
+                &catalog.plugins,
+                catalog.loaded,
+                "No plugins loaded",
+            ),
         ))
 }
 
@@ -1203,9 +1229,12 @@ fn render_diagnostics_section(
                 .bg(theme.info)
                 .text_sm()
                 .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    this.export_diagnostics(cx);
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.export_diagnostics(cx);
+                    }),
+                )
                 .child("Export Diagnostics Bundle"),
         ))
         .child(settings_group(
@@ -1219,9 +1248,12 @@ fn render_diagnostics_section(
                 .bg(theme.bg_elevated)
                 .text_sm()
                 .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    this.open_openapi_docs(cx);
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.open_openapi_docs(cx);
+                    }),
+                )
                 .child("Open /api/v1/openapi.json"),
         ))
 }
@@ -1272,9 +1304,12 @@ fn render_advanced_section(
                         .bg(theme.accent_muted)
                         .text_sm()
                         .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.compact_current_session(cx);
-                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.compact_current_session(cx);
+                            }),
+                        )
                         .child("Compact Now"),
                 ),
         ))
@@ -1294,9 +1329,12 @@ fn render_advanced_section(
                         .bg(theme.bg_elevated)
                         .text_sm()
                         .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.new_session(cx);
-                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.new_session(cx);
+                            }),
+                        )
                         .child("New Session"),
                 )
                 .child(
@@ -1307,9 +1345,12 @@ fn render_advanced_section(
                         .bg(theme.bg_elevated)
                         .text_sm()
                         .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.fork_current_session(cx);
-                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.fork_current_session(cx);
+                            }),
+                        )
                         .child("Fork Session"),
                 )
                 .child(
@@ -1324,9 +1365,12 @@ fn render_advanced_section(
                         })
                         .text_sm()
                         .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.toggle_export_sanitize(cx);
-                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.toggle_export_sanitize(cx);
+                            }),
+                        )
                         .child(if export_sanitize {
                             "Sanitize on export: ON"
                         } else {
@@ -1341,9 +1385,12 @@ fn render_advanced_section(
                         .bg(theme.bg_elevated)
                         .text_sm()
                         .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.export_current_session(cx);
-                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.export_current_session(cx);
+                            }),
+                        )
                         .child("Export Session…"),
                 )
                 .child(
@@ -1354,9 +1401,12 @@ fn render_advanced_section(
                         .bg(theme.bg_elevated)
                         .text_sm()
                         .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.open_revert_dock(cx);
-                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.open_revert_dock(cx);
+                            }),
+                        )
                         .child("Revert…"),
                 ),
         ))
@@ -1399,9 +1449,12 @@ fn render_worktree_section(
                     .bg(theme.accent_muted)
                     .text_sm()
                     .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                        this.create_worktree(cx);
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.create_worktree(cx);
+                        }),
+                    )
                     .child("Create worktree"),
             )
             .child(
@@ -1412,9 +1465,12 @@ fn render_worktree_section(
                     .bg(theme.bg_hover)
                     .text_sm()
                     .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                        this.prune_worktrees(cx);
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.prune_worktrees(cx);
+                        }),
+                    )
                     .child("Prune stale"),
             ),
     );
@@ -1428,10 +1484,7 @@ fn render_worktree_section(
         );
     } else {
         for entry in &catalog.worktrees {
-            let path = entry
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let path = entry.get("path").and_then(|v| v.as_str()).unwrap_or("?");
             let branch = entry
                 .get("branch")
                 .and_then(|v| v.as_str())
@@ -1552,24 +1605,25 @@ fn render_mcp_list(
                 .items_center()
                 .gap_2()
                 .child(
-                    div().flex().flex_col().gap_1().child(
-                        div()
-                            .text_sm()
-                            .child(name.to_string()),
-                    ).child(
-                        div()
-                            .text_xs()
-                            .text_color(if connected {
-                                theme.success
-                            } else {
-                                theme.text_muted
-                            })
-                            .child(if connected {
-                                "Connected"
-                            } else {
-                                "Disconnected"
-                            }),
-                    ),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().text_sm().child(name.to_string()))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(if connected {
+                                    theme.success
+                                } else {
+                                    theme.text_muted
+                                })
+                                .child(if connected {
+                                    "Connected"
+                                } else {
+                                    "Disconnected"
+                                }),
+                        ),
                 )
                 .child(
                     div()
@@ -1621,7 +1675,12 @@ fn render_mcp_list(
     list
 }
 
-fn render_string_list(theme: &ThemeTokens, items: &[String], loaded: bool, empty_label: &'static str) -> impl IntoElement {
+fn render_string_list(
+    theme: &ThemeTokens,
+    items: &[String],
+    loaded: bool,
+    empty_label: &'static str,
+) -> impl IntoElement {
     if !loaded {
         return div()
             .text_sm()
@@ -1731,12 +1790,7 @@ fn render_providers(
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(provider.name.clone()),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(status_color)
-                                .child(status),
-                        ),
+                        .child(div().text_xs().text_color(status_color).child(status)),
                 )
                 .child(actions),
         );

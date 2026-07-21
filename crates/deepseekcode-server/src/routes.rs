@@ -1,3 +1,4 @@
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::{
     extract::{
         ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
@@ -11,13 +12,12 @@ use axum::{
     routing::{delete, get, patch, post, put},
     Router,
 };
-use axum::http::{header, HeaderValue, StatusCode};
 use deepseekcode_schema::message::Message;
 use deepseekcode_schema::permission::PermissionRequest;
-use deepseekcode_schema::project::FsFileResponse;
-use deepseekcode_schema::project::FsDiffResponse;
 use deepseekcode_schema::permission::PermissionResponse;
 use deepseekcode_schema::policy::{PolicyGrant, PolicyReply, PolicyRequest};
+use deepseekcode_schema::project::FsDiffResponse;
+use deepseekcode_schema::project::FsFileResponse;
 use deepseekcode_schema::project::{
     CreateProjectRequest, FsEntry, FsTreeResponse, HealthResponse, Project, PtyCreateResponse,
     PtyTicketResponse,
@@ -33,17 +33,17 @@ use futures::stream::Stream;
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::path::{Component, Path as StdPath, PathBuf};
+use std::pin::Pin;
 use std::str::FromStr;
 use std::time::Duration;
-use std::pin::Pin;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
 
+use crate::openapi;
 use crate::openapi::{
     AddProjectDirectoryRequest, CreatePtyRequest, CreateWorktreeRequest, ForkRequest,
     MoveSessionRequest, UpdateModelRequest,
 };
-use crate::openapi;
 use crate::pty::{PTY_TICKET_HEADER, PTY_TICKET_HEADER_VALUE};
 use crate::state::AppState;
 
@@ -77,7 +77,9 @@ fn parse_permission_id(
     })
 }
 
-fn service_error_response(e: deepseekcode_types::DeepSeekCodeError) -> (StatusCode, Json<serde_json::Value>) {
+fn service_error_response(
+    e: deepseekcode_types::DeepSeekCodeError,
+) -> (StatusCode, Json<serde_json::Value>) {
     let status = match &e {
         deepseekcode_types::DeepSeekCodeError::NotFound(_) => StatusCode::NOT_FOUND,
         deepseekcode_types::DeepSeekCodeError::PermissionDenied(_) => StatusCode::FORBIDDEN,
@@ -120,8 +122,16 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/openapi.json", get(openapi_json))
         .route("/api/v1/location", get(get_location))
         .route("/api/v1/projects", get(list_projects).post(create_project))
-        .route("/api/v1/project/directories", get(list_project_directories).post(add_project_directory))
-        .route("/api/v1/worktree", get(list_worktrees).post(create_worktree).delete(remove_worktree))
+        .route(
+            "/api/v1/project/directories",
+            get(list_project_directories).post(add_project_directory),
+        )
+        .route(
+            "/api/v1/worktree",
+            get(list_worktrees)
+                .post(create_worktree)
+                .delete(remove_worktree),
+        )
         .route("/api/v1/worktree/prune", post(prune_worktrees))
         .route("/api/v1/session", get(list_sessions).post(create_session))
         .route(
@@ -145,7 +155,10 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/session/{id}/plans/{plan_id}/dismiss",
             post(dismiss_session_plan_prompt),
         )
-        .route("/api/v1/session/{id}/question/answer", post(answer_session_question))
+        .route(
+            "/api/v1/session/{id}/question/answer",
+            post(answer_session_question),
+        )
         .route("/api/v1/session/{id}/events", get(list_session_events))
         .route("/api/v1/session/{id}/events/head", get(session_event_head))
         .route("/api/v1/session/{id}/compact", post(compact_session))
@@ -159,7 +172,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/session/{id}/model", post(update_session_model))
         .route("/api/v1/provider", get(list_providers))
         .route("/api/v1/provider/{id}/connect", post(connect_provider))
-        .route("/api/v1/provider/{id}/disconnect", post(disconnect_provider))
+        .route(
+            "/api/v1/provider/{id}/disconnect",
+            post(disconnect_provider),
+        )
         .route("/api/v1/permission/pending", get(list_pending_permissions))
         .route("/api/v1/permission/{id}/respond", post(respond_permission))
         .route("/api/v1/policy/pending", get(list_pending_policies))
@@ -226,7 +242,10 @@ pub(crate) async fn openapi_json() -> impl IntoResponse {
     tag = "location",
     responses((status = 200, description = "Current workspace location"))
 )]
-pub(crate) async fn get_location(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+pub(crate) async fn get_location(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let dir = project_dir(&headers);
     let engine = state.engine.read().await;
     Json(serde_json::json!({
@@ -245,7 +264,12 @@ fn project_dir(headers: &HeaderMap) -> String {
         .get("x-deepseekcode-directory")
         .and_then(|v| v.to_str().ok())
         .map(String::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap().to_string_lossy().to_string());
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        });
     normalize_server_directory(&raw)
 }
 
@@ -267,9 +291,7 @@ fn normalize_server_directory(path: &str) -> String {
     let s = canonical.display().to_string();
     #[cfg(windows)]
     {
-        s.strip_prefix(r"\\?\")
-            .unwrap_or(&s)
-            .to_string()
+        s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
     }
     #[cfg(not(windows))]
     {
@@ -389,7 +411,10 @@ pub(crate) async fn create_project(
     tag = "session",
     responses((status = 200, description = "List sessions", body = [Session]))
 )]
-pub(crate) async fn list_sessions(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+pub(crate) async fn list_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let dir = project_dir(&headers);
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
@@ -699,7 +724,11 @@ pub(crate) async fn list_session_plans(
         )
             .into_response();
     }
-    match location.session_service.list_session_plans(session_id).await {
+    match location
+        .session_service
+        .list_session_plans(session_id)
+        .await
+    {
         Ok(plans) => Json(plans).into_response(),
         Err(e) => service_error_response(e).into_response(),
     }
@@ -831,11 +860,7 @@ pub(crate) async fn session_event_head(
     let session_id = parse_session_path!(&id);
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
-    match location
-        .session_service
-        .latest_event_seq(session_id)
-        .await
-    {
+    match location.session_service.latest_event_seq(session_id).await {
         Ok(seq) => Json(serde_json::json!({ "seq": seq })).into_response(),
         Err(e) => service_error_response(e).into_response(),
     }
@@ -858,7 +883,8 @@ pub(crate) async fn compact_session(
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
     let registry = deepseekcode_core::system_context::SystemContextRegistry::new(dir.clone());
-    let epochs = deepseekcode_core::system_context::ContextEpochStore::new(engine.db.pool().clone());
+    let epochs =
+        deepseekcode_core::system_context::ContextEpochStore::new(engine.db.pool().clone());
     match deepseekcode_core::compaction::CompactionService::compact(
         &registry,
         &epochs,
@@ -879,7 +905,10 @@ pub(crate) async fn compact_session(
     tag = "provider",
     responses((status = 200, description = "Provider catalog", body = [ProviderInfo]))
 )]
-pub(crate) async fn list_providers(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+pub(crate) async fn list_providers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let dir = project_dir(&headers);
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
@@ -985,7 +1014,11 @@ pub(crate) async fn respond_permission(
     let permission_id = parse_permission_path!(&id);
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
-    match location.permissions.respond_legacy(permission_id, req.status).await {
+    match location
+        .permissions
+        .respond_legacy(permission_id, req.status)
+        .await
+    {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => service_error_response(e).into_response(),
     }
@@ -1135,7 +1168,10 @@ pub(crate) async fn update_policy_config(
     tag = "mcp",
     responses((status = 200, description = "MCP server status"))
 )]
-pub(crate) async fn list_mcp(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+pub(crate) async fn list_mcp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let dir = project_dir(&headers);
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
@@ -1205,7 +1241,10 @@ pub(crate) async fn disconnect_mcp(
     tag = "skills",
     responses((status = 200, description = "Discovered skills", body = [crate::openapi::SkillInfo]))
 )]
-pub(crate) async fn list_skills(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+pub(crate) async fn list_skills(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let dir = project_dir(&headers);
     let mut engine = state.engine.write().await;
     let _ = engine.reload_catalog(&dir).await;
@@ -1229,7 +1268,10 @@ pub(crate) async fn list_skills(State(state): State<AppState>, headers: HeaderMa
     tag = "plugins",
     responses((status = 200, description = "Loaded plugins"))
 )]
-pub(crate) async fn list_plugins(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+pub(crate) async fn list_plugins(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let dir = project_dir(&headers);
     let mut engine = state.engine.write().await;
     let _ = engine.reload_catalog(&dir).await;
@@ -1280,15 +1322,13 @@ pub(crate) async fn event_stream(
     let replay_limit = sse_replay_limit();
     let stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
         if history.len() as i64 >= replay_limit {
-            Box::pin(tokio_stream::once(Ok(
-                Event::default()
-                    .json_data(serde_json::json!({
-                        "error": "gap_too_large",
-                        "head": handoff_seq,
-                        "limit": replay_limit,
-                    }))
-                    .unwrap_or_else(|_| Event::default()),
-            )))
+            Box::pin(tokio_stream::once(Ok(Event::default()
+                .json_data(serde_json::json!({
+                    "error": "gap_too_large",
+                    "head": handoff_seq,
+                    "limit": replay_limit,
+                }))
+                .unwrap_or_else(|_| Event::default()))))
         } else {
             let history_stream = tokio_stream::iter(
                 history
@@ -1338,7 +1378,10 @@ pub(crate) struct FsTreeQuery {
     ),
     responses((status = 200, description = "Directory entries", body = FsTreeResponse))
 )]
-pub(crate) async fn fs_tree(headers: HeaderMap, Query(query): Query<FsTreeQuery>) -> impl IntoResponse {
+pub(crate) async fn fs_tree(
+    headers: HeaderMap,
+    Query(query): Query<FsTreeQuery>,
+) -> impl IntoResponse {
     let project_root = project_dir(&headers);
     let requested = query.path.unwrap_or_default();
     let offset = query.offset.unwrap_or(0);
@@ -1385,7 +1428,10 @@ pub(crate) struct FsFileQuery {
     params(("path" = String, Query, description = "File path within project root")),
     responses((status = 200, description = "File contents", body = FsFileResponse))
 )]
-pub(crate) async fn fs_file(headers: HeaderMap, Query(query): Query<FsFileQuery>) -> impl IntoResponse {
+pub(crate) async fn fs_file(
+    headers: HeaderMap,
+    Query(query): Query<FsFileQuery>,
+) -> impl IntoResponse {
     let project_root = project_dir(&headers);
     let path = match resolve_within_project(&project_root, &query.path) {
         Ok(path) => path,
@@ -1591,10 +1637,7 @@ pub(crate) async fn fs_diff(
 
     let current = std::fs::read_to_string(&path).unwrap_or_default();
     let diff = similar::TextDiff::from_lines(&original, &current);
-    let hunks = diff
-        .unified_diff()
-        .context_radius(3)
-        .to_string();
+    let hunks = diff.unified_diff().context_radius(3).to_string();
     Json(serde_json::json!({ "hunks": hunks })).into_response()
 }
 
@@ -1611,7 +1654,10 @@ pub(crate) async fn create_pty(
     Json(req): Json<CreatePtyRequest>,
 ) -> impl IntoResponse {
     let dir = project_dir(&headers);
-    match state.pty.create(&dir, req.rows.unwrap_or(24), req.cols.unwrap_or(80)) {
+    match state
+        .pty
+        .create(&dir, req.rows.unwrap_or(24), req.cols.unwrap_or(80))
+    {
         Ok(session) => Json(serde_json::json!({ "id": session.id.to_string() })).into_response(),
         Err(e) => service_error_response(e).into_response(),
     }
@@ -1661,9 +1707,7 @@ pub(crate) async fn pty_ticket(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     if state.password.is_some()
-        && headers
-            .get(PTY_TICKET_HEADER)
-            .and_then(|v| v.to_str().ok())
+        && headers.get(PTY_TICKET_HEADER).and_then(|v| v.to_str().ok())
             != Some(PTY_TICKET_HEADER_VALUE)
     {
         return (
@@ -1910,11 +1954,7 @@ pub(crate) async fn revert_get_staged(
     let session_id = parse_session_path!(&id);
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
-    match location
-        .session_service
-        .revert_get_staged(session_id)
-        .await
-    {
+    match location.session_service.revert_get_staged(session_id).await {
         Ok(Some(revert)) => Json(serde_json::json!(revert)).into_response(),
         Ok(None) => Json(serde_json::Value::Null).into_response(),
         Err(e) => service_error_response(e).into_response(),
@@ -2091,13 +2131,11 @@ pub(crate) async fn export_diagnostics(Query(query): Query<DiagnosticsQuery>) ->
             )
                 .into_response(),
         },
-        Err(e) => {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response()
-        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -2112,7 +2150,9 @@ pub(crate) async fn list_project_directories(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let dir = project_dir(&headers);
-    let store = deepseekcode_core::git::ProjectDirectoryStore::new(state.engine.read().await.db.pool().clone());
+    let store = deepseekcode_core::git::ProjectDirectoryStore::new(
+        state.engine.read().await.db.pool().clone(),
+    );
     match store.list(&dir).await {
         Ok(entries) => Json(serde_json::json!(entries)).into_response(),
         Err(e) => service_error_response(e).into_response(),
@@ -2132,7 +2172,9 @@ pub(crate) async fn add_project_directory(
     Json(req): Json<AddProjectDirectoryRequest>,
 ) -> impl IntoResponse {
     let dir = project_dir(&headers);
-    let store = deepseekcode_core::git::ProjectDirectoryStore::new(state.engine.read().await.db.pool().clone());
+    let store = deepseekcode_core::git::ProjectDirectoryStore::new(
+        state.engine.read().await.db.pool().clone(),
+    );
     match store
         .add(&dir, &req.directory_path, req.strategy.as_deref())
         .await
@@ -2214,7 +2256,10 @@ pub(crate) async fn remove_worktree(
     tag = "worktree",
     responses((status = 200, description = "Stale worktree metadata pruned", body = crate::openapi::OkResponse))
 )]
-pub(crate) async fn prune_worktrees(State(_state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+pub(crate) async fn prune_worktrees(
+    State(_state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let dir = project_dir(&headers);
     let manager = deepseekcode_core::git::GitWorktreeManager::new(&dir);
     if !manager.is_git_repo() {

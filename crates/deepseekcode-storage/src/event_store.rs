@@ -149,7 +149,8 @@ impl EventRow {
 }
 
 fn parse_event_kind(s: &str) -> Result<EventKind> {
-    EventKind::parse(s).ok_or_else(|| DeepSeekCodeError::Storage(format!("unknown event kind: {s}")))
+    EventKind::parse(s)
+        .ok_or_else(|| DeepSeekCodeError::Storage(format!("unknown event kind: {s}")))
 }
 
 pub async fn admit_prompt(

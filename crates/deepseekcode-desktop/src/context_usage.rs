@@ -61,9 +61,12 @@ impl ContextUsageMeter {
             .rounded_md()
             .cursor_pointer()
             .hover(|s| s.bg(theme.bg_hover))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.toggle_context_usage_detail(cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.toggle_context_usage_detail(cx);
+                }),
+            )
             .child(
                 div()
                     .w(px(56.))
@@ -88,7 +91,10 @@ impl ContextUsageMeter {
             )
     }
 
-    pub fn render_detail_popover(state: &ContextUsageState, theme: &ThemeTokens) -> impl IntoElement {
+    pub fn render_detail_popover(
+        state: &ContextUsageState,
+        theme: &ThemeTokens,
+    ) -> impl IntoElement {
         div()
             .absolute()
             .top(px(32.))
@@ -132,9 +138,12 @@ impl ContextUsageMeter {
             .rounded_md()
             .cursor_pointer()
             .hover(|s| s.bg(theme.bg_hover))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.toggle_context_usage_detail(cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.toggle_context_usage_detail(cx);
+                }),
+            )
             .child(
                 div()
                     .w(px(28.))
@@ -150,15 +159,10 @@ impl ContextUsageMeter {
                     .text_color(ring_color)
                     .child(format!("{pct}%")),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.text_muted)
-                    .child(format!(
-                        "{} / {} tokens",
-                        state.total_tokens, state.context_window
-                    )),
-            );
+            .child(div().text_xs().text_color(theme.text_muted).child(format!(
+                "{} / {} tokens",
+                state.total_tokens, state.context_window
+            )));
 
         if state.expanded {
             panel = panel.child(

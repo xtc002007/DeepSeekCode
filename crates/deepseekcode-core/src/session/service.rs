@@ -1,8 +1,10 @@
 use deepseekcode_config::DeepSeekCodeConfig;
 use deepseekcode_schema::event::EventKind;
-use deepseekcode_schema::session::{CreateSessionRequest, PromptDelivery, PromptRequest, Session};
 use deepseekcode_schema::plan::SessionPlanSummary;
-use deepseekcode_storage::{admit_prompt, Database, EventStore, PlanStore, SessionStore, TodoStore};
+use deepseekcode_schema::session::{CreateSessionRequest, PromptDelivery, PromptRequest, Session};
+use deepseekcode_storage::{
+    admit_prompt, Database, EventStore, PlanStore, SessionStore, TodoStore,
+};
 use deepseekcode_types::{LocationId, MessageId, Result, SessionId};
 use serde_json::json;
 use std::collections::HashSet;
@@ -131,9 +133,12 @@ impl SessionService {
         self.ensure_session_in_location(req.session_id).await?;
         let message_id = req.id.unwrap_or_default();
 
-        let mut tx = self.db.pool().begin().await.map_err(|e| {
-            deepseekcode_types::DeepSeekCodeError::Storage(e.to_string())
-        })?;
+        let mut tx = self
+            .db
+            .pool()
+            .begin()
+            .await
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
         let inserted = sqlx::query(
             r#"INSERT OR IGNORE INTO session_input (id, session_id, prompt, delivery, admitted_at, promoted)
                VALUES (?, ?, ?, ?, ?, 0)"#,
@@ -229,15 +234,16 @@ impl SessionService {
     /// Returns the session when it belongs to this location's working directory.
     pub async fn ensure_session_in_location(&self, session_id: SessionId) -> Result<Session> {
         let session = self.sessions.get(session_id).await?;
-        let working_directory: Option<String> = sqlx::query_scalar(
-            r#"SELECT working_directory FROM sessions WHERE id = ?"#,
-        )
-        .bind(session_id.to_string())
-        .fetch_optional(self.db.pool())
-        .await
-        .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
+        let working_directory: Option<String> =
+            sqlx::query_scalar(r#"SELECT working_directory FROM sessions WHERE id = ?"#)
+                .bind(session_id.to_string())
+                .fetch_optional(self.db.pool())
+                .await
+                .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
         let working_directory = working_directory.ok_or_else(|| {
-            deepseekcode_types::DeepSeekCodeError::NotFound(format!("session {session_id} not found"))
+            deepseekcode_types::DeepSeekCodeError::NotFound(format!(
+                "session {session_id} not found"
+            ))
         })?;
         if !session_belongs_to_location(&working_directory, &self.project_dir) {
             return Err(deepseekcode_types::DeepSeekCodeError::NotFound(format!(
@@ -361,10 +367,7 @@ impl SessionService {
         let child_ids = sessions.list_child_sessions(session_id).await?;
         let mut children = std::collections::HashMap::new();
         for child_id in child_ids {
-            let child_events = self
-                .events
-                .tail_filtered(0, 10_000, Some(child_id))
-                .await?;
+            let child_events = self.events.tail_filtered(0, 10_000, Some(child_id)).await?;
             let child_messages = self.list_messages(child_id).await?;
             children.insert(
                 child_id.to_string(),
@@ -375,9 +378,7 @@ impl SessionService {
             );
         }
         Ok(ActivityProjector::project_with_children(
-            &events,
-            &messages,
-            &children,
+            &events, &messages, &children,
         ))
     }
 
@@ -386,9 +387,7 @@ impl SessionService {
         session_id: SessionId,
     ) -> Result<Vec<deepseekcode_schema::todo::TodoItem>> {
         self.ensure_session_in_location(session_id).await?;
-        TodoStore::new(self.db.pool().clone())
-            .get(session_id)
-            .await
+        TodoStore::new(self.db.pool().clone()).get(session_id).await
     }
 
     pub async fn update_todos(
@@ -416,7 +415,9 @@ impl SessionService {
         answer: String,
     ) -> Result<()> {
         self.ensure_session_in_location(session_id).await?;
-        self.execution.submit_question_answer(session_id, answer).await
+        self.execution
+            .submit_question_answer(session_id, answer)
+            .await
     }
 
     pub async fn create_child_session(
@@ -439,13 +440,15 @@ impl SessionService {
             )
             .await?;
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query("UPDATE sessions SET parent_session_id = ?, title = COALESCE(?, title) WHERE id = ?")
-            .bind(parent_id.to_string())
-            .bind(title)
-            .bind(new_id.to_string())
-            .execute(self.db.pool())
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
+        sqlx::query(
+            "UPDATE sessions SET parent_session_id = ?, title = COALESCE(?, title) WHERE id = ?",
+        )
+        .bind(parent_id.to_string())
+        .bind(title)
+        .bind(new_id.to_string())
+        .execute(self.db.pool())
+        .await
+        .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
         self.events
             .append(
                 EventKind::SessionCreated,
@@ -513,15 +516,13 @@ impl SessionService {
         self.execution.drop_runner(session_id).await;
         use crate::system_context::ContextEpochStore;
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            r#"UPDATE sessions SET working_directory = ?, updated_at = ? WHERE id = ?"#,
-        )
-        .bind(&new_directory)
-        .bind(&now)
-        .bind(session_id.to_string())
-        .execute(self.db.pool())
-        .await
-        .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
+        sqlx::query(r#"UPDATE sessions SET working_directory = ?, updated_at = ? WHERE id = ?"#)
+            .bind(&new_directory)
+            .bind(&now)
+            .bind(session_id.to_string())
+            .execute(self.db.pool())
+            .await
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
 
         let epochs = ContextEpochStore::new(self.db.pool().clone());
         epochs.clear(session_id).await?;
@@ -555,11 +556,7 @@ impl SessionService {
             .await
     }
 
-    pub async fn update_session(
-        &self,
-        session_id: SessionId,
-        title: Option<String>,
-    ) -> Result<()> {
+    pub async fn update_session(&self, session_id: SessionId, title: Option<String>) -> Result<()> {
         self.ensure_session_in_location(session_id).await?;
         if let Some(title) = title {
             let trimmed = title.trim();

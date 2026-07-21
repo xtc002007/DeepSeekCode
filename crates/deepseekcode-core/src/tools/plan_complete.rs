@@ -220,11 +220,11 @@ fn resolve_plan_location(
     })
 }
 
-fn resolve_from_relative_plan_path(working: &Path, plan_path: &str) -> Result<ResolvedPlan, ToolFailure> {
-    let rel = crate::project_context::policy_path_pattern(
-        &working.to_string_lossy(),
-        plan_path,
-    );
+fn resolve_from_relative_plan_path(
+    working: &Path,
+    plan_path: &str,
+) -> Result<ResolvedPlan, ToolFailure> {
+    let rel = crate::project_context::policy_path_pattern(&working.to_string_lossy(), plan_path);
     let normalized = rel.replace('\\', "/");
     let parts: Vec<&str> = normalized.split('/').filter(|p| !p.is_empty()).collect();
     let Some(plan_idx) = parts
@@ -281,11 +281,7 @@ fn discover_plan_with_file(working: &Path, primary_file_name: &str) -> Option<St
         }
         let modified = std::fs::metadata(&plan_file).ok()?.modified().ok()?;
         let id = entry.file_name().to_string_lossy().to_string();
-        if best
-            .as_ref()
-            .map(|(t, _)| modified > *t)
-            .unwrap_or(true)
-        {
+        if best.as_ref().map(|(t, _)| modified > *t).unwrap_or(true) {
             best = Some((modified, id));
         }
     }

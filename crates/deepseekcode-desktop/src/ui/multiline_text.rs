@@ -15,10 +15,7 @@ pub fn split_display_lines(text: &str) -> Vec<String> {
         .collect()
 }
 
-pub fn render_multiline(
-    text: &str,
-    style_line: impl Fn(Div) -> Div,
-) -> impl IntoElement {
+pub fn render_multiline(text: &str, style_line: impl Fn(Div) -> Div) -> impl IntoElement {
     let mut column = style_line(div().flex().flex_col().w_full());
     for line in split_display_lines(text) {
         column = column.child(style_line(div()).child(line));

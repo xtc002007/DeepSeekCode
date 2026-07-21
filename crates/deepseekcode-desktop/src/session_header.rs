@@ -84,9 +84,12 @@ impl SessionHeaderView {
                                     .text_xs()
                                     .cursor_pointer()
                                     .bg(theme.accent_muted)
-                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                        this.save_session_title(cx);
-                                    }))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.save_session_title(cx);
+                                        }),
+                                    )
                                     .child("Save"),
                             )
                             .child(
@@ -97,9 +100,12 @@ impl SessionHeaderView {
                                     .text_xs()
                                     .cursor_pointer()
                                     .text_color(theme.text_muted)
-                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                        this.cancel_session_title_edit(cx);
-                                    }))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.cancel_session_title_edit(cx);
+                                        }),
+                                    )
                                     .child("Cancel"),
                             )
                             .into_any_element()]
@@ -144,9 +150,12 @@ impl SessionHeaderView {
                             .text_xs()
                             .text_color(theme.text_primary)
                             .cursor_pointer()
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                this.toggle_session_plans_menu(cx);
-                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.toggle_session_plans_menu(cx);
+                                }),
+                            )
                             .child(label),
                     );
                 }
@@ -211,7 +220,12 @@ pub fn render_session_menu_panel(
         .border_1()
         .border_color(theme.border_default)
         .shadow_lg()
-        .child(menu_item(cx, "New Session", |this, cx| this.new_session(cx), &theme))
+        .child(menu_item(
+            cx,
+            "New Session",
+            |this, cx| this.new_session(cx),
+            &theme,
+        ))
         .child(menu_item(
             cx,
             "Fork Session",
@@ -219,26 +233,56 @@ pub fn render_session_menu_panel(
             &theme,
         ))
         .children(if has_selected_message {
-            vec![menu_item(cx, "Fork from message", |this, cx| {
-                this.fork_current_session(cx);
-            }, &theme)
+            vec![menu_item(
+                cx,
+                "Fork from message",
+                |this, cx| {
+                    this.fork_current_session(cx);
+                },
+                &theme,
+            )
             .into_any_element()]
         } else {
             vec![]
         })
-        .child(menu_item(cx, "Export Session…", |this, cx| {
-            this.export_current_session(cx);
-        }, &theme))
-        .child(menu_item(cx, "Revert…", |this, cx| this.open_revert_dock(cx), &theme))
-        .child(menu_item(cx, "Compact Now", |this, cx| {
-            this.compact_current_session(cx);
-        }, &theme))
-        .child(menu_item(cx, "Move session…", |this, cx| {
-            this.move_current_session(cx);
-        }, &theme))
-        .child(menu_item(cx, "Session Settings", |this, cx| {
-            this.open_settings(crate::settings::SettingsSection::Ai, cx);
-        }, &theme))
+        .child(menu_item(
+            cx,
+            "Export Session…",
+            |this, cx| {
+                this.export_current_session(cx);
+            },
+            &theme,
+        ))
+        .child(menu_item(
+            cx,
+            "Revert…",
+            |this, cx| this.open_revert_dock(cx),
+            &theme,
+        ))
+        .child(menu_item(
+            cx,
+            "Compact Now",
+            |this, cx| {
+                this.compact_current_session(cx);
+            },
+            &theme,
+        ))
+        .child(menu_item(
+            cx,
+            "Move session…",
+            |this, cx| {
+                this.move_current_session(cx);
+            },
+            &theme,
+        ))
+        .child(menu_item(
+            cx,
+            "Session Settings",
+            |this, cx| {
+                this.open_settings(crate::settings::SettingsSection::Ai, cx);
+            },
+            &theme,
+        ))
 }
 
 fn menu_item(
@@ -253,9 +297,12 @@ fn menu_item(
         .text_xs()
         .text_color(theme.text_primary)
         .cursor_pointer()
-        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-            this.close_session_menu(cx);
-            action(this, cx);
-        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, _, cx| {
+                this.close_session_menu(cx);
+                action(this, cx);
+            }),
+        )
         .child(label)
 }

@@ -49,7 +49,10 @@ pub async fn serve(
 pub fn build_router(state: AppState) -> Router {
     routes::router(state.clone())
         .layer(middleware::from_fn(request_id_middleware))
-        .layer(middleware::from_fn_with_state(state.clone(), basic_auth_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            basic_auth_middleware,
+        ))
         .layer(
             TraceLayer::new_for_http().make_span_with(|req: &Request<_>| {
                 tracing::span!(

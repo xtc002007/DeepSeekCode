@@ -1,5 +1,5 @@
-use crate::providers::{anthropic, deepseek, openai, openrouter};
 use crate::event::LlmEvent;
+use crate::providers::{anthropic, deepseek, openai, openrouter};
 use crate::request::{LlmRequest, LlmResponse};
 use deepseekcode_types::{DeepSeekCodeError, Result};
 use futures::Stream;
@@ -32,15 +32,11 @@ impl LlmClient {
             "anthropic" => anthropic::generate(&self.http, request, api_key).await,
             "openrouter" => openrouter::generate(&self.http, request, api_key).await,
             "deepseek" => {
-                deepseek::generate(
-                    &self.http,
-                    request,
-                    api_key,
-                    request.base_url.as_deref(),
-                )
-                .await
+                deepseek::generate(&self.http, request, api_key, request.base_url.as_deref()).await
             }
-            other => Err(DeepSeekCodeError::Llm(format!("unsupported provider: {other}"))),
+            other => Err(DeepSeekCodeError::Llm(format!(
+                "unsupported provider: {other}"
+            ))),
         }
     }
 
@@ -65,15 +61,11 @@ impl LlmClient {
             "anthropic" => anthropic::stream(&self.http, request, api_key).await,
             "openrouter" => openrouter::stream(&self.http, request, api_key).await,
             "deepseek" => {
-                deepseek::stream(
-                    &self.http,
-                    request,
-                    api_key,
-                    request.base_url.as_deref(),
-                )
-                .await
+                deepseek::stream(&self.http, request, api_key, request.base_url.as_deref()).await
             }
-            other => Err(DeepSeekCodeError::Llm(format!("unsupported provider: {other}"))),
+            other => Err(DeepSeekCodeError::Llm(format!(
+                "unsupported provider: {other}"
+            ))),
         };
         match &result {
             Ok(_) => tracing::debug!(

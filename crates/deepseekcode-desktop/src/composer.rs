@@ -1,10 +1,10 @@
-use deepseekcode_schema::provider::ProviderInfo;
 use crate::context_usage::ContextUsageState;
 use crate::theme::ThemeTokens;
 use crate::ui::badge::badge_shell;
 use crate::ui::button::{button_shell, icon_button_shell, ButtonSize, ButtonVariant};
 use crate::ui::dropdown::DropdownOption;
 use crate::ui::icon::{render_icon_rgba, IconName};
+use deepseekcode_schema::provider::ProviderInfo;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::ops::Range;
@@ -29,10 +29,7 @@ actions!(
     ]
 );
 
-actions!(
-    session_title_input,
-    [SessionTitleSave, SessionTitleCancel]
-);
+actions!(session_title_input, [SessionTitleSave, SessionTitleCancel]);
 
 #[derive(Clone, Debug)]
 pub enum PromptInputEvent {
@@ -93,7 +90,11 @@ impl PromptInput {
         cx.notify();
     }
 
-    pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
+    pub fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
         self.placeholder = placeholder.into();
         cx.notify();
     }
@@ -130,22 +131,20 @@ impl PromptInput {
         self.caret_visible = true;
         self.blink_generation = self.blink_generation.wrapping_add(1);
         let generation = self.blink_generation;
-        cx.spawn(async move |this, cx| {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(530)).await;
-                let still_current = this
-                    .update(cx, |input, cx| {
-                        if input.blink_generation != generation {
-                            return false;
-                        }
-                        input.caret_visible = !input.caret_visible;
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !still_current {
-                    break;
-                }
+        cx.spawn(async move |this, cx| loop {
+            tokio::time::sleep(std::time::Duration::from_millis(530)).await;
+            let still_current = this
+                .update(cx, |input, cx| {
+                    if input.blink_generation != generation {
+                        return false;
+                    }
+                    input.caret_visible = !input.caret_visible;
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !still_current {
+                break;
             }
         })
         .detach();
@@ -450,8 +449,9 @@ impl EntityInputHandler for PromptInput {
 
         let new_text = self.normalize_inserted_text(new_text);
 
-        self.content = (self.content[0..range.start].to_owned() + &new_text + &self.content[range.end..])
-            .into();
+        self.content =
+            (self.content[0..range.start].to_owned() + &new_text + &self.content[range.end..])
+                .into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
         self.restart_blink(cx);
@@ -474,8 +474,9 @@ impl EntityInputHandler for PromptInput {
 
         let new_text = self.normalize_inserted_text(new_text);
 
-        self.content = (self.content[0..range.start].to_owned() + &new_text + &self.content[range.end..])
-            .into();
+        self.content =
+            (self.content[0..range.start].to_owned() + &new_text + &self.content[range.end..])
+                .into();
         if !new_text.is_empty() {
             self.marked_range = Some(range.start..range.start + new_text.len());
         } else {
@@ -882,10 +883,7 @@ impl ComposerView {
                 this.attach_external_paths(paths, cx);
             }))
             .drag_over(move |style, _: &ExternalPaths, _, _| {
-                style
-                    .bg(accent_muted)
-                    .border_1()
-                    .border_color(border_focus)
+                style.bg(accent_muted).border_1().border_color(border_focus)
             })
             .children(if input_blocked {
                 vec![div()
@@ -937,9 +935,12 @@ impl ComposerView {
                         .bg(theme.bg_elevated)
                         .border_1()
                         .border_color(theme.border_subtle)
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.attach_file(cx);
-                        })),
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.attach_file(cx);
+                            }),
+                        ),
                     )
                     .child(
                         div()
@@ -1034,17 +1035,13 @@ impl ComposerView {
                                     .flex()
                                     .items_center()
                                     .gap_1()
-                                    .child(
-                                        div()
-                                            .w(px(6.))
-                                            .h(px(6.))
-                                            .rounded_full()
-                                            .bg(if health_ok {
-                                                theme.success
-                                            } else {
-                                                theme.error
-                                            }),
-                                    )
+                                    .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(
+                                        if health_ok {
+                                            theme.success
+                                        } else {
+                                            theme.error
+                                        },
+                                    ))
                                     .child(if health_ok { "Local" } else { "Offline" }),
                             )
                             .child(crate::context_usage::ContextUsageMeter::render_compact(
@@ -1062,9 +1059,12 @@ impl ComposerView {
                                     None,
                                     false,
                                 )
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.compact_current_session(cx);
-                                })),
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.compact_current_session(cx);
+                                    }),
+                                ),
                             )
                             .child(
                                 button_shell(
@@ -1077,16 +1077,21 @@ impl ComposerView {
                                     Some(IconName::MoreHorizontal),
                                     false,
                                 )
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                                    this.toggle_session_menu_at(event.position, cx);
-                                })),
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                        this.toggle_session_menu_at(event.position, cx);
+                                    }),
+                                ),
                             )
                             .children(if context_usage.expanded {
-                                vec![crate::context_usage::ContextUsageMeter::render_detail_popover(
-                                    context_usage,
-                                    &theme,
-                                )
-                                .into_any_element()]
+                                vec![
+                                    crate::context_usage::ContextUsageMeter::render_detail_popover(
+                                        context_usage,
+                                        &theme,
+                                    )
+                                    .into_any_element(),
+                                ]
                             } else {
                                 vec![]
                             })

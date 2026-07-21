@@ -219,7 +219,10 @@ enum SessionCommands {
         directory: String,
         #[arg(short, long)]
         session: String,
-        #[arg(long, help = "Disable redaction of sensitive fields (redaction is on by default)")]
+        #[arg(
+            long,
+            help = "Disable redaction of sensitive fields (redaction is on by default)"
+        )]
         no_sanitize: bool,
         #[arg(short, long)]
         output: PathBuf,
@@ -321,7 +324,11 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        Commands::Run { directory, auto, prompt } => {
+        Commands::Run {
+            directory,
+            auto,
+            prompt,
+        } => {
             if auto {
                 std::env::set_var("DEEPSEEKCODE_POLICY_MODE", "auto");
             }
@@ -356,9 +363,8 @@ async fn main() -> anyhow::Result<()> {
                         stream_ended = false;
                         match item {
                             EventStreamItem::Gap { head, .. } => {
-                                let events = client
-                                    .list_session_events(session.id, since_seq)
-                                    .await?;
+                                let events =
+                                    client.list_session_events(session.id, since_seq).await?;
                                 for event in events {
                                     since_seq = event.seq;
                                     if event.session_id != Some(session.id) {
@@ -414,7 +420,11 @@ async fn main() -> anyhow::Result<()> {
             }
             engine.shutdown().await;
         }
-        Commands::Serve { directory, port, auto } => {
+        Commands::Serve {
+            directory,
+            port,
+            auto,
+        } => {
             if auto {
                 std::env::set_var("DEEPSEEKCODE_POLICY_MODE", "auto");
             }
@@ -445,10 +455,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Diagnostics { command } => match command {
             DiagnosticsCommands::Export { output, run_id } => {
-                let path = deepseekcode_telemetry::export_diagnostic_bundle(
-                    run_id.as_deref(),
-                    &output,
-                )?;
+                let path =
+                    deepseekcode_telemetry::export_diagnostic_bundle(run_id.as_deref(), &output)?;
                 println!("Exported diagnostics to {}", path.display());
                 println!("run_id: {}", run_ctx.run_id);
             }
@@ -504,10 +512,7 @@ async fn main() -> anyhow::Result<()> {
             ProviderCommands::List { directory } => {
                 let (engine, client) = scoped_client(&directory).await?;
                 for p in client.list_providers().await? {
-                    println!(
-                        "{} {} connected={}",
-                        p.id, p.name, p.connected
-                    );
+                    println!("{} {} connected={}", p.id, p.name, p.connected);
                 }
                 engine.shutdown().await;
             }
@@ -524,7 +529,10 @@ async fn main() -> anyhow::Result<()> {
                 println!("connected {provider}");
                 engine.shutdown().await;
             }
-            ProviderCommands::Disconnect { directory, provider } => {
+            ProviderCommands::Disconnect {
+                directory,
+                provider,
+            } => {
                 let (engine, client) = scoped_client(&directory).await?;
                 client.disconnect_provider(&provider).await?;
                 println!("disconnected {provider}");
@@ -571,10 +579,7 @@ async fn main() -> anyhow::Result<()> {
             } => {
                 let (engine, client) = scoped_client(&directory).await?;
                 let session_id = SessionId::from_str(&session)?;
-                let until_id = until
-                    .as_deref()
-                    .map(MessageId::from_str)
-                    .transpose()?;
+                let until_id = until.as_deref().map(MessageId::from_str).transpose()?;
                 let forked = client.fork_session(session_id, until_id).await?;
                 println!("forked session {}", forked.id);
                 engine.shutdown().await;
@@ -654,10 +659,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 engine.shutdown().await;
             }
-            WorktreeCommands::Create {
-                directory,
-                branch,
-            } => {
+            WorktreeCommands::Create { directory, branch } => {
                 let (engine, client) = scoped_client(&directory).await?;
                 let created = client.create_worktree(branch.as_deref()).await?;
                 println!("{}", serde_json::to_string_pretty(&created)?);
@@ -747,7 +749,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("ok");
                 engine.shutdown().await;
             }
-        }
+        },
     }
     Ok(())
 }

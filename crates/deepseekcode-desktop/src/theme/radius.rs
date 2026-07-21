@@ -1,5 +1,5 @@
-use gpui::Pixels;
 use gpui::px;
+use gpui::Pixels;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RadiusScale {

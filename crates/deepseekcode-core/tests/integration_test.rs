@@ -9,14 +9,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-fn test_service(
-    dir: &TempDir,
-    db: Arc<Database>,
-) -> deepseekcode_core::session::SessionService {
+fn test_service(dir: &TempDir, db: Arc<Database>) -> deepseekcode_core::session::SessionService {
     let permissions = Arc::new(deepseekcode_core::permission::PermissionService::default());
     let providers = Arc::new(deepseekcode_core::provider::ProviderCatalog::new());
     let events = Arc::new(deepseekcode_storage::EventStore::new(db.pool().clone()));
-    let mcp = Arc::new(deepseekcode_core::mcp::McpConnectionPool::new(HashMap::new()));
+    let mcp = Arc::new(deepseekcode_core::mcp::McpConnectionPool::new(
+        HashMap::new(),
+    ));
     let hooks = Arc::new(deepseekcode_plugin::HookRegistry::new());
     deepseekcode_core::session::SessionService::new(
         db,
@@ -238,7 +237,9 @@ async fn mock_llm_tool_call_pipeline() {
 
     let permissions = Arc::new(deepseekcode_core::permission::PermissionService::default());
     let events = Arc::new(deepseekcode_storage::EventStore::new(db.pool().clone()));
-    let mcp = Arc::new(deepseekcode_core::mcp::McpConnectionPool::new(HashMap::new()));
+    let mcp = Arc::new(deepseekcode_core::mcp::McpConnectionPool::new(
+        HashMap::new(),
+    ));
     let hooks = Arc::new(deepseekcode_plugin::HookRegistry::new());
     let service = deepseekcode_core::session::SessionService::new(
         db,

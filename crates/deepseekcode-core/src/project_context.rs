@@ -357,7 +357,12 @@ fn extract_filesystem_path_literals(segment: &str) -> Vec<String> {
             while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'&' {
                 i += 1;
             }
-            paths.push(segment[start..i].trim_matches('"').trim_matches('\'').to_string());
+            paths.push(
+                segment[start..i]
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string(),
+            );
             continue;
         }
 
@@ -434,10 +439,7 @@ fn looks_like_url_authority(token: &str) -> bool {
     if body.contains("://") {
         return true;
     }
-    if body.starts_with("localhost")
-        || body.starts_with("127.0.0.1")
-        || body.starts_with("[::1]")
-    {
+    if body.starts_with("localhost") || body.starts_with("127.0.0.1") || body.starts_with("[::1]") {
         return true;
     }
     // Hostname with port and no backslashes is almost certainly a URL.
@@ -467,10 +469,7 @@ fn looks_like_filesystem_path(token: &str) -> bool {
     if token.contains('[') || token.contains(']') {
         return false;
     }
-    if token.ends_with('\'')
-        || token.ends_with(',')
-        || token.ends_with(';')
-        || token.ends_with(')')
+    if token.ends_with('\'') || token.ends_with(',') || token.ends_with(';') || token.ends_with(')')
     {
         return false;
     }
@@ -550,10 +549,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let project = dir.path().join("sample-app");
         std::fs::create_dir_all(&project).unwrap();
-        let cmd = format!(
-            "rd /s /q {}\\app\\api 2>nul",
-            project.display()
-        );
+        let cmd = format!("rd /s /q {}\\app\\api 2>nul", project.display());
         assert!(
             command_threatens_project_root(&cmd, &project.to_string_lossy()).is_none(),
             "deleting a child directory should be allowed"
@@ -586,10 +582,7 @@ mod tests {
         let parent = dir.path().join("test");
         let project = parent.join("sample-app");
         std::fs::create_dir_all(&project).unwrap();
-        let cmd = format!(
-            "cd /d {} && mkdir vibe-next-notebook",
-            parent.display()
-        );
+        let cmd = format!("cd /d {} && mkdir vibe-next-notebook", parent.display());
         let msg = command_escapes_project_directory(&cmd, &project.to_string_lossy());
         assert!(msg.is_some(), "expected block, got {:?}", msg);
     }

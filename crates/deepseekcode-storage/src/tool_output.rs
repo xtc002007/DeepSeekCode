@@ -46,9 +46,7 @@ impl ManagedToolOutput {
         limits: &ToolOutputLimits,
     ) -> Result<Value> {
         let contextual = contextual_text(output);
-        if line_count(&contextual) <= limits.max_lines
-            && contextual.len() <= limits.max_bytes
-        {
+        if line_count(&contextual) <= limits.max_lines && contextual.len() <= limits.max_bytes {
             return Ok(output.clone());
         }
 
@@ -56,8 +54,8 @@ impl ManagedToolOutput {
 
         let file_name = format!("{}_{}_{}.json", session_id, tool_call_id, tool_name);
         let path = self.base_dir.join(&file_name);
-        let serialized = serde_json::to_string_pretty(output)
-            .map_err(|e| DeepSeekCodeError::Serde(e))?;
+        let serialized =
+            serde_json::to_string_pretty(output).map_err(|e| DeepSeekCodeError::Serde(e))?;
         std::fs::write(&path, &serialized).map_err(DeepSeekCodeError::Io)?;
 
         let marker = format!(
@@ -215,7 +213,11 @@ fn bounded_preview(text: &str, marker: &str, max_lines: usize, max_bytes: usize)
     if max_lines <= 4 || max_bytes <= marker.len() + 4 {
         return marker_only;
     }
-    let bounded = preview(text, max_lines.saturating_sub(4), max_bytes.saturating_sub(marker.len() + 4));
+    let bounded = preview(
+        text,
+        max_lines.saturating_sub(4),
+        max_bytes.saturating_sub(marker.len() + 4),
+    );
     if bounded.1.is_empty() {
         format!("{}\n\n{}", bounded.0, marker)
     } else {
@@ -229,7 +231,10 @@ mod tests {
 
     #[test]
     fn preview_keeps_head_and_tail() {
-        let text: String = (0..100).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let text: String = (0..100)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let (head, tail) = preview(&text, 10, 10_000);
         assert!(head.contains("line0"));
         assert!(tail.contains("line99"));
@@ -263,7 +268,10 @@ mod tests {
         let bounded = store
             .store(SessionId::new(), "c1", "read", &envelope, &limits)
             .unwrap();
-        assert!(bounded.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false));
+        assert!(bounded
+            .get("truncated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false));
         assert!(bounded.get("output").is_some());
         assert!(bounded.get("title").is_some());
     }

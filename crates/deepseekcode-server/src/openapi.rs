@@ -1,20 +1,20 @@
 use utoipa::OpenApi;
 
+use deepseekcode_schema::activity::{ActivityGroup, ActivityLeaf, ActivityNode, ActivityTree};
 use deepseekcode_schema::event::EventEnvelope;
 use deepseekcode_schema::message::Message;
 use deepseekcode_schema::permission::{PermissionRequest, PermissionResponse};
-use deepseekcode_schema::activity::{ActivityTree, ActivityLeaf, ActivityGroup, ActivityNode};
-use deepseekcode_schema::todo::{TodoItem, TodoUpdateRequest};
+use deepseekcode_schema::policy::{PolicyGrant, PolicyReply, PolicyRequest};
 use deepseekcode_schema::project::{
-    CreateProjectRequest, FsDiffResponse, FsFileResponse, FsTreeResponse, HealthResponse,
-    Project, PtyCreateResponse, PtyTicketResponse,
+    CreateProjectRequest, FsDiffResponse, FsFileResponse, FsTreeResponse, HealthResponse, Project,
+    PtyCreateResponse, PtyTicketResponse,
 };
 use deepseekcode_schema::provider::{ConnectProviderRequest, ProviderInfo};
-use deepseekcode_schema::policy::{PolicyGrant, PolicyReply, PolicyRequest};
 use deepseekcode_schema::session::{
-    CreateSessionRequest, PromptRequest, RevertStageRequest, RevertState, Session,
-    SessionActivity, UpdateSessionRequest,
+    CreateSessionRequest, PromptRequest, RevertStageRequest, RevertState, Session, SessionActivity,
+    UpdateSessionRequest,
 };
+use deepseekcode_schema::todo::{TodoItem, TodoUpdateRequest};
 use deepseekcode_types::MessageId;
 
 #[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]

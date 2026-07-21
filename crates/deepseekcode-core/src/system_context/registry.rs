@@ -3,10 +3,10 @@ use super::source::{
     agents_md_source, environment_source, instructions_source, skill_guidance_source,
     workspace_source, ContextSource, Generation, LoadResult, ReconcileResult, Snapshot,
 };
+use crate::skills::SkillCatalog;
 use deepseekcode_config::DeepSeekCodeConfig;
 use deepseekcode_storage::EventStore;
 use deepseekcode_types::{Result, SessionId};
-use crate::skills::SkillCatalog;
 
 pub struct SystemContextRegistry {
     project_dir: String,
@@ -20,7 +20,11 @@ impl SystemContextRegistry {
 
     pub fn with_config(project_dir: impl Into<String>, config: &DeepSeekCodeConfig) -> Self {
         let project_dir = project_dir.into();
-        let skills = SkillCatalog::discover(&config.skills, &project_dir, config.skills_index_url.as_deref());
+        let skills = SkillCatalog::discover(
+            &config.skills,
+            &project_dir,
+            config.skills_index_url.as_deref(),
+        );
         let guidance = SkillCatalog::guidance_text(&skills);
         let sources: Vec<Box<dyn ErasedSource>> = vec![
             Box::new(workspace_source(&project_dir)),
@@ -202,8 +206,7 @@ impl<A: Send + Sync + serde::de::DeserializeOwned + 'static> ErasedSource for Co
                     let removed_text = prev.removed.clone().unwrap_or_else(|| {
                         self.removed
                             .map(|removed| {
-                                if let Ok(decoded) =
-                                    serde_json::from_value::<A>(prev.value.clone())
+                                if let Ok(decoded) = serde_json::from_value::<A>(prev.value.clone())
                                 {
                                     removed(&decoded)
                                 } else {
@@ -226,13 +229,12 @@ impl<A: Send + Sync + serde::de::DeserializeOwned + 'static> ErasedSource for Co
                     if prev.value == encoded {
                         return ReconcileResult::Unchanged;
                     }
-                    let text = if let Ok(prev_value) =
-                        serde_json::from_value::<A>(prev.value.clone())
-                    {
-                        (self.update)(&prev_value, &value)
-                    } else {
-                        (self.update)(&value, &value)
-                    };
+                    let text =
+                        if let Ok(prev_value) = serde_json::from_value::<A>(prev.value.clone()) {
+                            (self.update)(&prev_value, &value)
+                        } else {
+                            (self.update)(&value, &value)
+                        };
                     reconcile_snapshot(previous, key, encoded, text)
                 } else {
                     let text = (self.baseline)(&value);

@@ -43,7 +43,11 @@ fn main() {
             "memory_rss_mb={after} delta_mb={delta} startup_ms={}",
             elapsed.as_millis()
         );
-        let threshold_mb = if std::env::var("CI").is_ok() { 400 } else { 150 };
+        let threshold_mb = if std::env::var("CI").is_ok() {
+            400
+        } else {
+            150
+        };
         assert!(
             after < threshold_mb,
             "idle RSS {after}MB exceeds threshold {threshold_mb}MB"

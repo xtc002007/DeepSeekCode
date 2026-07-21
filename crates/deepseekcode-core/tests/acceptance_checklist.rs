@@ -117,13 +117,12 @@ fn acceptance_task_session_target() {
     )];
     let tree = ActivityProjector::project(&events, &[]);
     let session_target = tree.roots.iter().find_map(|n| match n {
-        ActivityNode::Group(g) if g.kind == ActivityGroupKind::TaskSubagent => g
-            .children
-            .iter()
-            .find_map(|c| match c {
+        ActivityNode::Group(g) if g.kind == ActivityGroupKind::TaskSubagent => {
+            g.children.iter().find_map(|c| match c {
                 ActivityNode::Leaf(l) => Some(&l.target),
                 _ => None,
-            }),
+            })
+        }
         _ => None,
     });
     assert!(matches!(

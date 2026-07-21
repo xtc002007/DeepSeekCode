@@ -2,7 +2,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ToSchema, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ToSchema, JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
     #[default]
@@ -54,7 +56,8 @@ impl AgentDefinition {
         Self {
             kind: AgentKind::Plan,
             name: "plan".into(),
-            description: "Planning agent that researches the codebase and writes implementation plans".into(),
+            description:
+                "Planning agent that researches the codebase and writes implementation plans".into(),
             system_prompt: Some(Self::plan_system_prompt().into()),
             max_turns: Some(50),
             tools: vec![

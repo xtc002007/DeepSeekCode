@@ -56,7 +56,11 @@ async fn run_fixture(path: &PathBuf) -> Result<(), String> {
         std::fs::write(dir.path().join("AGENTS.md"), "# Agent\nTest instructions.").ok();
     }
 
-    let db = Arc::new(Database::open_in_memory().await.map_err(|e| e.to_string())?);
+    let db = Arc::new(
+        Database::open_in_memory()
+            .await
+            .map_err(|e| e.to_string())?,
+    );
     let pool = db.pool().clone();
     let sessions = SessionStore::new(pool.clone());
     let events = Arc::new(EventStore::new(pool.clone()));
@@ -145,15 +149,9 @@ async fn run_fixture(path: &PathBuf) -> Result<(), String> {
             )
             .await
             .map_err(|e| e.to_string())?;
-            admit_prompt(
-                &pool,
-                MessageId::new(),
-                session_id,
-                "second",
-                delivery,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+            admit_prompt(&pool, MessageId::new(), session_id, "second", delivery)
+                .await
+                .map_err(|e| e.to_string())?;
         }
         "sessions.create" => {
             sessions
@@ -183,7 +181,10 @@ async fn run_fixture(path: &PathBuf) -> Result<(), String> {
                 hooks,
                 None,
             );
-            service.interrupt(session_id).await.map_err(|e| e.to_string())?;
+            service
+                .interrupt(session_id)
+                .await
+                .map_err(|e| e.to_string())?;
         }
         "sessions.move" => {
             let permissions = Arc::new(deepseekcode_core::permission::PermissionService::default());
@@ -247,7 +248,11 @@ async fn run_fixture(path: &PathBuf) -> Result<(), String> {
                 None,
             );
             let active = service.active().await.map_err(|e| e.to_string())?;
-            assert!(active.is_empty(), "{}: expected no active sessions", fixture.name);
+            assert!(
+                active.is_empty(),
+                "{}: expected no active sessions",
+                fixture.name
+            );
         }
         "context.baseline" => {
             let registry = SystemContextRegistry::new(dir.path().to_string_lossy());
@@ -512,11 +517,8 @@ async fn run_fixture(path: &PathBuf) -> Result<(), String> {
             let demo_file = dir.path().join("demo.txt");
             std::fs::write(&demo_file, "original").map_err(|e| e.to_string())?;
             let tool_msg = MessageId::new();
-            let snapshots = deepseekcode_core::snapshot::FileSnapshotStore::new(
-                pool.clone(),
-                dir.path(),
-                true,
-            );
+            let snapshots =
+                deepseekcode_core::snapshot::FileSnapshotStore::new(pool.clone(), dir.path(), true);
             snapshots
                 .capture(session_id, Some(tool_msg), &demo_file)
                 .await
@@ -706,12 +708,13 @@ async fn run_fixture(path: &PathBuf) -> Result<(), String> {
                 "{}: expected positive diff stats",
                 fixture.name
             );
-            let envelope = ToolResultEnvelope::new("Edited foo.rs", serde_json::json!({ "content": "x" }))
-                .with_metadata(serde_json::json!({
-                    "path": "foo.rs",
-                    "diff_stats": { "added": 2, "removed": 0 }
-                }))
-                .with_duration_ms(5);
+            let envelope =
+                ToolResultEnvelope::new("Edited foo.rs", serde_json::json!({ "content": "x" }))
+                    .with_metadata(serde_json::json!({
+                        "path": "foo.rs",
+                        "diff_stats": { "added": 2, "removed": 0 }
+                    }))
+                    .with_duration_ms(5);
             let stored = envelope.to_stored();
             let parsed = ToolResultEnvelope::from_stored(&stored);
             assert_eq!(parsed.title, "Edited foo.rs");
@@ -735,7 +738,11 @@ async fn run_fixture(path: &PathBuf) -> Result<(), String> {
         }
         "skill.discover" => {
             use deepseekcode_core::skills::SkillCatalog;
-            let skills_dir = dir.path().join(".deepseekcode").join("skills").join("demo-skill");
+            let skills_dir = dir
+                .path()
+                .join(".deepseekcode")
+                .join("skills")
+                .join("demo-skill");
             std::fs::create_dir_all(&skills_dir).map_err(|e| e.to_string())?;
             std::fs::write(
                 skills_dir.join("SKILL.md"),
@@ -752,8 +759,13 @@ async fn run_fixture(path: &PathBuf) -> Result<(), String> {
         other => return Err(format!("{}: unknown action {other}", fixture.name)),
     }
 
-    if fixture.given.session_exists && fixture.then.inbox_count > 0 || fixture.when.action.starts_with("sessions.prompt") {
-        let pending = sessions.pending_inputs(session_id).await.map_err(|e| e.to_string())?;
+    if fixture.given.session_exists && fixture.then.inbox_count > 0
+        || fixture.when.action.starts_with("sessions.prompt")
+    {
+        let pending = sessions
+            .pending_inputs(session_id)
+            .await
+            .map_err(|e| e.to_string())?;
         if pending.len() != fixture.then.inbox_count {
             return Err(format!(
                 "{}: expected inbox {}, got {}",
@@ -805,7 +817,9 @@ async fn run_all_fixtures() {
     for entry in std::fs::read_dir(&dir).expect("fixtures dir") {
         let path = entry.expect("entry").path();
         if path.extension().and_then(|e| e.to_str()) == Some("json") {
-            run_fixture(&path).await.expect(&format!("fixture {:?}", path));
+            run_fixture(&path)
+                .await
+                .expect(&format!("fixture {:?}", path));
             count += 1;
         }
     }

@@ -31,9 +31,7 @@ impl WorkspaceView {
                 | ActivityKind::Edit
                 | ActivityKind::ApplyPatch,
                 ActivityTargetKind::File {
-                    path,
-                    line_start,
-                    ..
+                    path, line_start, ..
                 },
             ) => {
                 self.layout.right_panel_tab = RightPanelTab::Editor;
@@ -41,14 +39,15 @@ impl WorkspaceView {
                 self.open_file_at_line(path, *line_start, meta.diff_stats.clone(), cx);
             }
             (ActivityKind::Grep, ActivityTargetKind::Pattern { .. }) => {
-                if let (Some(path), Some(line)) = (
-                    meta.first_match_path.as_deref(),
-                    meta.first_match_line,
-                ) {
+                if let (Some(path), Some(line)) =
+                    (meta.first_match_path.as_deref(), meta.first_match_line)
+                {
                     self.layout.right_panel_tab = RightPanelTab::Editor;
                     self.layout.show_right_panel = true;
                     self.open_file_at_line(path, Some(line), meta.diff_stats.clone(), cx);
-                } else if let Some(path) = grep_fallback_path(detail_ref, &self.activity.detail_store) {
+                } else if let Some(path) =
+                    grep_fallback_path(detail_ref, &self.activity.detail_store)
+                {
                     self.layout.right_panel_tab = RightPanelTab::Editor;
                     self.layout.show_right_panel = true;
                     self.open_file(&path, cx);
@@ -71,7 +70,12 @@ impl WorkspaceView {
                     self.open_file(&skill_doc, cx);
                 }
             }
-            (ActivityKind::Mcp, ActivityTargetKind::File { path, line_start, .. }) => {
+            (
+                ActivityKind::Mcp,
+                ActivityTargetKind::File {
+                    path, line_start, ..
+                },
+            ) => {
                 self.layout.right_panel_tab = RightPanelTab::Editor;
                 self.layout.show_right_panel = true;
                 self.open_file_at_line(path, *line_start, meta.diff_stats.clone(), cx);
@@ -87,7 +91,12 @@ impl WorkspaceView {
                 } else if let Some(path) = meta.first_match_path.as_deref() {
                     self.layout.right_panel_tab = RightPanelTab::Editor;
                     self.layout.show_right_panel = true;
-                    self.open_file_at_line(path, meta.first_match_line, meta.diff_stats.clone(), cx);
+                    self.open_file_at_line(
+                        path,
+                        meta.first_match_line,
+                        meta.diff_stats.clone(),
+                        cx,
+                    );
                 } else if detail_ref.is_some() {
                     self.layout.show_right_panel = true;
                 }
@@ -96,7 +105,12 @@ impl WorkspaceView {
                 if let Some(path) = meta.first_match_path.as_deref() {
                     self.layout.right_panel_tab = RightPanelTab::Editor;
                     self.layout.show_right_panel = true;
-                    self.open_file_at_line(path, meta.first_match_line, meta.diff_stats.clone(), cx);
+                    self.open_file_at_line(
+                        path,
+                        meta.first_match_line,
+                        meta.diff_stats.clone(),
+                        cx,
+                    );
                 } else if detail_ref.is_some() {
                     self.layout.show_right_panel = true;
                 }
@@ -130,7 +144,9 @@ impl WorkspaceView {
                 self.layout.show_right_panel = true;
                 if let Some(path) = meta.first_match_path.as_deref() {
                     self.reveal_path_in_file_tree(path, cx);
-                } else if let Some(path) = glob_list_fallback_path(detail_ref, &self.activity.detail_store) {
+                } else if let Some(path) =
+                    glob_list_fallback_path(detail_ref, &self.activity.detail_store)
+                {
                     self.reveal_path_in_file_tree(&path, cx);
                 }
             }
@@ -173,10 +189,7 @@ impl WorkspaceView {
         let full = if std::path::Path::new(path).is_absolute() {
             normalized
         } else {
-            project_dir
-                .join(path)
-                .to_string_lossy()
-                .replace('\\', "/")
+            project_dir.join(path).to_string_lossy().replace('\\', "/")
         };
         let root = project_dir.to_string_lossy().replace('\\', "/");
         let mut dir = std::path::Path::new(&full)
@@ -203,15 +216,21 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    pub(crate) fn refresh_bash_terminal_output(&mut self, detail_key: &str, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_bash_terminal_output(
+        &mut self,
+        detail_key: &str,
+        cx: &mut Context<Self>,
+    ) {
         let display = self
-            .activity.detail_store
+            .activity
+            .detail_store
             .get(detail_key)
             .and_then(|d| d.output.as_deref())
             .map(extract_bash_display_text)
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| {
-                self.activity.detail_store
+                self.activity
+                    .detail_store
                     .get(detail_key)
                     .and_then(|d| d.input.as_deref())
                     .map(bash_running_terminal_text)
@@ -242,15 +261,21 @@ impl WorkspaceView {
         }
     }
 
-    pub(crate) fn show_bash_output_in_terminal(&mut self, detail_key: &str, cx: &mut Context<Self>) {
+    pub(crate) fn show_bash_output_in_terminal(
+        &mut self,
+        detail_key: &str,
+        cx: &mut Context<Self>,
+    ) {
         self.bash_output_detail_ref = Some(detail_key.to_string());
         let command = self
-            .activity.detail_store
+            .activity
+            .detail_store
             .get(detail_key)
             .and_then(|d| d.input.as_deref())
             .unwrap_or("(unknown command)");
         let output = self
-            .activity.detail_store
+            .activity
+            .detail_store
             .get(detail_key)
             .and_then(|d| d.output.clone())
             .unwrap_or_default();
@@ -263,7 +288,8 @@ impl WorkspaceView {
         if self.terminals.is_empty() {
             let id = self.next_terminal_id;
             self.next_terminal_id += 1;
-            self.terminals.push(crate::terminal::TerminalTab::new(id, "Shell 1"));
+            self.terminals
+                .push(crate::terminal::TerminalTab::new(id, "Shell 1"));
         }
         let tab_idx = self
             .terminals
@@ -273,11 +299,10 @@ impl WorkspaceView {
                 let id = self.next_terminal_id;
                 self.next_terminal_id += 1;
                 let title = format!("Bash #{}", id);
-                self.terminals.push(crate::terminal::TerminalTab::new_bash_output(
-                    id,
-                    title,
-                    detail_key,
-                ));
+                self.terminals
+                    .push(crate::terminal::TerminalTab::new_bash_output(
+                        id, title, detail_key,
+                    ));
                 self.terminals.len() - 1
             });
         if let Some(tab) = self.terminals.get_mut(tab_idx) {
@@ -301,7 +326,9 @@ impl WorkspaceView {
             .and_then(|k| self.activity.detail_store.get(k))
             .and_then(|d| d.web_preview.clone().or_else(|| d.output.clone()));
         if let Some(key) = detail_ref {
-            self.activity.detail_store.set_web_preview(key, url, preview);
+            self.activity
+                .detail_store
+                .set_web_preview(key, url, preview);
         }
     }
 }

@@ -78,57 +78,104 @@ fn init_inner(component: &str, config: &LoggingConfig) -> Result<RunContext> {
         let (sess_w, g2) = open_log(&run_dir, "session.log")?;
         push_guard(g1);
         push_guard(g2);
-        let session_filter =
-            tracing_subscriber::filter::filter_fn(|m| crate::targets::is_session_target(m.target()));
+        let session_filter = tracing_subscriber::filter::filter_fn(|m| {
+            crate::targets::is_session_target(m.target())
+        });
 
         if audit {
             let (audit_w, g3) = open_log(&run_dir, "audit.log")?;
             push_guard(g3);
-            let audit_filter =
-                tracing_subscriber::filter::filter_fn(|m| crate::targets::is_audit_target(m.target()));
+            let audit_filter = tracing_subscriber::filter::filter_fn(|m| {
+                crate::targets::is_audit_target(m.target())
+            });
             if console && pretty {
                 tracing_subscriber::registry()
                     .with(filter)
                     .with(fmt::layer().json().with_writer(app_w))
-                    .with(fmt::layer().json().with_writer(sess_w).with_filter(session_filter))
-                    .with(fmt::layer().json().with_writer(audit_w).with_filter(audit_filter))
+                    .with(
+                        fmt::layer()
+                            .json()
+                            .with_writer(sess_w)
+                            .with_filter(session_filter),
+                    )
+                    .with(
+                        fmt::layer()
+                            .json()
+                            .with_writer(audit_w)
+                            .with_filter(audit_filter),
+                    )
                     .with(fmt::layer().pretty().with_writer(io::stdout))
                     .init();
             } else if console {
                 tracing_subscriber::registry()
                     .with(filter)
                     .with(fmt::layer().json().with_writer(app_w))
-                    .with(fmt::layer().json().with_writer(sess_w).with_filter(session_filter))
-                    .with(fmt::layer().json().with_writer(audit_w).with_filter(audit_filter))
+                    .with(
+                        fmt::layer()
+                            .json()
+                            .with_writer(sess_w)
+                            .with_filter(session_filter),
+                    )
+                    .with(
+                        fmt::layer()
+                            .json()
+                            .with_writer(audit_w)
+                            .with_filter(audit_filter),
+                    )
                     .with(fmt::layer().json().with_writer(io::stdout))
                     .init();
             } else {
                 tracing_subscriber::registry()
                     .with(filter)
                     .with(fmt::layer().json().with_writer(app_w))
-                    .with(fmt::layer().json().with_writer(sess_w).with_filter(session_filter))
-                    .with(fmt::layer().json().with_writer(audit_w).with_filter(audit_filter))
+                    .with(
+                        fmt::layer()
+                            .json()
+                            .with_writer(sess_w)
+                            .with_filter(session_filter),
+                    )
+                    .with(
+                        fmt::layer()
+                            .json()
+                            .with_writer(audit_w)
+                            .with_filter(audit_filter),
+                    )
                     .init();
             }
         } else if console && pretty {
             tracing_subscriber::registry()
                 .with(filter)
                 .with(fmt::layer().json().with_writer(app_w))
-                .with(fmt::layer().json().with_writer(sess_w).with_filter(session_filter))
+                .with(
+                    fmt::layer()
+                        .json()
+                        .with_writer(sess_w)
+                        .with_filter(session_filter),
+                )
                 .with(fmt::layer().pretty().with_writer(io::stdout))
                 .init();
         } else if console {
             tracing_subscriber::registry()
                 .with(filter)
                 .with(fmt::layer().json().with_writer(app_w))
-                .with(fmt::layer().json().with_writer(sess_w).with_filter(session_filter))
+                .with(
+                    fmt::layer()
+                        .json()
+                        .with_writer(sess_w)
+                        .with_filter(session_filter),
+                )
                 .with(fmt::layer().json().with_writer(io::stdout))
                 .init();
         } else {
             tracing_subscriber::registry()
                 .with(filter)
                 .with(fmt::layer().json().with_writer(app_w))
-                .with(fmt::layer().json().with_writer(sess_w).with_filter(session_filter))
+                .with(
+                    fmt::layer()
+                        .json()
+                        .with_writer(sess_w)
+                        .with_filter(session_filter),
+                )
                 .init();
         }
     } else if console && pretty {

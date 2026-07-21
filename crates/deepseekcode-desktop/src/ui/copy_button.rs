@@ -10,7 +10,15 @@ pub fn render_copy_button(
 ) -> impl IntoElement {
     let text = text.into();
     let theme = theme.clone();
-    render_icon_button(id, IconName::Copy, &theme, px(24.), false, false, move |cx| {
-        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-    })
+    render_icon_button(
+        id,
+        IconName::Copy,
+        &theme,
+        px(24.),
+        false,
+        false,
+        move |cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+        },
+    )
 }

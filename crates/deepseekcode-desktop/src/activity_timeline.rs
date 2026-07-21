@@ -61,8 +61,8 @@ pub fn rebuild_detail_store(events: &[deepseekcode_schema::event::EventEnvelope]
             EventKind::ToolStarted => {
                 if let Some(id) = event.payload["tool_call_id"].as_str() {
                     let input = event.payload.get("input").cloned().unwrap_or_default();
-                    let detail = serde_json::to_string_pretty(&input)
-                        .unwrap_or_else(|_| input.to_string());
+                    let detail =
+                        serde_json::to_string_pretty(&input).unwrap_or_else(|_| input.to_string());
                     store.insert(
                         id,
                         DetailPayload {
@@ -189,21 +189,19 @@ fn web_fields_from_tool(
         .and_then(|v| v.as_str())
         .map(|s| truncate_preview(s, 4000))
         .or_else(|| {
-            body.get("results")
-                .and_then(|r| r.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .take(5)
-                        .filter_map(|item| {
-                            Some(format!(
-                                "{} — {}",
-                                item.get("title")?.as_str()?,
-                                item.get("url")?.as_str()?
-                            ))
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
+            body.get("results").and_then(|r| r.as_array()).map(|arr| {
+                arr.iter()
+                    .take(5)
+                    .filter_map(|item| {
+                        Some(format!(
+                            "{} — {}",
+                            item.get("title")?.as_str()?,
+                            item.get("url")?.as_str()?
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
         });
     (url, preview)
 }
@@ -212,10 +210,7 @@ fn truncate_preview(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         text.to_string()
     } else {
-        format!(
-            "{}…",
-            text.chars().take(max).collect::<String>()
-        )
+        format!("{}…", text.chars().take(max).collect::<String>())
     }
 }
 
@@ -237,7 +232,8 @@ impl ActivityTimelineView {
         use gpui::*;
 
         let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
-        let flattened = flatten_activity_tree(tree, expanded_groups, collapsed_groups, expanded_leaves);
+        let flattened =
+            flatten_activity_tree(tree, expanded_groups, collapsed_groups, expanded_leaves);
         // IMPORTANT: do not window/virtualize rows against estimated heights.
         // Estimated spacer heights diverge from real markdown layout; wheel scrolling then
         // remounts a wrong window (blank viewport) and max_offset jumps so you cannot reach the end.
@@ -282,16 +278,13 @@ impl ActivityTimelineView {
                                 .border_1()
                                 .border_color(theme.border_faint)
                                 .child(crate::ui::loader::render_loader(&theme, px(28.)))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(theme.text_secondary)
-                                        .child(if session_loading {
-                                            "正在加载会话…"
-                                        } else {
-                                            "正在更新会话记录…"
-                                        }),
-                                ),
+                                .child(div().text_sm().text_color(theme.text_secondary).child(
+                                    if session_loading {
+                                        "正在加载会话…"
+                                    } else {
+                                        "正在更新会话记录…"
+                                    },
+                                )),
                         ),
                 );
             } else {
@@ -541,8 +534,7 @@ fn render_node(
                         .items_start()
                         .gap_1p5()
                         .child(if is_running {
-                            crate::ui::loader::render_loader(&theme, px(14.))
-                                .into_any_element()
+                            crate::ui::loader::render_loader(&theme, px(14.)).into_any_element()
                         } else {
                             crate::ui::icon::render_icon_rgba(icon, px(14.), color)
                                 .into_any_element()
@@ -620,12 +612,7 @@ fn render_group(
     let gid = group.id.clone();
     let collapsed_default = group.collapsed_default;
     let is_session_meta = group.kind == ActivityGroupKind::SessionMeta;
-    let mut block = div()
-        .w_full()
-        .flex_shrink_0()
-        .flex()
-        .flex_col()
-        .gap_1();
+    let mut block = div().w_full().flex_shrink_0().flex().flex_col().gap_1();
 
     let theme = theme.clone();
     let chevron = if is_expanded {
@@ -711,8 +698,8 @@ fn activity_kind_style(
     status: deepseekcode_schema::activity::ActivityStatus,
     theme: &crate::theme::ThemeTokens,
 ) -> (crate::ui::icon::IconName, gpui::Rgba) {
-    use deepseekcode_schema::activity::{ActivityKind, ActivityStatus};
     use crate::ui::icon::IconName;
+    use deepseekcode_schema::activity::{ActivityKind, ActivityStatus};
 
     if status == ActivityStatus::Failed {
         return (IconName::AlertCircle, theme.error);
@@ -734,7 +721,10 @@ fn activity_kind_style(
     };
 
     let color = match kind {
-        ActivityKind::Read | ActivityKind::Glob | ActivityKind::List | ActivityKind::Grep
+        ActivityKind::Read
+        | ActivityKind::Glob
+        | ActivityKind::List
+        | ActivityKind::Grep
         | ActivityKind::WebSearch => theme.tool_read,
         ActivityKind::Write | ActivityKind::Edit | ActivityKind::ApplyPatch => theme.tool_write,
         ActivityKind::Bash => theme.tool_bash,

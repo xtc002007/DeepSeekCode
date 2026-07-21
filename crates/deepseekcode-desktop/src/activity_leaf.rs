@@ -1,7 +1,7 @@
 //! One-line leaf labels for Cursor-style activity rows.
 
 use deepseekcode_schema::activity::{
-    ActivityKind, ActivityLeaf, ActivityMeta, ActivityStatus, ActivityTargetKind, ActivitySummary,
+    ActivityKind, ActivityLeaf, ActivityMeta, ActivityStatus, ActivitySummary, ActivityTargetKind,
 };
 
 pub fn format_summary_line(summary: &ActivitySummary) -> String {
@@ -23,7 +23,10 @@ pub fn format_summary_line(summary: &ActivitySummary) -> String {
         if !line.is_empty() {
             line.push(' ');
         }
-        line.push_str(&format!("+{} -{}", summary.lines_added, summary.lines_removed));
+        line.push_str(&format!(
+            "+{} -{}",
+            summary.lines_added, summary.lines_removed
+        ));
     }
     if line.is_empty() {
         "Activity".into()
@@ -91,9 +94,14 @@ pub fn format_leaf_line(leaf: &ActivityLeaf) -> String {
 
     let object = format_target(&leaf.target);
     let meta = match (&leaf.kind, &leaf.target) {
-        (ActivityKind::Read, ActivityTargetKind::File { line_start, line_end, .. }) => {
-            format_read_meta(*line_start, *line_end)
-        }
+        (
+            ActivityKind::Read,
+            ActivityTargetKind::File {
+                line_start,
+                line_end,
+                ..
+            },
+        ) => format_read_meta(*line_start, *line_end),
         _ => format_meta(&leaf.kind, &leaf.meta),
     };
     let body = if object.is_empty() {
@@ -122,9 +130,9 @@ fn format_target(target: &ActivityTargetKind) -> String {
         }
         ActivityTargetKind::Pattern { pattern, .. } => pattern.clone(),
         ActivityTargetKind::Url { url } => url.clone(),
-        ActivityTargetKind::Session { label, session_id } => label
-            .clone()
-            .unwrap_or_else(|| session_id.clone()),
+        ActivityTargetKind::Session { label, session_id } => {
+            label.clone().unwrap_or_else(|| session_id.clone())
+        }
         ActivityTargetKind::TodoList => "todos".into(),
         ActivityTargetKind::Skill { name } => name.clone(),
         ActivityTargetKind::Generic { label } => label.clone(),
@@ -249,7 +257,10 @@ mod tests {
                 line_end: None,
             },
             meta: ActivityMeta {
-                diff_stats: Some(DiffStats { added: 21, removed: 1 }),
+                diff_stats: Some(DiffStats {
+                    added: 21,
+                    removed: 1,
+                }),
                 ..Default::default()
             },
             status: ActivityStatus::Completed,

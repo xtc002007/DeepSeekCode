@@ -5,13 +5,13 @@ use deepseekcode_schema::event::{EventEnvelope, EventKind};
 use deepseekcode_schema::message::Message;
 use deepseekcode_sdk::ChildSessionProjection;
 use deepseekcode_sdk::{
-    patch_assistant_message_completed, patch_assistant_message_delta, patch_running_tool_leaf_preview,
-    patch_tool_completed, patch_tool_started, event_requires_full_rebuild, ActivityProjector,
+    event_requires_full_rebuild, patch_assistant_message_completed, patch_assistant_message_delta,
+    patch_running_tool_leaf_preview, patch_tool_completed, patch_tool_started, ActivityProjector,
     SESSION_EVENTS_CAP,
 };
 use std::collections::{HashMap, HashSet};
 
-use crate::activity_timeline::{DetailStore, rebuild_detail_store};
+use crate::activity_timeline::{rebuild_detail_store, DetailStore};
 
 pub fn push_session_event(events: &mut Vec<EventEnvelope>, event: EventEnvelope) {
     events.push(event);

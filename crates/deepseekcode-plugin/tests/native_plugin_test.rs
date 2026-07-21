@@ -36,7 +36,8 @@ fn native_hello_hook_loads_when_built() {
     };
 
     let mut host = PluginHost::new();
-    host.load_native_file(&path).expect("load hello-hook native plugin");
+    host.load_native_file(&path)
+        .expect("load hello-hook native plugin");
     let plugins = host.list();
     assert!(
         plugins.iter().any(|p| p.contains("hello")),

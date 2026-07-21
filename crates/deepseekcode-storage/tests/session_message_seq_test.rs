@@ -68,7 +68,10 @@ async fn assistant_turn_and_tool_result_share_transactional_seq() {
         .expect("tool result");
     let messages = store.list_messages(session_id).await.expect("list");
     assert_eq!(messages.len(), 2);
-    let assistant = messages.iter().find(|m| m.id == assistant_id).expect("assistant");
+    let assistant = messages
+        .iter()
+        .find(|m| m.id == assistant_id)
+        .expect("assistant");
     assert_eq!(assistant.parts.len(), 2);
 }
 
@@ -81,12 +84,7 @@ async fn concurrent_inserts_get_unique_seq() {
         let store = store.clone();
         handles.push(tokio::spawn(async move {
             store
-                .insert_message(
-                    MessageId::new(),
-                    session_id,
-                    "user",
-                    &format!("msg-{i}"),
-                )
+                .insert_message(MessageId::new(), session_id, "user", &format!("msg-{i}"))
                 .await
         }));
     }

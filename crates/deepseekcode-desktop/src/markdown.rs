@@ -235,14 +235,10 @@ impl<'a> ParseContext<'a> {
                     self.table_row.clear();
                 }
                 TagEnd::TableCell => {
-                    self.table_row
-                        .push(self.table_cell.trim().to_string());
+                    self.table_row.push(self.table_cell.trim().to_string());
                     self.table_cell.clear();
                 }
-                TagEnd::Emphasis
-                | TagEnd::Strong
-                | TagEnd::Strikethrough
-                | TagEnd::Link => {
+                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => {
                     self.inline_stack.pop();
                 }
                 _ => {}
@@ -438,10 +434,9 @@ fn render_code_block(source: &str, lang: &str, theme: &ThemeTokens) -> AnyElemen
 
     let mono = crate::theme::font_mono(theme);
     block
-        .child(render_multiline(
-            source.trim_end(),
-            move |el| el.text_xs().font_family(mono.clone()).text_color(md.text),
-        ))
+        .child(render_multiline(source.trim_end(), move |el| {
+            el.text_xs().font_family(mono.clone()).text_color(md.text)
+        }))
         .into_any_element()
 }
 
@@ -458,7 +453,13 @@ fn render_list(items: Vec<Vec<InlineRun>>, ordered: bool, theme: &ThemeTokens) -
             div()
                 .flex()
                 .gap_1()
-                .child(div().flex_shrink_0().text_sm().text_color(md.muted).child(marker))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(md.muted)
+                        .child(marker),
+                )
                 .child(render_paragraph(item, theme)),
         );
     }
@@ -495,11 +496,7 @@ fn render_table_row(
     theme: &ThemeTokens,
 ) -> impl IntoElement {
     let md = &theme.markdown;
-    let mut row = div()
-        .w_full()
-        .flex()
-        .border_b_1()
-        .border_color(md.border);
+    let mut row = div().w_full().flex().border_b_1().border_color(md.border);
     for (index, cell) in cells.iter().enumerate() {
         let align = alignments.get(index).copied().unwrap_or(Alignment::None);
         let mut cell_el = div()

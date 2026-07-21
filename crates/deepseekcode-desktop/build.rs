@@ -33,13 +33,17 @@ fn generate_icons() {
         code.push_str(&format!("    {variant},\n"));
     }
 
-    code.push_str("}\n\nimpl IconName {\n    pub fn path(self) -> &'static str {\n        match self {\n");
+    code.push_str(
+        "}\n\nimpl IconName {\n    pub fn path(self) -> &'static str {\n        match self {\n",
+    );
 
     for entry in &entries {
         let path = entry.path();
         let stem = path.file_stem().unwrap().to_string_lossy();
         let variant = to_pascal_case(&stem);
-        code.push_str(&format!("            Self::{variant} => \"icons/{stem}.svg\",\n"));
+        code.push_str(&format!(
+            "            Self::{variant} => \"icons/{stem}.svg\",\n"
+        ));
     }
 
     code.push_str("        }\n    }\n\n    pub fn all() -> &'static [IconName] {\n        &[\n");

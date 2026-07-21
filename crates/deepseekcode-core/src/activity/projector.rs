@@ -115,11 +115,7 @@ impl ActivityProjector {
                                     .unwrap_or_else(|| format!("assistant-{}", event.seq));
                                 replace_or_push_assistant(
                                     &mut t.children,
-                                    assistant_leaf(
-                                        &id,
-                                        &t.assistant_text,
-                                        ActivityStatus::Running,
-                                    ),
+                                    assistant_leaf(&id, &t.assistant_text, ActivityStatus::Running),
                                 );
                             }
                         }
@@ -139,7 +135,8 @@ impl ActivityProjector {
                             .unwrap_or("tool")
                             .to_string(),
                         input: event.payload.get("input").cloned().unwrap_or(Value::Null),
-                        title: event.payload
+                        title: event
+                            .payload
                             .get("title")
                             .and_then(|v| v.as_str())
                             .map(String::from),
@@ -163,9 +160,7 @@ impl ActivityProjector {
                         .as_str()
                         .unwrap_or("")
                         .to_string();
-                    let pending = turn
-                        .as_mut()
-                        .and_then(|t| t.pending_tools.remove(&id));
+                    let pending = turn.as_mut().and_then(|t| t.pending_tools.remove(&id));
                     let name = event.payload["tool_name"]
                         .as_str()
                         .or(pending.as_ref().map(|p| p.name.as_str()))
@@ -269,10 +264,7 @@ impl ActivityProjector {
                         kind: ActivityKind::Question,
                         verb: "Asked".into(),
                         target: ActivityTargetKind::Generic {
-                            label: event.payload["question"]
-                                .as_str()
-                                .unwrap_or("")
-                                .to_string(),
+                            label: event.payload["question"].as_str().unwrap_or("").to_string(),
                         },
                         meta: ActivityMeta::default(),
                         status: ActivityStatus::Running,
@@ -285,7 +277,9 @@ impl ActivityProjector {
                         roots.push(ActivityNode::Leaf(leaf));
                     }
                 }
-                EventKind::SessionIdle | EventKind::SessionInterrupted | EventKind::SessionCompacted => {
+                EventKind::SessionIdle
+                | EventKind::SessionInterrupted
+                | EventKind::SessionCompacted => {
                     if let Some(mut t) = turn.take() {
                         t.ended_at = Some(event.created_at);
                         roots.push(ActivityNode::Group(t.finish()));
@@ -460,7 +454,9 @@ impl TurnBuilder {
 fn summarize_children(children: &[ActivityNode]) -> ActivitySummary {
     let mut summary = ActivitySummary::default();
     for node in children {
-        let ActivityNode::Leaf(leaf) = node else { continue };
+        let ActivityNode::Leaf(leaf) = node else {
+            continue;
+        };
         match leaf.kind {
             ActivityKind::Write | ActivityKind::Edit | ActivityKind::ApplyPatch => {
                 summary.files_edited += 1;
@@ -605,7 +601,12 @@ fn upgrade_assistant_in_tree(nodes: &mut [ActivityNode], id: &str, text: &str) -
             ActivityNode::Leaf(leaf)
                 if leaf.kind == ActivityKind::AssistantMessage && leaf.id == id =>
             {
-                let existing_len = leaf.text.as_deref().map(str::chars).map(|c| c.count()).unwrap_or(0);
+                let existing_len = leaf
+                    .text
+                    .as_deref()
+                    .map(str::chars)
+                    .map(|c| c.count())
+                    .unwrap_or(0);
                 let new_len = text.chars().count();
                 if new_len > existing_len {
                     leaf.text = Some(text.to_string());
@@ -675,12 +676,8 @@ fn permission_leaf(event: &EventEnvelope) -> ActivityLeaf {
         .as_str()
         .unwrap_or("tool")
         .to_string();
-    let scope = event.payload["scope"]
-        .as_str()
-        .unwrap_or(&tool)
-        .to_string();
-    let policy_id = event
-        .payload["policy_id"]
+    let scope = event.payload["scope"].as_str().unwrap_or(&tool).to_string();
+    let policy_id = event.payload["policy_id"]
         .as_str()
         .or_else(|| event.payload["permission_id"].as_str())
         .map(String::from);
@@ -775,9 +772,11 @@ fn todo_leaf_from_event(event: &EventEnvelope) -> ActivityLeaf {
 }
 
 fn replace_or_push_leaf(turn: &mut TurnBuilder, id: &str, leaf: ActivityLeaf) {
-    if let Some(pos) = turn.children.iter().position(|n| {
-        matches!(n, ActivityNode::Leaf(l) if l.id == id)
-    }) {
+    if let Some(pos) = turn
+        .children
+        .iter()
+        .position(|n| matches!(n, ActivityNode::Leaf(l) if l.id == id))
+    {
         turn.children[pos] = ActivityNode::Leaf(leaf);
     } else {
         turn.children.push(ActivityNode::Leaf(leaf));
@@ -785,9 +784,11 @@ fn replace_or_push_leaf(turn: &mut TurnBuilder, id: &str, leaf: ActivityLeaf) {
 }
 
 fn replace_or_push_node(turn: &mut TurnBuilder, id: &str, node: ActivityNode) {
-    if let Some(pos) = turn.children.iter().position(|n| {
-        matches!(n, ActivityNode::Leaf(l) if l.id == id)
-    }) {
+    if let Some(pos) = turn
+        .children
+        .iter()
+        .position(|n| matches!(n, ActivityNode::Leaf(l) if l.id == id))
+    {
         turn.children[pos] = node;
     } else {
         turn.children.push(node);
@@ -795,9 +796,9 @@ fn replace_or_push_node(turn: &mut TurnBuilder, id: &str, node: ActivityNode) {
 }
 
 fn update_running_tool_preview(turn: &mut TurnBuilder, id: &str, preview: &str) {
-    if let Some(pos) = turn.children.iter().position(|n| {
-        matches!(n, ActivityNode::Leaf(l) if l.id == id && l.status == ActivityStatus::Running)
-    }) {
+    if let Some(pos) = turn.children.iter().position(
+        |n| matches!(n, ActivityNode::Leaf(l) if l.id == id && l.status == ActivityStatus::Running),
+    ) {
         if let ActivityNode::Leaf(leaf) = &mut turn.children[pos] {
             leaf.text = Some(preview.to_string());
         }
@@ -859,10 +860,7 @@ fn running_leaf(id: &str, pending: &PendingTool) -> ActivityLeaf {
     }
 }
 
-fn completed_leaf_from_event(
-    event: &EventEnvelope,
-    pending: Option<PendingTool>,
-) -> ActivityLeaf {
+fn completed_leaf_from_event(event: &EventEnvelope, pending: Option<PendingTool>) -> ActivityLeaf {
     let id = event.payload["tool_call_id"]
         .as_str()
         .unwrap_or("")
@@ -883,17 +881,15 @@ fn completed_leaf_from_event(
         .unwrap_or(Value::Null);
     let output = event.payload.get("output").cloned().unwrap_or(Value::Null);
     let envelope = ToolResultEnvelope::from_stored(&output);
-    let failed = envelope
-        .output
-        .get("error")
-        .is_some()
+    let failed = envelope.output.get("error").is_some()
         || envelope.output.get("success") == Some(&Value::Bool(false));
     let (kind, verb, target, mut meta) = map_tool(name, &input, &metadata);
     if let Some(ms) = event.payload.get("duration_ms").and_then(|v| v.as_u64()) {
         meta.duration_ms = Some(ms);
     }
     if meta.diff_stats.is_none() {
-        meta.diff_stats = parse_diff_stats(&metadata).or_else(|| parse_diff_stats(&envelope.metadata));
+        meta.diff_stats =
+            parse_diff_stats(&metadata).or_else(|| parse_diff_stats(&envelope.metadata));
     }
     ActivityLeaf {
         id: id.clone(),
@@ -915,10 +911,7 @@ fn completed_leaf_from_event(
     }
 }
 
-fn plan_ready_leaf_from_event(
-    event: &EventEnvelope,
-    pending: Option<PendingTool>,
-) -> ActivityLeaf {
+fn plan_ready_leaf_from_event(event: &EventEnvelope, pending: Option<PendingTool>) -> ActivityLeaf {
     let mut leaf = completed_leaf_from_event(event, pending);
     let output = event.payload.get("output").cloned().unwrap_or(Value::Null);
     let envelope = ToolResultEnvelope::from_stored(&output);
@@ -1008,8 +1001,14 @@ fn map_tool(
                 .or_else(|| input.get("path").and_then(|v| v.as_str()))
                 .unwrap_or("")
                 .to_string();
-            let line_start = metadata.get("line_start").and_then(|v| v.as_u64()).map(|v| v as u32);
-            let line_end = metadata.get("line_end").and_then(|v| v.as_u64()).map(|v| v as u32);
+            let line_start = metadata
+                .get("line_start")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            let line_end = metadata
+                .get("line_end")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
             (
                 ActivityKind::Read,
                 "Read".into(),
@@ -1023,11 +1022,29 @@ fn map_tool(
         }
         "write" => {
             let path = file_path(input, metadata);
-            (ActivityKind::Write, "Wrote".into(), ActivityTargetKind::File { path, line_start: None, line_end: None }, meta)
+            (
+                ActivityKind::Write,
+                "Wrote".into(),
+                ActivityTargetKind::File {
+                    path,
+                    line_start: None,
+                    line_end: None,
+                },
+                meta,
+            )
         }
         "edit" => {
             let path = file_path(input, metadata);
-            (ActivityKind::Edit, "Edited".into(), ActivityTargetKind::File { path, line_start: None, line_end: None }, meta)
+            (
+                ActivityKind::Edit,
+                "Edited".into(),
+                ActivityTargetKind::File {
+                    path,
+                    line_start: None,
+                    line_end: None,
+                },
+                meta,
+            )
         }
         "apply_patch" => (
             ActivityKind::ApplyPatch,
@@ -1045,7 +1062,11 @@ fn map_tool(
             ActivityKind::Grep,
             "Searched".into(),
             ActivityTargetKind::Pattern {
-                pattern: input.get("pattern").and_then(|v| v.as_str()).unwrap_or("").into(),
+                pattern: input
+                    .get("pattern")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .into(),
                 scope: input.get("path").and_then(|v| v.as_str()).map(String::from),
             },
             meta,
@@ -1068,7 +1089,11 @@ fn map_tool(
             ActivityKind::List,
             "Listed".into(),
             ActivityTargetKind::Pattern {
-                pattern: input.get("path").and_then(|v| v.as_str()).unwrap_or(".").into(),
+                pattern: input
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(".")
+                    .into(),
                 scope: None,
             },
             meta,
@@ -1077,7 +1102,11 @@ fn map_tool(
             ActivityKind::Bash,
             "Ran".into(),
             ActivityTargetKind::Command {
-                command: input.get("command").and_then(|v| v.as_str()).unwrap_or("").into(),
+                command: input
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .into(),
             },
             meta,
         ),
@@ -1085,7 +1114,11 @@ fn map_tool(
             ActivityKind::WebFetch,
             "Fetched".into(),
             ActivityTargetKind::Url {
-                url: input.get("url").and_then(|v| v.as_str()).unwrap_or("").into(),
+                url: input
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .into(),
             },
             meta,
         ),
@@ -1106,7 +1139,9 @@ fn map_tool(
                 (
                     ActivityKind::WebSearch,
                     "Searched web".into(),
-                    ActivityTargetKind::Generic { label: query.into() },
+                    ActivityTargetKind::Generic {
+                        label: query.into(),
+                    },
                     meta,
                 )
             }
@@ -1115,7 +1150,11 @@ fn map_tool(
             ActivityKind::Skill,
             "Loaded skill".into(),
             ActivityTargetKind::Skill {
-                name: input.get("name").and_then(|v| v.as_str()).unwrap_or("").into(),
+                name: input
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .into(),
             },
             meta,
         ),
@@ -1140,7 +1179,10 @@ fn map_tool(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
-                label: input.get("agent").and_then(|v| v.as_str()).map(String::from),
+                label: input
+                    .get("agent")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
             },
             meta,
         ),
@@ -1148,7 +1190,11 @@ fn map_tool(
             ActivityKind::Question,
             "Asked".into(),
             ActivityTargetKind::Generic {
-                label: input.get("question").and_then(|v| v.as_str()).unwrap_or("").into(),
+                label: input
+                    .get("question")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .into(),
             },
             meta,
         ),
@@ -1168,7 +1214,11 @@ fn map_tool(
             ActivityKind::Lsp,
             "LSP".into(),
             ActivityTargetKind::Generic {
-                label: input.get("method").and_then(|v| v.as_str()).unwrap_or("").into(),
+                label: input
+                    .get("method")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .into(),
             },
             meta,
         ),
@@ -1187,7 +1237,9 @@ fn map_tool(
         other => (
             ActivityKind::Mcp,
             other.into(),
-            ActivityTargetKind::Generic { label: other.into() },
+            ActivityTargetKind::Generic {
+                label: other.into(),
+            },
             meta,
         ),
     }
@@ -1232,7 +1284,9 @@ mod tests {
                     "metadata": { "path": "lib.rs", "line_start": 1, "line_end": 17 }
                 }),
             ),
-            ev(EventKind::ToolCompleted, serde_json::json!({
+            ev(
+                EventKind::ToolCompleted,
+                serde_json::json!({
                     "tool_call_id": "c1",
                     "tool_name": "read",
                     "title": "Read lib.rs",

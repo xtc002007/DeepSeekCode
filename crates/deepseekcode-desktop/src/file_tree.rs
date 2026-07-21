@@ -1,9 +1,9 @@
-use deepseekcode_sdk::FsEntry;
 use crate::theme::ThemeTokens;
-use crate::ui::icon::file_type::{color_for_path, icon_for_path};
 use crate::ui::badge::render_status_badge;
 use crate::ui::button::icon_button_shell;
+use crate::ui::icon::file_type::{color_for_path, icon_for_path};
 use crate::ui::icon::{render_icon_rgba, IconName};
+use deepseekcode_sdk::FsEntry;
 use gpui::*;
 use std::collections::{HashMap, HashSet};
 
@@ -124,9 +124,12 @@ impl FileTreeView {
                                     false,
                                     false,
                                 )
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.refresh_file_tree(cx);
-                                })),
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.refresh_file_tree(cx);
+                                    }),
+                                ),
                             )
                             .child(
                                 icon_button_shell(
@@ -138,18 +141,17 @@ impl FileTreeView {
                                     false,
                                     false,
                                 )
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.add_project_directory(cx);
-                                })),
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.add_project_directory(cx);
+                                    }),
+                                ),
                             ),
                     ),
             );
 
-        let root_entries = state
-            .entries
-            .get(project_dir)
-            .cloned()
-            .unwrap_or_default();
+        let root_entries = state.entries.get(project_dir).cloned().unwrap_or_default();
         let root_entries: Vec<_> = if query.is_empty() {
             root_entries
         } else {
@@ -169,16 +171,16 @@ impl FileTreeView {
                     .child("Loading…"),
             );
         } else {
-            let total = state.totals.get(project_dir).copied().unwrap_or(root_entries.len());
+            let total = state
+                .totals
+                .get(project_dir)
+                .copied()
+                .unwrap_or(root_entries.len());
             let offset = state.offsets.get(project_dir).copied().unwrap_or(0);
             let has_more = offset + root_entries.len() < total;
-            tree = tree.child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .overflow_hidden()
-                    .child(render_entries(cx, &theme, state, project_dir, &root_entries, 0)),
-            );
+            tree = tree.child(div().flex_1().min_h(px(0.)).overflow_hidden().child(
+                render_entries(cx, &theme, state, project_dir, &root_entries, 0),
+            ));
             if has_more {
                 tree = tree.child(
                     div()
@@ -320,7 +322,14 @@ fn render_entries(
                         .child("Loading…"),
                 );
             } else if let Some(children) = state.entries.get(&path) {
-                col = col.child(render_entries(cx, &theme, state, &path, children, depth + 1));
+                col = col.child(render_entries(
+                    cx,
+                    &theme,
+                    state,
+                    &path,
+                    children,
+                    depth + 1,
+                ));
             }
         }
     }

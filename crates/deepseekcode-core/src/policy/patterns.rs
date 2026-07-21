@@ -115,7 +115,8 @@ pub fn remember_patterns_for_workspace(
 pub fn outside_workspace_paths(working_dir: &str, input: &Value, tool_name: &str) -> Vec<String> {
     if tool_scope(tool_name) == "bash" {
         if let Some(cmd) = input["command"].as_str() {
-            if crate::project_context::command_escapes_project_directory(cmd, working_dir).is_some() {
+            if crate::project_context::command_escapes_project_directory(cmd, working_dir).is_some()
+            {
                 return vec!["*".into()];
             }
         }
@@ -205,7 +206,10 @@ fn skill_patterns(input: &Value) -> Vec<String> {
 }
 
 fn task_patterns(input: &Value) -> Vec<String> {
-    if let Some(agent) = input["agent"].as_str().or_else(|| input["subagent"].as_str()) {
+    if let Some(agent) = input["agent"]
+        .as_str()
+        .or_else(|| input["subagent"].as_str())
+    {
         vec![agent.to_string()]
     } else {
         vec!["*".into()]
@@ -238,7 +242,10 @@ fn collect_paths_from_input(input: &Value, tool_name: &str, out: &mut Vec<String
 }
 
 fn looks_like_path(token: &str) -> bool {
-    token.starts_with('/') || token.starts_with("./") || token.starts_with("../") || token.contains('\\')
+    token.starts_with('/')
+        || token.starts_with("./")
+        || token.starts_with("../")
+        || token.contains('\\')
 }
 
 fn is_outside_workspace(root: &Path, path: &str) -> bool {
@@ -304,15 +311,9 @@ mod tests {
     fn bash_cd_to_project_root_is_not_outside_workspace() {
         let dir = std::env::temp_dir().join("deepseekcode-bash-policy-test");
         let _ = std::fs::create_dir_all(&dir);
-        let cmd = format!(
-            "cd /d \"{}\" && npx next build 2>&1",
-            dir.display()
-        );
-        let outside = outside_workspace_paths(
-            &dir.to_string_lossy(),
-            &json!({ "command": cmd }),
-            "bash",
-        );
+        let cmd = format!("cd /d \"{}\" && npx next build 2>&1", dir.display());
+        let outside =
+            outside_workspace_paths(&dir.to_string_lossy(), &json!({ "command": cmd }), "bash");
         assert!(outside.is_empty(), "unexpected outside paths: {outside:?}");
     }
 

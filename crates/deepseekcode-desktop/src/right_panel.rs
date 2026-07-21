@@ -1,12 +1,12 @@
 //! Right panel: Files, Editor, Terminal, Git tabs.
 
+use crate::detail_inspector::DetailInspector;
 use crate::editor::EditorView;
 use crate::file_tree::{FileTreeState, FileTreeView};
 use crate::git_panel::GitPanel;
 use crate::layout::RightPanelTab;
 use crate::logic::GitStatusEntry;
 use crate::terminal::{TerminalPanel, TerminalTab};
-use crate::detail_inspector::DetailInspector;
 use crate::ui::icon::IconName;
 use crate::ui::tab_bar::{render_tab_bar_shell, tab_item_shell};
 use gpui::prelude::FluentBuilder;
@@ -71,49 +71,46 @@ impl RightPanelView {
                     .overflow_hidden()
                     .flex()
                     .flex_col()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h(px(0.))
-                            .overflow_hidden()
-                            .child(render_tab_content(
-                                cx,
-                                tab,
-                                project_dir,
-                                file_tree,
-                                editor,
-                                file_editor_input,
-                                editor_tabs,
-                                active_editor_tab,
-                                editor_read_only,
-                                terminals,
-                                active_terminal,
-                                terminal_focus,
-                                terminal_scroll,
-                                search_query,
-                                git_staged,
-                                git_unstaged,
-                                git_untracked,
-                                git_diff_summary,
-                                git_status_message,
-                                git_log,
-                            )),
-                    )
+                    .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(
+                        render_tab_content(
+                            cx,
+                            tab,
+                            project_dir,
+                            file_tree,
+                            editor,
+                            file_editor_input,
+                            editor_tabs,
+                            active_editor_tab,
+                            editor_read_only,
+                            terminals,
+                            active_terminal,
+                            terminal_focus,
+                            terminal_scroll,
+                            search_query,
+                            git_staged,
+                            git_unstaged,
+                            git_untracked,
+                            git_diff_summary,
+                            git_status_message,
+                            git_log,
+                        ),
+                    ))
                     .when(
                         selected_detail.is_some()
                             && tab != RightPanelTab::Terminal
                             && tab != RightPanelTab::Editor,
                         |panel| {
-                        panel.child(
-                            div()
-                                .flex_shrink_0()
-                                .max_h(px(240.))
-                                .border_t_1()
-                                .border_color(border_subtle)
-                                .overflow_hidden()
-                                .child(DetailInspector::render(cx, selected_detail)),
-                        )
-                    })
+                            panel.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .max_h(px(240.))
+                                    .border_t_1()
+                                    .border_color(border_subtle)
+                                    .overflow_hidden()
+                                    .child(DetailInspector::render(cx, selected_detail)),
+                            )
+                        },
+                    )
             })
             .into_any_element()
     }
@@ -142,14 +139,12 @@ fn render_tab_bar(
             icon,
         };
 
-        row = row.child(
-            tab_item_shell(tab_item, is_active, &theme).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    this.set_right_panel_tab(tab_val, cx);
-                }),
-            ),
-        );
+        row = row.child(tab_item_shell(tab_item, is_active, &theme).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, _, cx| {
+                this.set_right_panel_tab(tab_val, cx);
+            }),
+        ));
     }
 
     row
@@ -178,8 +173,9 @@ fn render_tab_content(
     git_log: &[String],
 ) -> impl IntoElement {
     match tab {
-        RightPanelTab::Files => FileTreeView::render(cx, project_dir, file_tree, search_query)
-            .into_any_element(),
+        RightPanelTab::Files => {
+            FileTreeView::render(cx, project_dir, file_tree, search_query).into_any_element()
+        }
         RightPanelTab::Editor => EditorView::render(
             editor,
             editor_tabs,

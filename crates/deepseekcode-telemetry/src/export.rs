@@ -54,10 +54,7 @@ pub fn prune_old_runs(logs_root: &Path, max_run_dirs: usize) -> Result<()> {
 
 /// Export a diagnostic zip bundle for the given run (or current run if None).
 /// When `redact` is true (default), log file contents are scrubbed for secrets.
-pub fn export_diagnostic_bundle(
-    run_id: Option<&str>,
-    output: &Path,
-) -> Result<PathBuf> {
+pub fn export_diagnostic_bundle(run_id: Option<&str>, output: &Path) -> Result<PathBuf> {
     export_diagnostic_bundle_with_options(run_id, output, true)
 }
 
@@ -66,9 +63,8 @@ pub fn export_diagnostic_bundle_with_options(
     output: &Path,
     redact: bool,
 ) -> Result<PathBuf> {
-    let ctx = RunContext::global().ok_or_else(|| {
-        DeepSeekCodeError::Other("telemetry not initialized".into())
-    })?;
+    let ctx = RunContext::global()
+        .ok_or_else(|| DeepSeekCodeError::Other("telemetry not initialized".into()))?;
 
     let run_dir = if let Some(id) = run_id {
         ctx.logs_root.join(format!("run-{id}"))
@@ -101,8 +97,7 @@ pub fn export_diagnostic_bundle_with_options(
 
     let file = File::create(&out_path).map_err(|e| DeepSeekCodeError::Io(e))?;
     let mut zip = ZipWriter::new(file);
-    let options = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
     for entry in WalkDir::new(&run_dir).into_iter().filter_map(|e| e.ok()) {
         if entry.file_type().is_dir() {
@@ -124,8 +119,7 @@ pub fn export_diagnostic_bundle_with_options(
             let text = String::from_utf8_lossy(&buf);
             buf = redact_log_content(&text).into_bytes();
         }
-        zip.write_all(&buf)
-            .map_err(|e| DeepSeekCodeError::Io(e))?;
+        zip.write_all(&buf).map_err(|e| DeepSeekCodeError::Io(e))?;
     }
 
     zip.finish()

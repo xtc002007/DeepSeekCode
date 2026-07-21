@@ -40,11 +40,8 @@ impl ActivityProjectionState {
         if self.events.is_empty() {
             return;
         }
-        self.tree = ActivityProjector::project_with_children(
-            &self.events,
-            &self.messages,
-            &self.children,
-        );
+        self.tree =
+            ActivityProjector::project_with_children(&self.events, &self.messages, &self.children);
     }
 
     pub fn push_event(&mut self, event: EventEnvelope) {
@@ -123,13 +120,7 @@ impl ActivityProjectionState {
                 .get("success")
                 .and_then(|v| v.as_bool())
                 == Some(false);
-            if patch_tool_completed(
-                &mut self.tree,
-                tool_call_id,
-                tool_name,
-                title,
-                failed,
-            ) {
+            if patch_tool_completed(&mut self.tree, tool_call_id, tool_name, title, failed) {
                 bumped = true;
             } else {
                 rebuild = true;
@@ -396,8 +387,8 @@ fn find_tool_leaf<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use deepseekcode_schema::event::EventEnvelope;
     use chrono::Utc;
+    use deepseekcode_schema::event::EventEnvelope;
 
     fn ev(kind: EventKind, payload: serde_json::Value) -> EventEnvelope {
         EventEnvelope {

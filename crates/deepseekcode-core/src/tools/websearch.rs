@@ -69,13 +69,20 @@ async fn search_duckduckgo(query: &str) -> Result<Vec<Value>, ToolFailure> {
             message: e.to_string(),
             retryable: true,
         })?;
-    let body = client.get(&url).send().await.map_err(|e| ToolFailure {
-        message: e.to_string(),
-        retryable: true,
-    })?.text().await.map_err(|e| ToolFailure {
-        message: e.to_string(),
-        retryable: true,
-    })?;
+    let body = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| ToolFailure {
+            message: e.to_string(),
+            retryable: true,
+        })?
+        .text()
+        .await
+        .map_err(|e| ToolFailure {
+            message: e.to_string(),
+            retryable: true,
+        })?;
     Ok(parse_duckduckgo_results(&body))
 }
 

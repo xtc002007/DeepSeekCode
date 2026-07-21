@@ -73,7 +73,9 @@ impl McpConnectionPool {
             .clone();
 
         if !cfg.enabled.unwrap_or(true) {
-            return Err(DeepSeekCodeError::Other(format!("mcp server {name} is disabled")));
+            return Err(DeepSeekCodeError::Other(format!(
+                "mcp server {name} is disabled"
+            )));
         }
 
         let (connection, tools) = if let Some(command) = cfg.command.as_deref() {
@@ -86,7 +88,9 @@ impl McpConnectionPool {
                 Ok::<_, DeepSeekCodeError>((McpConnection::Local(client), tools))
             })
             .await
-            .map_err(|e| DeepSeekCodeError::Other(format!("mcp local connect join failed: {e}")))??;
+            .map_err(|e| {
+                DeepSeekCodeError::Other(format!("mcp local connect join failed: {e}"))
+            })??;
             (connection, tools)
         } else if let Some(url) = cfg.url.as_deref() {
             let client = RemoteMcpClient::new(url);
@@ -100,10 +104,10 @@ impl McpConnectionPool {
         };
 
         let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
-        self.connected.lock().unwrap().insert(
-            name.to_string(),
-            ConnectedServer { tools, connection },
-        );
+        self.connected
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), ConnectedServer { tools, connection });
         self.emit_status(name, true, &tool_names).await;
         Ok(tool_names)
     }
@@ -169,9 +173,9 @@ impl McpConnectionPool {
     pub async fn call_tool(&self, server: &str, tool: &str, arguments: Value) -> Result<Value> {
         let remote_client = {
             let mut connected = self.connected.lock().unwrap();
-            let entry = connected
-                .get_mut(server)
-                .ok_or_else(|| DeepSeekCodeError::NotFound(format!("mcp server {server} not connected")))?;
+            let entry = connected.get_mut(server).ok_or_else(|| {
+                DeepSeekCodeError::NotFound(format!("mcp server {server} not connected"))
+            })?;
             match &mut entry.connection {
                 McpConnection::Local(client) => {
                     return client.call_tool(tool, arguments);

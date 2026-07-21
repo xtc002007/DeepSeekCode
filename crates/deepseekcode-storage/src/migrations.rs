@@ -22,12 +22,11 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
         .await
         .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
 
-    let applied_versions: Vec<i32> = sqlx::query_scalar(
-        "SELECT version FROM refinery_schema_history ORDER BY version",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+    let applied_versions: Vec<i32> =
+        sqlx::query_scalar("SELECT version FROM refinery_schema_history ORDER BY version")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
 
     for migration in embedded::migrations::runner().get_migrations() {
         apply_migration(pool, migration, &applied_versions).await?;
@@ -50,13 +49,12 @@ async fn apply_migration(
 ) -> Result<()> {
     let version = migration.version() as i32;
     if applied_versions.contains(&version) {
-        let stored: Option<String> = sqlx::query_scalar(
-            "SELECT checksum FROM refinery_schema_history WHERE version = ?",
-        )
-        .bind(version)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT checksum FROM refinery_schema_history WHERE version = ?")
+                .bind(version)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
         let expected = migration.checksum().to_string();
         if stored.as_deref() != Some(expected.as_str()) {
             return Err(DeepSeekCodeError::Storage(format!(
@@ -70,7 +68,10 @@ async fn apply_migration(
         .sql()
         .ok_or_else(|| DeepSeekCodeError::Storage(format!("migration V{version} has no sql")))?;
 
-    let mut tx = pool.begin().await.map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
     if sql.to_ascii_uppercase().contains("CREATE TRIGGER") {
         for trigger in split_trigger_statements(sql) {
             if let Err(e) = sqlx::query(&trigger).execute(&mut *tx).await {
@@ -110,7 +111,9 @@ async fn apply_migration(
     .await
     .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
 
-    tx.commit().await.map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+    tx.commit()
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
 
     Ok(())
 }

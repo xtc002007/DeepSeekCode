@@ -61,7 +61,10 @@ impl EmbeddedEngine {
             let shutdown = async move {
                 let _ = shutdown_rx.wait_for(|v| *v).await;
             };
-            if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown).await {
+            if let Err(e) = axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown)
+                .await
+            {
                 tracing::error!(
                     target: deepseekcode_telemetry::SERVER,
                     error = %e,

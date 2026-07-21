@@ -124,10 +124,9 @@ impl RemoteMcpClient {
             .to_ascii_lowercase();
 
         if content_type.contains("text/event-stream") {
-            let text = response
-                .text()
-                .await
-                .map_err(|e| DeepSeekCodeError::Other(format!("remote mcp sse read failed: {e}")))?;
+            let text = response.text().await.map_err(|e| {
+                DeepSeekCodeError::Other(format!("remote mcp sse read failed: {e}"))
+            })?;
             return parse_sse_jsonrpc_response(&text, id);
         }
 

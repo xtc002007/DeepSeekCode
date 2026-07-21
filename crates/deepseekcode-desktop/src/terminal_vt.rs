@@ -4,8 +4,8 @@ use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{Color, NamedColor};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerminalColor(pub u32);

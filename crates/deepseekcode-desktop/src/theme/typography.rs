@@ -1,6 +1,6 @@
+use gpui::px;
 use gpui::Pixels;
 use gpui::SharedString;
-use gpui::px;
 
 /// Compact typography aligned with Cursor IDE density (~1.33–1.4 line-height).
 #[derive(Clone, Debug)]

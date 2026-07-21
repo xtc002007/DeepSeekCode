@@ -50,17 +50,13 @@ impl PermissionDock {
             .flex_col()
             .gap_2()
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(theme.text_primary)
-                            .child(format!("Policy required · {scope} · {tool}{queue_label}")),
-                    ),
+                div().flex().items_center().justify_between().child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(theme.text_primary)
+                        .child(format!("Policy required · {scope} · {tool}{queue_label}")),
+                ),
             )
             .child(
                 div()
@@ -68,19 +64,14 @@ impl PermissionDock {
                     .text_color(theme.text_secondary)
                     .child("Review this action before the agent continues."),
             )
-            .child(
-                crate::ui::multiline_text::render_multiline(
-                    &detail,
-                    |el| {
-                        el.p_2()
-                            .rounded_md()
-                            .bg(theme.bg_base)
-                            .text_xs()
-                            .font_family("Consolas")
-                            .text_color(theme.text_primary)
-                    },
-                ),
-            )
+            .child(crate::ui::multiline_text::render_multiline(&detail, |el| {
+                el.p_2()
+                    .rounded_md()
+                    .bg(theme.bg_base)
+                    .text_xs()
+                    .font_family("Consolas")
+                    .text_color(theme.text_primary)
+            }))
             .when(!patterns.is_empty(), |el| {
                 let count = patterns.len();
                 let toggle_label = if patterns_expanded {
@@ -93,9 +84,12 @@ impl PermissionDock {
                         .text_xs()
                         .text_color(theme.text_muted)
                         .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.toggle_policy_patterns_expanded(cx);
-                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.toggle_policy_patterns_expanded(cx);
+                            }),
+                        )
                         .child(toggle_label),
                 )
                 .when(patterns_expanded, |el| {

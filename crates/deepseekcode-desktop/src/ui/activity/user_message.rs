@@ -4,7 +4,11 @@ use crate::ui::icon::{render_icon_rgba, IconName};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 
-pub fn render_user_message_card(leaf_id: &str, text: &str, theme: &ThemeTokens) -> impl IntoElement {
+pub fn render_user_message_card(
+    leaf_id: &str,
+    text: &str,
+    theme: &ThemeTokens,
+) -> impl IntoElement {
     let theme = theme.clone();
     let copy_text = text.to_string();
     let copy_id = ElementId::Name(SharedString::from(format!("copy-user-{leaf_id}")));
@@ -28,12 +32,7 @@ pub fn render_user_message_card(leaf_id: &str, text: &str, theme: &ThemeTokens) 
                         .items_center()
                         .gap_1()
                         .child(render_icon_rgba(IconName::User, px(12.), theme.text_muted))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.text_muted)
-                                .child("You"),
-                        ),
+                        .child(div().text_xs().text_color(theme.text_muted).child("You")),
                 )
                 .child(render_copy_button(copy_id, copy_text, &theme)),
         )

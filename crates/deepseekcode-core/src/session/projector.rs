@@ -62,10 +62,7 @@ impl EventProjector {
             EventKind::QuestionRequested => ("Question".into(), "Question asked".into()),
             EventKind::PlanCompleted => {
                 let title = event.payload["title"].as_str().unwrap_or("Plan");
-                (
-                    "Plan".into(),
-                    format!("Plan completed: {title}"),
-                )
+                ("Plan".into(), format!("Plan completed: {title}"))
             }
             EventKind::ActivityUpdated => ("Activity".into(), "Activity updated".into()),
         };
@@ -225,10 +222,9 @@ mod tests {
             .await
             .unwrap();
 
-        let projected =
-            EventProjector::project_messages(&sessions, &events, session_id)
-                .await
-                .unwrap();
+        let projected = EventProjector::project_messages(&sessions, &events, session_id)
+            .await
+            .unwrap();
         assert_eq!(projected.len(), 1);
         assert_eq!(projected[0].id, promoted_id);
     }
@@ -304,10 +300,9 @@ mod tests {
             .await
             .unwrap();
 
-        let projected =
-            EventProjector::project_messages(&sessions, &events, session_id)
-                .await
-                .unwrap();
+        let projected = EventProjector::project_messages(&sessions, &events, session_id)
+            .await
+            .unwrap();
         assert_eq!(projected.len(), 3);
         assert_eq!(projected[0].role, MessageRole::User);
         assert_eq!(projected[1].role, MessageRole::Assistant);
@@ -324,9 +319,6 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         let entry = EventProjector::from_event(&event);
-        assert_eq!(
-            entry.message_id.as_deref(),
-            Some("01HZTESTMESSAGEID00")
-        );
+        assert_eq!(entry.message_id.as_deref(), Some("01HZTESTMESSAGEID00"));
     }
 }

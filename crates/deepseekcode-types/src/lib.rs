@@ -4,8 +4,8 @@ pub mod ids;
 pub mod tool_arguments;
 
 pub use branding::{
-    CLI_NAME, CONFIG_FILE, DIAGNOSTICS_ARCHIVE_PREFIX, LEGACY_CONFIG_FILE, LOCAL_DIR,
-    PRODUCT_NAME, SESSION_EXPORT_PREFIX,
+    CLI_NAME, CONFIG_FILE, DIAGNOSTICS_ARCHIVE_PREFIX, LEGACY_CONFIG_FILE, LOCAL_DIR, PRODUCT_NAME,
+    SESSION_EXPORT_PREFIX,
 };
 pub use error::{DeepSeekCodeError, Result};
 pub use ids::*;

@@ -13,7 +13,8 @@ pub async fn generate(
     request: &LlmRequest,
     api_key: Option<String>,
 ) -> Result<crate::request::LlmResponse> {
-    let api_key = api_key.ok_or_else(|| DeepSeekCodeError::Llm("Anthropic API key not set".into()))?;
+    let api_key =
+        api_key.ok_or_else(|| DeepSeekCodeError::Llm("Anthropic API key not set".into()))?;
     let body = build_body(request);
     let url = AnthropicMessagesEndpoint.resolve(request.base_url.as_deref());
 
@@ -66,7 +67,8 @@ pub async fn stream(
     request: &LlmRequest,
     api_key: Option<String>,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent>> + Send>>> {
-    let api_key = api_key.ok_or_else(|| DeepSeekCodeError::Llm("Anthropic API key not set".into()))?;
+    let api_key =
+        api_key.ok_or_else(|| DeepSeekCodeError::Llm("Anthropic API key not set".into()))?;
     let mut body = build_body(request);
     body["stream"] = json!(true);
     let url = AnthropicMessagesEndpoint.resolve(request.base_url.as_deref());
@@ -89,37 +91,35 @@ pub async fn stream(
     let byte_stream = response.bytes_stream();
     let mapped = byte_stream
         .map(|chunk| chunk.map_err(|e| DeepSeekCodeError::Llm(e.to_string())))
-        .scan(String::new(), |buffer, chunk| {
-            match chunk {
-                Ok(bytes) => {
-                    buffer.push_str(&String::from_utf8_lossy(&bytes));
-                    let mut events = Vec::new();
-                    while let Some(pos) = buffer.find("\n\n") {
-                        let frame = buffer.drain(..=pos).collect::<String>();
-                        for line in frame.lines() {
-                            let Some(data) = line.strip_prefix("data: ") else {
-                                continue;
-                            };
-                            let Ok(value) = serde_json::from_str::<Value>(data) else {
-                                continue;
-                            };
-                            match value["type"].as_str() {
-                                Some("content_block_delta") => {
-                                    if let Some(text) = value["delta"]["text"].as_str() {
-                                        events.push(Ok(LlmEvent::TextDelta(text.to_string())));
-                                    }
+        .scan(String::new(), |buffer, chunk| match chunk {
+            Ok(bytes) => {
+                buffer.push_str(&String::from_utf8_lossy(&bytes));
+                let mut events = Vec::new();
+                while let Some(pos) = buffer.find("\n\n") {
+                    let frame = buffer.drain(..=pos).collect::<String>();
+                    for line in frame.lines() {
+                        let Some(data) = line.strip_prefix("data: ") else {
+                            continue;
+                        };
+                        let Ok(value) = serde_json::from_str::<Value>(data) else {
+                            continue;
+                        };
+                        match value["type"].as_str() {
+                            Some("content_block_delta") => {
+                                if let Some(text) = value["delta"]["text"].as_str() {
+                                    events.push(Ok(LlmEvent::TextDelta(text.to_string())));
                                 }
-                                Some("message_stop") => {
-                                    events.push(Ok(LlmEvent::Completed));
-                                }
-                                _ => {}
                             }
+                            Some("message_stop") => {
+                                events.push(Ok(LlmEvent::Completed));
+                            }
+                            _ => {}
                         }
                     }
-                    futures::future::ready(Some(events))
                 }
-                Err(e) => futures::future::ready(Some(vec![Err(e)])),
+                futures::future::ready(Some(events))
             }
+            Err(e) => futures::future::ready(Some(vec![Err(e)])),
         })
         .flat_map(futures::stream::iter);
 

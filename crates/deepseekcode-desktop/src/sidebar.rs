@@ -62,9 +62,12 @@ impl SidebarView {
                         false,
                         false,
                     )
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                        this.toggle_sidebar_collapsed(cx);
-                    })),
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.toggle_sidebar_collapsed(cx);
+                        }),
+                    ),
                 )
                 .child(
                     icon_button_shell(
@@ -76,9 +79,12 @@ impl SidebarView {
                         false,
                         false,
                     )
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                        this.pick_project_folder(cx);
-                    })),
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.pick_project_folder(cx);
+                        }),
+                    ),
                 );
         }
 
@@ -112,8 +118,9 @@ impl SidebarView {
             }
         } else {
             for nav in projects {
-                let is_current = current_project
-                    .is_some_and(|current| crate::workspace::project_paths_equal(current, &nav.path));
+                let is_current = current_project.is_some_and(|current| {
+                    crate::workspace::project_paths_equal(current, &nav.path)
+                });
                 list = list.child(render_project_row(
                     cx,
                     &theme,
@@ -183,32 +190,34 @@ impl SidebarView {
                             false,
                             false,
                         )
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.toggle_sidebar_collapsed(cx);
-                        })),
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.toggle_sidebar_collapsed(cx);
+                            }),
+                        ),
                     ),
             )
             .child(
-                div()
-                    .px_3()
-                    .py_1p5()
-                    .flex_shrink_0()
-                    .child(
-                        button_shell(
-                            "open-folder",
-                            "Open Folder…",
-                            &theme,
-                            ButtonVariant::Secondary,
-                            ButtonSize::Md,
-                            false,
-                            Some(IconName::FolderOpen),
-                            false,
-                        )
-                        .w_full()
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                div().px_3().py_1p5().flex_shrink_0().child(
+                    button_shell(
+                        "open-folder",
+                        "Open Folder…",
+                        &theme,
+                        ButtonVariant::Secondary,
+                        ButtonSize::Md,
+                        false,
+                        Some(IconName::FolderOpen),
+                        false,
+                    )
+                    .w_full()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
                             this.pick_project_folder(cx);
-                        })),
+                        }),
                     ),
+                ),
             )
             .child(
                 div()
@@ -343,13 +352,13 @@ fn render_project_row(
                     .text_xs()
                     .cursor_pointer()
                     .text_color(theme.text_muted)
-                    .hover(|s| s.bg(sidebar_row_hover_bg(&theme)).text_color(theme.text_primary))
+                    .hover(|s| {
+                        s.bg(sidebar_row_hover_bg(&theme))
+                            .text_color(theme.text_primary)
+                    })
                     .on_mouse_down(MouseButton::Left, {
                         cx.listener(move |this, _, _, cx| {
-                            this.new_session_for_project(
-                                PathBuf::from(path_for_new.clone()),
-                                cx,
-                            );
+                            this.new_session_for_project(PathBuf::from(path_for_new.clone()), cx);
                             cx.stop_propagation();
                         })
                     })
@@ -462,51 +471,45 @@ fn render_session_row(
         .items_center()
         .when(active, |s| s.bg(sidebar_session_selected_bg(&theme)));
     row.on_mouse_down(MouseButton::Left, {
-            let project_path = project_path.clone();
-            cx.listener(move |this, _, _, cx| {
-                this.close_popover(cx);
-                this.activate_project_session(
-                    std::path::PathBuf::from(project_path.clone()),
-                    session_id,
-                    cx,
-                );
-            })
+        let project_path = project_path.clone();
+        cx.listener(move |this, _, _, cx| {
+            this.close_popover(cx);
+            this.activate_project_session(
+                std::path::PathBuf::from(project_path.clone()),
+                session_id,
+                cx,
+            );
         })
-        .on_mouse_up(MouseButton::Right, {
-            cx.listener(move |this, event: &MouseUpEvent, _, cx| {
-                this.open_session_context_menu(session_id, event.position, cx);
-                cx.stop_propagation();
-            })
+    })
+    .on_mouse_up(MouseButton::Right, {
+        cx.listener(move |this, event: &MouseUpEvent, _, cx| {
+            this.open_session_context_menu(session_id, event.position, cx);
+            cx.stop_propagation();
         })
-        .gap_1()
-        .child(
-            div()
-                .w(px(6.))
-                .h(px(6.))
-                .rounded_full()
-                .bg(if running {
-                    theme.success
-                } else {
-                    theme.text_disabled
-                }),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .text_xs()
-                .line_height(crate::theme::leading_sm(&theme))
-                .font_weight(if active {
-                    FontWeight::MEDIUM
-                } else {
-                    FontWeight::NORMAL
-                })
-                .text_color(if active {
-                    theme.text_primary
-                } else {
-                    theme.text_muted
-                })
-                .overflow_hidden()
-                .child(title),
-        )
+    })
+    .gap_1()
+    .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(if running {
+        theme.success
+    } else {
+        theme.text_disabled
+    }))
+    .child(
+        div()
+            .flex_1()
+            .min_w(px(0.))
+            .text_xs()
+            .line_height(crate::theme::leading_sm(&theme))
+            .font_weight(if active {
+                FontWeight::MEDIUM
+            } else {
+                FontWeight::NORMAL
+            })
+            .text_color(if active {
+                theme.text_primary
+            } else {
+                theme.text_muted
+            })
+            .overflow_hidden()
+            .child(title),
+    )
 }

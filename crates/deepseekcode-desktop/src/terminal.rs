@@ -127,7 +127,10 @@ fn render_colored_terminal_lines(
     column
 }
 
-fn render_terminal_body(theme: &crate::theme::ThemeTokens, tab: Option<&TerminalTab>) -> impl IntoElement {
+fn render_terminal_body(
+    theme: &crate::theme::ThemeTokens,
+    tab: Option<&TerminalTab>,
+) -> impl IntoElement {
     let Some(tab) = tab else {
         return render_plain_terminal_lines(theme, "$ no terminal").into_any_element();
     };
@@ -170,7 +173,11 @@ impl TerminalTab {
         }
     }
 
-    pub fn new_bash_output(id: usize, title: impl Into<SharedString>, detail_key: impl Into<String>) -> Self {
+    pub fn new_bash_output(
+        id: usize,
+        title: impl Into<SharedString>,
+        detail_key: impl Into<String>,
+    ) -> Self {
         Self {
             bash_detail_key: Some(detail_key.into()),
             ..Self::new(id, title)
@@ -180,7 +187,10 @@ impl TerminalTab {
 
 pub struct TerminalPanel;
 
-fn render_empty_terminal(theme: &crate::theme::ThemeTokens, cx: &Context<crate::workspace::WorkspaceView>) -> impl IntoElement {
+fn render_empty_terminal(
+    theme: &crate::theme::ThemeTokens,
+    cx: &Context<crate::workspace::WorkspaceView>,
+) -> impl IntoElement {
     div()
         .flex_1()
         .flex()
@@ -204,9 +214,12 @@ fn render_empty_terminal(theme: &crate::theme::ThemeTokens, cx: &Context<crate::
                 .cursor_pointer()
                 .bg(theme.bg_selected)
                 .text_color(theme.text_primary)
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    this.add_terminal_tab(cx);
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.add_terminal_tab(cx);
+                    }),
+                )
                 .child("+ New Shell"),
         )
 }
@@ -305,9 +318,12 @@ impl TerminalPanel {
                 .cursor_pointer()
                 .bg(theme.bg_base)
                 .text_color(theme.text_muted)
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    this.add_terminal_tab(cx);
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.add_terminal_tab(cx);
+                    }),
+                )
                 .child("+"),
         );
 
@@ -352,20 +368,18 @@ impl TerminalPanel {
                                     .child(format!("{status}")),
                             ),
                     )
-                    .child(
-                        render_flex_scroll_viewport(
-                            cx,
-                            scroll_handle,
-                            "terminal-output",
-                            "terminal-scrollbar",
-                            false,
-                            div()
-                                .px_3()
-                                .py_2()
-                                .bg(theme.terminal_bg)
-                                .child(render_terminal_body(&theme, active_tab)),
-                        ),
-                    ),
+                    .child(render_flex_scroll_viewport(
+                        cx,
+                        scroll_handle,
+                        "terminal-output",
+                        "terminal-scrollbar",
+                        false,
+                        div()
+                            .px_3()
+                            .py_2()
+                            .bg(theme.terminal_bg)
+                            .child(render_terminal_body(&theme, active_tab)),
+                    )),
             )
     }
 }

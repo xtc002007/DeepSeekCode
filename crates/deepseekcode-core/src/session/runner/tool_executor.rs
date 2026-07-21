@@ -58,7 +58,9 @@ impl SessionRunner {
         {
             Ok(PolicyOutcome::Permitted) => {}
             Ok(PolicyOutcome::Blocked { reason })
-            | Ok(PolicyOutcome::Rejected { message: Some(reason) }) => {
+            | Ok(PolicyOutcome::Rejected {
+                message: Some(reason),
+            }) => {
                 return self
                     .complete_tool_policy_failure(
                         session,

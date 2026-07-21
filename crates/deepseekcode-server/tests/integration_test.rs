@@ -19,10 +19,7 @@ impl TestServer {
 
 async fn test_app(project_dir: &str) -> TestServer {
     let db_dir = TempDir::new().expect("db tempdir");
-    let db_path = format!(
-        "sqlite://{}/deepseekcode-test.db",
-        db_dir.path().display()
-    );
+    let db_path = format!("sqlite://{}/deepseekcode-test.db", db_dir.path().display());
     let engine = Arc::new(RwLock::new(
         DeepSeekCodeEngine::open(project_dir, &db_path)
             .await
@@ -58,9 +55,7 @@ fn normalized_project_path(dir: &std::path::Path) -> String {
     let s = canonical.display().to_string();
     #[cfg(windows)]
     {
-        s.strip_prefix(r"\\?\")
-            .unwrap_or(&s)
-            .to_string()
+        s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
     }
     #[cfg(not(windows))]
     {
@@ -787,7 +782,10 @@ async fn policy_auto_mode_skips_prompt() {
         .json()
         .await
         .expect("pending json");
-    assert!(pending.is_empty(), "auto mode should not leave pending prompts");
+    assert!(
+        pending.is_empty(),
+        "auto mode should not leave pending prompts"
+    );
 
     server.abort();
 }
@@ -901,7 +899,10 @@ async fn prompt_resume_mock_llm_verifies_completion_events() {
     let mock_base = format!("{}/v1", mock.uri());
 
     client
-        .post(format!("{}/api/v1/provider/openai/connect", server.base_url))
+        .post(format!(
+            "{}/api/v1/provider/openai/connect",
+            server.base_url
+        ))
         .header("x-deepseekcode-directory", hdr.clone())
         .json(&serde_json::json!({
             "api_key": "test-key",
@@ -966,7 +967,8 @@ async fn prompt_resume_mock_llm_verifies_completion_events() {
     }
     assert!(saw_assistant, "expected assistant message from mock LLM");
 
-    let session_uuid = deepseekcode_types::SessionId::from_str(session_id).expect("parse session id");
+    let session_uuid =
+        deepseekcode_types::SessionId::from_str(session_id).expect("parse session id");
     let mut saw_completion = false;
     for _ in 0..40 {
         let events = {
@@ -991,7 +993,10 @@ async fn prompt_resume_mock_llm_verifies_completion_events() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert!(saw_completion, "expected message.completed or session.idle event");
+    assert!(
+        saw_completion,
+        "expected message.completed or session.idle event"
+    );
 
     server.abort();
 }
@@ -1046,7 +1051,10 @@ async fn prompt_resume_mock_llm_tool_call_pipeline() {
     let mock_base = format!("{}/v1", mock.uri());
 
     client
-        .post(format!("{}/api/v1/provider/openai/connect", server.base_url))
+        .post(format!(
+            "{}/api/v1/provider/openai/connect",
+            server.base_url
+        ))
         .header("x-deepseekcode-directory", hdr.clone())
         .json(&serde_json::json!({
             "api_key": "test-key",
@@ -1089,7 +1097,8 @@ async fn prompt_resume_mock_llm_tool_call_pipeline() {
         .await
         .expect("prompt");
 
-    let session_uuid = deepseekcode_types::SessionId::from_str(session_id).expect("parse session id");
+    let session_uuid =
+        deepseekcode_types::SessionId::from_str(session_id).expect("parse session id");
     let mut saw_tool_started = false;
     let mut saw_tool_completed = false;
     let mut saw_idle = false;
@@ -1105,18 +1114,12 @@ async fn prompt_resume_mock_llm_tool_call_pipeline() {
                 .await
                 .expect("tail events")
         };
-        saw_tool_started |= events.iter().any(|e| {
-            matches!(
-                e.kind,
-                deepseekcode_schema::event::EventKind::ToolStarted
-            )
-        });
-        saw_tool_completed |= events.iter().any(|e| {
-            matches!(
-                e.kind,
-                deepseekcode_schema::event::EventKind::ToolCompleted
-            )
-        });
+        saw_tool_started |= events
+            .iter()
+            .any(|e| matches!(e.kind, deepseekcode_schema::event::EventKind::ToolStarted));
+        saw_tool_completed |= events
+            .iter()
+            .any(|e| matches!(e.kind, deepseekcode_schema::event::EventKind::ToolCompleted));
         saw_idle |= events
             .iter()
             .any(|e| matches!(e.kind, deepseekcode_schema::event::EventKind::SessionIdle));
@@ -1126,7 +1129,10 @@ async fn prompt_resume_mock_llm_tool_call_pipeline() {
     }
 
     assert!(saw_tool_started, "expected tool.started in mock tool E2E");
-    assert!(saw_tool_completed, "expected tool.completed in mock tool E2E");
+    assert!(
+        saw_tool_completed,
+        "expected tool.completed in mock tool E2E"
+    );
     assert!(saw_idle, "expected session.idle after tool settlement");
 
     server.abort();
@@ -1452,10 +1458,7 @@ async fn session_plans_list_and_dismiss() {
         .unwrap());
 
     let fetched: serde_json::Value = client
-        .get(format!(
-            "{}/api/v1/session/{session_id}",
-            server.base_url
-        ))
+        .get(format!("{}/api/v1/session/{session_id}", server.base_url))
         .header("x-deepseekcode-directory", hdr.clone())
         .send()
         .await
@@ -1501,7 +1504,10 @@ async fn session_cross_directory_access_returns_not_found() {
     assert_eq!(resp.status(), 404);
 
     let resp = client
-        .post(format!("{}/api/v1/session/{session_id}/prompt", server.base_url))
+        .post(format!(
+            "{}/api/v1/session/{session_id}/prompt",
+            server.base_url
+        ))
         .header("x-deepseekcode-directory", &path_b)
         .json(&serde_json::json!({
             "session_id": session_id,

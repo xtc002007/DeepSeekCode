@@ -5,15 +5,15 @@ mod tests {
     use crate::activity_leaf::format_leaf_line;
     use crate::logic::{
         activity_trees_equivalent, classify_git_porcelain, event_affects_activity_tree,
-        find_todo_leaf_id_for_index, plan_activity_click_route, patch_running_tool_leaf_preview,
+        find_todo_leaf_id_for_index, patch_running_tool_leaf_preview, plan_activity_click_route,
         ActivityClickRoute,
     };
-    use deepseekcode_sdk::ActivityProjector;
     use deepseekcode_schema::activity::{
-        ActivityKind, ActivityLeaf, ActivityMeta, ActivityNode, ActivityStatus,
-        ActivityTargetKind, ActivityTree,
+        ActivityKind, ActivityLeaf, ActivityMeta, ActivityNode, ActivityStatus, ActivityTargetKind,
+        ActivityTree,
     };
     use deepseekcode_schema::event::EventKind;
+    use deepseekcode_sdk::ActivityProjector;
 
     #[test]
     fn acceptance_read_leaf_single_line_no_json() {
@@ -123,7 +123,10 @@ mod tests {
                 text: None,
             })],
         };
-        assert_eq!(find_todo_leaf_id_for_index(&tree, 2).as_deref(), Some("todo-9"));
+        assert_eq!(
+            find_todo_leaf_id_for_index(&tree, 2).as_deref(),
+            Some("todo-9")
+        );
     }
 
     #[test]
@@ -160,7 +163,11 @@ mod tests {
                 text: None,
             })],
         };
-        assert!(patch_running_tool_leaf_preview(&mut tree, "bash-1", "[stdout] working"));
+        assert!(patch_running_tool_leaf_preview(
+            &mut tree,
+            "bash-1",
+            "[stdout] working"
+        ));
     }
 
     #[test]
@@ -182,7 +189,10 @@ mod tests {
                 line_end: None,
             },
             &ActivityMeta {
-                diff_stats: Some(DiffStats { added: 21, removed: 1 }),
+                diff_stats: Some(DiffStats {
+                    added: 21,
+                    removed: 1,
+                }),
                 ..Default::default()
             },
             Some("e1"),
@@ -255,23 +265,25 @@ mod tests {
         use crate::logic::activity_visible_row_index;
         use std::collections::HashSet;
         let tree = ActivityTree {
-            roots: vec![ActivityNode::Group(deepseekcode_schema::activity::ActivityGroup {
-                id: "turn-1".into(),
-                kind: deepseekcode_schema::activity::ActivityGroupKind::ProviderTurn,
-                label: "Worked".into(),
-                summary: None,
-                children: vec![ActivityNode::Leaf(ActivityLeaf {
-                    id: "todo-9".into(),
-                    kind: ActivityKind::TodoWrite,
-                    verb: "Updated todos".into(),
-                    target: ActivityTargetKind::TodoList,
-                    meta: ActivityMeta::default(),
-                    status: ActivityStatus::Completed,
-                    detail_ref: None,
-                    text: None,
-                })],
-                collapsed_default: false,
-            })],
+            roots: vec![ActivityNode::Group(
+                deepseekcode_schema::activity::ActivityGroup {
+                    id: "turn-1".into(),
+                    kind: deepseekcode_schema::activity::ActivityGroupKind::ProviderTurn,
+                    label: "Worked".into(),
+                    summary: None,
+                    children: vec![ActivityNode::Leaf(ActivityLeaf {
+                        id: "todo-9".into(),
+                        kind: ActivityKind::TodoWrite,
+                        verb: "Updated todos".into(),
+                        target: ActivityTargetKind::TodoList,
+                        meta: ActivityMeta::default(),
+                        status: ActivityStatus::Completed,
+                        detail_ref: None,
+                        text: None,
+                    })],
+                    collapsed_default: false,
+                },
+            )],
         };
         let expanded = HashSet::new();
         let collapsed = HashSet::new();

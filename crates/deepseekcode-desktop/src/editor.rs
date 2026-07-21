@@ -51,7 +51,11 @@ fn line_gutter_width(line_count: usize) -> Pixels {
     px((digits as f32 * 9.0 + 20.0).max(44.0))
 }
 
-fn render_line_gutter(line_no: usize, gutter_width: Pixels, theme: &crate::theme::ThemeTokens) -> impl IntoElement {
+fn render_line_gutter(
+    line_no: usize,
+    gutter_width: Pixels,
+    theme: &crate::theme::ThemeTokens,
+) -> impl IntoElement {
     div()
         .flex_shrink_0()
         .w(gutter_width)
@@ -166,9 +170,12 @@ impl EditorView {
                                 .rounded_md()
                                 .cursor_pointer()
                                 .bg(theme.accent_muted)
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.save_editor_file(cx);
-                                }))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.save_editor_file(cx);
+                                    }),
+                                )
                                 .child("Save")
                                 .into_any_element(),
                         );
@@ -185,10 +192,14 @@ impl EditorView {
                                 } else {
                                     theme.bg_elevated
                                 })
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.editor.side_by_side_diff = !this.editor.side_by_side_diff;
-                                    cx.notify();
-                                }))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.editor.side_by_side_diff =
+                                            !this.editor.side_by_side_diff;
+                                        cx.notify();
+                                    }),
+                                )
                                 .child(if state.side_by_side_diff {
                                     "Unified diff"
                                 } else {
@@ -261,11 +272,7 @@ impl EditorView {
                             .flex_1()
                             .min_w(px(0.))
                             .px_2()
-                            .child(render_highlighted_line(
-                                &line,
-                                highlighter.as_mut(),
-                                &theme,
-                            )),
+                            .child(render_highlighted_line(&line, highlighter.as_mut(), &theme)),
                     ),
             );
         }

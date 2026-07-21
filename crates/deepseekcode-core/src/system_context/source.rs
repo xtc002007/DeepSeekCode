@@ -217,7 +217,10 @@ pub fn environment_source(project_dir: &str) -> ContextSource<serde_json::Value>
     )
 }
 
-pub fn instructions_source(project_dir: &str, instruction_paths: &[String]) -> ContextSource<Vec<String>> {
+pub fn instructions_source(
+    project_dir: &str,
+    instruction_paths: &[String],
+) -> ContextSource<Vec<String>> {
     let dir = project_dir.to_string();
     let paths = instruction_paths.to_vec();
     ContextSource::make(

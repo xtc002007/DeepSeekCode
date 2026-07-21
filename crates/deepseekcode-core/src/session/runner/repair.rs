@@ -117,10 +117,7 @@ fn repair_missing_assistant_tool_calls(messages: &mut Vec<LlmMessage>) {
         if has_call {
             continue;
         }
-        let name = messages[i]
-            .name
-            .clone()
-            .unwrap_or_else(|| "tool".into());
+        let name = messages[i].name.clone().unwrap_or_else(|| "tool".into());
         tracing::warn!(
             target: deepseekcode_telemetry::SESSION,
             tool_call_id = %tool_id,
@@ -162,12 +159,18 @@ pub(crate) fn message_to_text(msg: &Message) -> String {
             PartKind::ToolCall => Some(format!(
                 "Tool call {}: {}",
                 part.tool_name.as_deref().unwrap_or("tool"),
-                part.tool_input.as_ref().map(|v| v.to_string()).unwrap_or_default()
+                part.tool_input
+                    .as_ref()
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
             )),
             PartKind::ToolResult => Some(format!(
                 "Tool result {}: {}",
                 part.tool_name.as_deref().unwrap_or("tool"),
-                part.tool_output.as_ref().map(|v| v.to_string()).unwrap_or_default()
+                part.tool_output
+                    .as_ref()
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
             )),
             PartKind::Reasoning => part.text.clone(),
         })

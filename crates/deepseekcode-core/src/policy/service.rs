@@ -14,8 +14,8 @@ use deepseekcode_schema::agent::AgentKind;
 use deepseekcode_schema::event::EventKind;
 use deepseekcode_schema::permission::{PermissionRequest, PermissionStatus};
 use deepseekcode_schema::policy::{
-    PolicyDecision, PolicyGrant, PolicyReply, PolicyReplyKind, PolicyRequest,
-    PolicyRequestStatus, PolicyRuleset,
+    PolicyDecision, PolicyGrant, PolicyReply, PolicyReplyKind, PolicyRequest, PolicyRequestStatus,
+    PolicyRuleset,
 };
 use deepseekcode_storage::{EventStore, PolicyStore};
 use deepseekcode_types::{DeepSeekCodeError, PermissionId, Result, SessionId};
@@ -51,7 +51,11 @@ pub struct PolicyService {
 }
 
 impl PolicyService {
-    pub fn new(config: &DeepSeekCodeConfig, project_dir: impl Into<String>, store: Option<PolicyStore>) -> Self {
+    pub fn new(
+        config: &DeepSeekCodeConfig,
+        project_dir: impl Into<String>,
+        store: Option<PolicyStore>,
+    ) -> Self {
         let global_rules = build_global_ruleset(config);
         let mut agent_rules = HashMap::new();
         for (name, agent_cfg) in &config.agents {
@@ -151,7 +155,8 @@ impl PolicyService {
         let patterns = extract_patterns_for_workspace(tool_name, &input, Some(working_dir));
 
         // outside_workspace guard — path tools should fail back to the model, not prompt the user.
-        let outside = crate::policy::patterns::outside_workspace_paths(working_dir, &input, tool_name);
+        let outside =
+            crate::policy::patterns::outside_workspace_paths(working_dir, &input, tool_name);
         if !outside.is_empty() {
             if is_path_scoped_tool(tool_name) {
                 return Ok(PolicyOutcome::Blocked {
@@ -209,14 +214,8 @@ impl PolicyService {
             }),
             PolicyDecision::Prompt => {
                 if self.is_auto_mode().await {
-                    self.emit_auto_permitted(
-                        session_id,
-                        &scope,
-                        tool_name,
-                        &patterns,
-                        input,
-                    )
-                    .await?;
+                    self.emit_auto_permitted(session_id, &scope, tool_name, &patterns, input)
+                        .await?;
                     Ok(PolicyOutcome::Permitted)
                 } else {
                     self.prompt(
@@ -315,8 +314,11 @@ impl PolicyService {
         let outcome = match tokio::time::timeout(POLICY_TIMEOUT, rx).await {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(_)) => {
-                self.finalize_pending_timeout(&req, &format!("policy channel closed for {tool_name}"))
-                    .await?;
+                self.finalize_pending_timeout(
+                    &req,
+                    &format!("policy channel closed for {tool_name}"),
+                )
+                .await?;
                 PolicyOutcome::Rejected {
                     message: Some(format!("policy channel closed for {tool_name}")),
                 }
@@ -396,7 +398,9 @@ impl PolicyService {
     pub async fn reply(&self, id: PermissionId, reply: PolicyReply) -> Result<()> {
         let entry = self.pending.write().await.remove(&id);
         let Some(entry) = entry else {
-            return Err(DeepSeekCodeError::NotFound(format!("policy request {id} not found")));
+            return Err(DeepSeekCodeError::NotFound(format!(
+                "policy request {id} not found"
+            )));
         };
         let req = entry.request;
 
@@ -570,7 +574,7 @@ pub type PermissionService = PolicyService;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use deepseekcode_config::{PolicyScopeConfig, PolicyMode};
+    use deepseekcode_config::{PolicyMode, PolicyScopeConfig};
     use deepseekcode_schema::agent::AgentKind;
     use deepseekcode_schema::policy::{PolicyAction, PolicyReply, PolicyReplyKind};
 
@@ -578,9 +582,10 @@ mod tests {
     async fn auto_mode_permits_without_pending() {
         let mut config = DeepSeekCodeConfig::default();
         config.policy_mode = Some(PolicyMode::Auto);
-        config
-            .policy
-            .insert("bash".into(), PolicyScopeConfig::Simple(PolicyAction::Prompt));
+        config.policy.insert(
+            "bash".into(),
+            PolicyScopeConfig::Simple(PolicyAction::Prompt),
+        );
         let svc = PolicyService::new(&config, ".", None);
         let session_id = SessionId::new();
         let outcome = svc
@@ -601,9 +606,10 @@ mod tests {
     async fn auto_mode_still_blocks() {
         let mut config = DeepSeekCodeConfig::default();
         config.policy_mode = Some(PolicyMode::Auto);
-        config
-            .policy
-            .insert("bash".into(), PolicyScopeConfig::Simple(PolicyAction::Block));
+        config.policy.insert(
+            "bash".into(),
+            PolicyScopeConfig::Simple(PolicyAction::Block),
+        );
         let svc = PolicyService::new(&config, ".", None);
         let session_id = SessionId::new();
         let outcome = svc
@@ -623,9 +629,10 @@ mod tests {
     async fn once_grant_permits_same_pattern_in_session() {
         use std::sync::Arc;
         let mut config = DeepSeekCodeConfig::default();
-        config
-            .policy
-            .insert("bash".into(), PolicyScopeConfig::Simple(PolicyAction::Prompt));
+        config.policy.insert(
+            "bash".into(),
+            PolicyScopeConfig::Simple(PolicyAction::Prompt),
+        );
         let svc = Arc::new(PolicyService::new(&config, ".", None));
         let session_id = SessionId::new();
 
@@ -653,7 +660,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(first.await.unwrap().unwrap(), PolicyOutcome::Permitted));
+        assert!(matches!(
+            first.await.unwrap().unwrap(),
+            PolicyOutcome::Permitted
+        ));
 
         let outcome = svc
             .ensure_permitted(
@@ -673,12 +683,14 @@ mod tests {
     async fn reject_does_not_drain_other_pending_requests() {
         use std::sync::Arc;
         let mut config = DeepSeekCodeConfig::default();
-        config
-            .policy
-            .insert("bash".into(), PolicyScopeConfig::Simple(PolicyAction::Prompt));
-        config
-            .policy
-            .insert("read".into(), PolicyScopeConfig::Simple(PolicyAction::Prompt));
+        config.policy.insert(
+            "bash".into(),
+            PolicyScopeConfig::Simple(PolicyAction::Prompt),
+        );
+        config.policy.insert(
+            "read".into(),
+            PolicyScopeConfig::Simple(PolicyAction::Prompt),
+        );
         let svc = Arc::new(PolicyService::new(&config, ".", None));
         let session_a = SessionId::new();
         let session_b = SessionId::new();
@@ -728,9 +740,10 @@ mod tests {
     async fn prompt_timeout_clears_pending() {
         use std::sync::Arc;
         let mut config = DeepSeekCodeConfig::default();
-        config
-            .policy
-            .insert("bash".into(), PolicyScopeConfig::Simple(PolicyAction::Prompt));
+        config.policy.insert(
+            "bash".into(),
+            PolicyScopeConfig::Simple(PolicyAction::Prompt),
+        );
         let svc = Arc::new(PolicyService::new(&config, ".", None));
         let session_id = SessionId::new();
 

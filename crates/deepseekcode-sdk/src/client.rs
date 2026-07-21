@@ -92,10 +92,11 @@ impl DeepSeekCodeClient {
     pub async fn prompt(&self, req: PromptRequest) -> Result<MessageId> {
         let path = format!("/api/v1/session/{}/prompt", req.session_id);
         let resp: serde_json::Value = self.post(&path, &req).await?;
-        let id = resp["message_id"]
-            .as_str()
-            .ok_or_else(|| deepseekcode_types::DeepSeekCodeError::Other("missing message_id".into()))?;
-        MessageId::from_str(id).map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))
+        let id = resp["message_id"].as_str().ok_or_else(|| {
+            deepseekcode_types::DeepSeekCodeError::Other("missing message_id".into())
+        })?;
+        MessageId::from_str(id)
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))
     }
 
     pub async fn interrupt(&self, session_id: SessionId) -> Result<()> {
@@ -116,11 +117,17 @@ impl DeepSeekCodeClient {
     pub async fn list_active_sessions(&self) -> Result<Vec<SessionId>> {
         let ids: Vec<String> = self.get("/api/v1/session/active").await?;
         ids.into_iter()
-            .map(|s| SessionId::from_str(&s).map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string())))
+            .map(|s| {
+                SessionId::from_str(&s)
+                    .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))
+            })
             .collect()
     }
 
-    pub async fn list_messages(&self, session_id: SessionId) -> Result<Vec<deepseekcode_schema::message::Message>> {
+    pub async fn list_messages(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<deepseekcode_schema::message::Message>> {
         let path = format!("/api/v1/session/{session_id}/messages");
         self.get(&path).await
     }
@@ -157,7 +164,8 @@ impl DeepSeekCodeClient {
         todos: &[deepseekcode_schema::todo::TodoItem],
     ) -> Result<Vec<deepseekcode_schema::todo::TodoItem>> {
         let path = format!("/api/v1/session/{session_id}/todo");
-        self.post(&path, &serde_json::json!({ "todos": todos })).await
+        self.post(&path, &serde_json::json!({ "todos": todos }))
+            .await
     }
 
     pub async fn list_session_events(
@@ -169,11 +177,7 @@ impl DeepSeekCodeClient {
         self.get(&path).await
     }
 
-    pub async fn submit_question_answer(
-        &self,
-        session_id: SessionId,
-        answer: &str,
-    ) -> Result<()> {
+    pub async fn submit_question_answer(&self, session_id: SessionId, answer: &str) -> Result<()> {
         let path = format!("/api/v1/session/{session_id}/question/answer");
         let _: serde_json::Value = self
             .post(&path, &serde_json::json!({ "answer": answer }))
@@ -276,7 +280,10 @@ impl DeepSeekCodeClient {
         self.get("/api/v1/projects").await
     }
 
-    pub async fn create_project(&self, path: &str) -> Result<deepseekcode_schema::project::Project> {
+    pub async fn create_project(
+        &self,
+        path: &str,
+    ) -> Result<deepseekcode_schema::project::Project> {
         let body = deepseekcode_schema::project::CreateProjectRequest {
             path: path.to_string(),
         };
@@ -314,9 +321,11 @@ impl DeepSeekCodeClient {
 
     pub async fn remove_worktree(&self, path: &str) -> Result<()> {
         let query = format!("?path={}", urlencoding_encode(path));
-        let mut req = self
-            .http
-            .delete(format!("{}{}", self.base_url, format!("/api/v1/worktree{query}")));
+        let mut req = self.http.delete(format!(
+            "{}{}",
+            self.base_url,
+            format!("/api/v1/worktree{query}")
+        ));
         req = req.header("x-deepseekcode-directory", &self.directory);
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
@@ -355,10 +364,7 @@ impl DeepSeekCodeClient {
         base_url: Option<String>,
     ) -> Result<()> {
         let path = format!("/api/v1/provider/{provider_id}/connect");
-        let body = deepseekcode_schema::provider::ConnectProviderRequest {
-            api_key,
-            base_url,
-        };
+        let body = deepseekcode_schema::provider::ConnectProviderRequest { api_key, base_url };
         let _: serde_json::Value = self.post(&path, &body).await?;
         Ok(())
     }
@@ -385,7 +391,9 @@ impl DeepSeekCodeClient {
         Ok(())
     }
 
-    pub async fn list_policy_grants(&self) -> Result<Vec<deepseekcode_schema::policy::PolicyGrant>> {
+    pub async fn list_policy_grants(
+        &self,
+    ) -> Result<Vec<deepseekcode_schema::policy::PolicyGrant>> {
         self.get("/api/v1/policy/grants").await
     }
 
@@ -485,20 +493,18 @@ impl DeepSeekCodeClient {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(deepseekcode_types::DeepSeekCodeError::Other(if text.is_empty() {
-                format!("update_model failed: {status}")
-            } else {
-                text
-            }));
+            return Err(deepseekcode_types::DeepSeekCodeError::Other(
+                if text.is_empty() {
+                    format!("update_model failed: {status}")
+                } else {
+                    text
+                },
+            ));
         }
         Ok(())
     }
 
-    pub async fn update_session(
-        &self,
-        session_id: SessionId,
-        title: Option<&str>,
-    ) -> Result<()> {
+    pub async fn update_session(&self, session_id: SessionId, title: Option<&str>) -> Result<()> {
         let path = format!("/api/v1/session/{session_id}");
         let body = serde_json::json!({ "title": title });
         let mut req = self
@@ -515,11 +521,13 @@ impl DeepSeekCodeClient {
             .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(deepseekcode_types::DeepSeekCodeError::Other(if text.is_empty() {
-                "update_session failed".into()
-            } else {
-                text
-            }));
+            return Err(deepseekcode_types::DeepSeekCodeError::Other(
+                if text.is_empty() {
+                    "update_session failed".into()
+                } else {
+                    text
+                },
+            ));
         }
         Ok(())
     }
@@ -539,11 +547,13 @@ impl DeepSeekCodeClient {
             .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(deepseekcode_types::DeepSeekCodeError::Other(if text.is_empty() {
-                "delete_session failed".into()
-            } else {
-                text
-            }));
+            return Err(deepseekcode_types::DeepSeekCodeError::Other(
+                if text.is_empty() {
+                    "delete_session failed".into()
+                } else {
+                    text
+                },
+            ));
         }
         Ok(())
     }
@@ -565,7 +575,9 @@ impl DeepSeekCodeClient {
         let resp: serde_json::Value = self.get(&path).await?;
         let ticket = resp["ticket"]
             .as_str()
-            .ok_or_else(|| deepseekcode_types::DeepSeekCodeError::Other("missing pty ticket".into()))?
+            .ok_or_else(|| {
+                deepseekcode_types::DeepSeekCodeError::Other("missing pty ticket".into())
+            })?
             .to_string();
         let expires_in = resp["expires_in"].as_u64().unwrap_or(60);
         Ok((ticket, expires_in))
@@ -602,10 +614,7 @@ impl DeepSeekCodeClient {
             format!("?{}", parts.join("&"))
         };
         let resp: serde_json::Value = self.get(&format!("/api/v1/fs/tree{query}")).await?;
-        let entries = resp["entries"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
+        let entries = resp["entries"].as_array().cloned().unwrap_or_default();
         Ok(FsTreePage {
             entries: entries
                 .into_iter()
@@ -642,11 +651,13 @@ impl DeepSeekCodeClient {
             .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(deepseekcode_types::DeepSeekCodeError::Other(if text.is_empty() {
-                "fs_write failed".into()
-            } else {
-                text
-            }));
+            return Err(deepseekcode_types::DeepSeekCodeError::Other(
+                if text.is_empty() {
+                    "fs_write failed".into()
+                } else {
+                    text
+                },
+            ));
         }
         Ok(())
     }
@@ -654,10 +665,9 @@ impl DeepSeekCodeClient {
     pub async fn fs_file(&self, path: &str) -> Result<String> {
         let query = format!("?path={}", urlencoding_encode(path));
         let resp: serde_json::Value = self.get(&format!("/api/v1/fs/file{query}")).await?;
-        resp["content"]
-            .as_str()
-            .map(String::from)
-            .ok_or_else(|| deepseekcode_types::DeepSeekCodeError::Other("missing file content".into()))
+        resp["content"].as_str().map(String::from).ok_or_else(|| {
+            deepseekcode_types::DeepSeekCodeError::Other("missing file content".into())
+        })
     }
 
     pub async fn fs_diff(
@@ -694,11 +704,13 @@ impl DeepSeekCodeClient {
             .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(deepseekcode_types::DeepSeekCodeError::Other(if text.is_empty() {
-                "resize_pty failed".into()
-            } else {
-                text
-            }));
+            return Err(deepseekcode_types::DeepSeekCodeError::Other(
+                if text.is_empty() {
+                    "resize_pty failed".into()
+                } else {
+                    text
+                },
+            ));
         }
         Ok(())
     }
@@ -762,10 +774,7 @@ impl DeepSeekCodeClient {
                                 .get("head")
                                 .and_then(|v| v.as_i64())
                                 .unwrap_or(since_seq);
-                            let limit = value
-                                .get("limit")
-                                .and_then(|v| v.as_i64())
-                                .unwrap_or(0);
+                            let limit = value.get("limit").and_then(|v| v.as_i64()).unwrap_or(0);
                             return Some(EventStreamItem::Gap { head, limit });
                         }
                     }
@@ -785,10 +794,7 @@ impl DeepSeekCodeClient {
                 "{}/api/v1/event?since_seq={since_seq}&session_id={id}",
                 self.base_url
             ),
-            None => format!(
-                "{}/api/v1/event?since_seq={since_seq}",
-                self.base_url
-            ),
+            None => format!("{}/api/v1/event?since_seq={since_seq}", self.base_url),
         }
     }
 
@@ -800,10 +806,7 @@ impl DeepSeekCodeClient {
         self.get_bytes(&path).await
     }
 
-    async fn handle_response<T: DeserializeOwned>(
-        &self,
-        resp: reqwest::Response,
-    ) -> Result<T> {
+    async fn handle_response<T: DeserializeOwned>(&self, resp: reqwest::Response) -> Result<T> {
         let status = resp.status();
         if status.is_success() {
             return resp
@@ -811,10 +814,7 @@ impl DeepSeekCodeClient {
                 .await
                 .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
         }
-        let body = resp
-            .text()
-            .await
-            .unwrap_or_default();
+        let body = resp.text().await.unwrap_or_default();
         let message = serde_json::from_str::<serde_json::Value>(&body)
             .ok()
             .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
@@ -868,7 +868,9 @@ impl DeepSeekCodeClient {
         body: &B,
     ) -> Result<T> {
         let mut req = self.http.post(format!("{}{}", self.base_url, path));
-        req = req.header("x-deepseekcode-directory", &self.directory).json(body);
+        req = req
+            .header("x-deepseekcode-directory", &self.directory)
+            .json(body);
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
@@ -913,7 +915,11 @@ impl DeepSeekCodeClient {
         self.handle_response(resp).await
     }
 
-    async fn put<T: DeserializeOwned, B: serde::Serialize>(&self, path: &str, body: &B) -> Result<T> {
+    async fn put<T: DeserializeOwned, B: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
         let mut req = self
             .http
             .put(format!("{}{}", self.base_url, path))

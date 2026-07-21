@@ -92,7 +92,10 @@ impl SessionStore {
         rows.into_iter().map(|r| r.into_session()).collect()
     }
 
-    pub async fn list_for_working_directory(&self, working_directory: &str) -> Result<Vec<Session>> {
+    pub async fn list_for_working_directory(
+        &self,
+        working_directory: &str,
+    ) -> Result<Vec<Session>> {
         let key = normalize_working_directory(working_directory);
         let rows = sqlx::query_as::<_, SessionRow>(
             r#"SELECT id, location_id, title, agent, model_id, provider_id, parent_session_id, created_at, updated_at
@@ -117,7 +120,9 @@ impl SessionStore {
         .await
         .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
         rows.into_iter()
-            .map(|(id,)| SessionId::from_str(&id).map_err(|e| DeepSeekCodeError::Storage(e.to_string())))
+            .map(|(id,)| {
+                SessionId::from_str(&id).map_err(|e| DeepSeekCodeError::Storage(e.to_string()))
+            })
             .collect()
     }
 
@@ -489,7 +494,10 @@ impl SessionStore {
         Ok(())
     }
 
-    pub async fn list_messages(&self, session_id: SessionId) -> Result<Vec<deepseekcode_schema::message::Message>> {
+    pub async fn list_messages(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<deepseekcode_schema::message::Message>> {
         use deepseekcode_schema::message::{Message, MessagePart, MessageRole, PartKind};
 
         let rows = sqlx::query_as::<_, MessageRow>(
@@ -512,7 +520,8 @@ impl SessionStore {
             .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
 
             messages.push(Message {
-                id: MessageId::from_str(&row.id).map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?,
+                id: MessageId::from_str(&row.id)
+                    .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?,
                 session_id,
                 role: parse_role(&row.role),
                 seq: row.seq,
@@ -791,14 +800,13 @@ impl SessionStore {
         session_id: SessionId,
         cutoff_seq: i64,
     ) -> Result<()> {
-        let ids: Vec<String> = sqlx::query_scalar(
-            r#"SELECT id FROM messages WHERE session_id = ? AND seq > ?"#,
-        )
-        .bind(session_id.to_string())
-        .bind(cutoff_seq)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        let ids: Vec<String> =
+            sqlx::query_scalar(r#"SELECT id FROM messages WHERE session_id = ? AND seq > ?"#)
+                .bind(session_id.to_string())
+                .bind(cutoff_seq)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
 
         for id in ids {
             sqlx::query(r#"DELETE FROM message_parts WHERE message_id = ?"#)
@@ -854,8 +862,7 @@ pub fn message_visible_to_runner(
     compaction_seq: Option<i64>,
 ) -> bool {
     use deepseekcode_schema::message::MessageRole;
-    let passes_baseline =
-        message.role != MessageRole::System || message.seq > baseline_seq;
+    let passes_baseline = message.role != MessageRole::System || message.seq > baseline_seq;
     if !passes_baseline {
         return false;
     }
@@ -893,7 +900,8 @@ struct SessionRow {
 impl SessionRow {
     fn into_session(self) -> Result<Session> {
         Ok(Session {
-            id: SessionId::from_str(&self.id).map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?,
+            id: SessionId::from_str(&self.id)
+                .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?,
             location_id: LocationId::from_str(&self.location_id)
                 .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?,
             title: self.title,
@@ -930,7 +938,10 @@ impl InputRow {
     fn into_input(self) -> Result<SessionInput> {
         Ok(SessionInput {
             id: MessageId::from_str(&self.id).map_err(|_| {
-                DeepSeekCodeError::Storage(format!("invalid message id in session_input: {}", self.id))
+                DeepSeekCodeError::Storage(format!(
+                    "invalid message id in session_input: {}",
+                    self.id
+                ))
             })?,
             session_id: SessionId::from_str(&self.session_id).map_err(|_| {
                 DeepSeekCodeError::Storage(format!(
@@ -953,9 +964,7 @@ impl InputRow {
 }
 
 fn normalize_working_directory(path: &str) -> String {
-    path.replace('\\', "/")
-        .trim_end_matches('/')
-        .to_lowercase()
+    path.replace('\\', "/").trim_end_matches('/').to_lowercase()
 }
 
 fn parse_agent(s: &str) -> AgentKind {

@@ -147,11 +147,9 @@ impl WasmPluginRuntime {
         let instance = linker
             .instantiate(&mut store, module)
             .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
-        let func = instance
-            .get_func(&mut store, export)
-            .ok_or_else(|| {
-                deepseekcode_types::DeepSeekCodeError::Other(format!("wasm export not found: {export}"))
-            })?;
+        let func = instance.get_func(&mut store, export).ok_or_else(|| {
+            deepseekcode_types::DeepSeekCodeError::Other(format!("wasm export not found: {export}"))
+        })?;
         func.call(&mut store, &[], &mut [])
             .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
         Ok(())

@@ -5,18 +5,22 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::display::{build_tool_result, preview_metadata_from_input, preview_title_from_input};
+use super::services::{with_services_async, ToolServices};
 use crate::mcp::McpConnectionPool;
 use crate::skills::{SkillCatalog, SkillTool};
 use crate::snapshot::FileSnapshotStore;
-use super::display::{build_tool_result, preview_metadata_from_input, preview_title_from_input};
-use super::services::{with_services_async, ToolServices};
 
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn input_schema(&self) -> Value;
-    async fn execute(&self, input: Value, ctx: &ToolContext) -> std::result::Result<Value, ToolFailure>;
+    async fn execute(
+        &self,
+        input: Value,
+        ctx: &ToolContext,
+    ) -> std::result::Result<Value, ToolFailure>;
 }
 
 struct ToolAlias {
@@ -35,7 +39,11 @@ impl Tool for ToolAlias {
     fn input_schema(&self) -> Value {
         self.inner.input_schema()
     }
-    async fn execute(&self, input: Value, ctx: &ToolContext) -> std::result::Result<Value, ToolFailure> {
+    async fn execute(
+        &self,
+        input: Value,
+        ctx: &ToolContext,
+    ) -> std::result::Result<Value, ToolFailure> {
         self.inner.execute(input, ctx).await
     }
 }
@@ -48,7 +56,10 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    pub fn new(working_directory: String, config: &deepseekcode_config::DeepSeekCodeConfig) -> Self {
+    pub fn new(
+        working_directory: String,
+        config: &deepseekcode_config::DeepSeekCodeConfig,
+    ) -> Self {
         Self::with_services(working_directory, config, ToolServices::default())
     }
 
@@ -90,7 +101,10 @@ impl ToolRegistry {
         self.register(Box::new(GrepTool));
         self.register(Box::new(GlobTool));
         self.register(Box::new(ListTool));
-        self.register(Box::new(BashTool::new(config.shell.clone(), shell_env.clone())));
+        self.register(Box::new(BashTool::new(
+            config.shell.clone(),
+            shell_env.clone(),
+        )));
         if cfg!(windows) {
             self.register(Box::new(PowershellTool::new(
                 config.shell.clone(),
@@ -140,9 +154,8 @@ impl ToolRegistry {
             .into_iter()
             .map(|s| format!("{}_", s.name))
             .collect();
-        self.tools.retain(|name, _| {
-            !prefixes.iter().any(|prefix| name.starts_with(prefix))
-        });
+        self.tools
+            .retain(|name, _| !prefixes.iter().any(|prefix| name.starts_with(prefix)));
         for tool in mcp.bridged_tools() {
             self.register(tool);
         }
@@ -214,16 +227,14 @@ impl ToolRegistry {
         agent: &str,
         hooks: Option<&deepseekcode_plugin::HookRegistry>,
     ) -> Result<ToolResultEnvelope> {
-        let tool = self
-            .tools
-            .get(name)
-            .ok_or_else(|| deepseekcode_types::DeepSeekCodeError::NotFound(format!("tool {name}")))?;
+        let tool = self.tools.get(name).ok_or_else(|| {
+            deepseekcode_types::DeepSeekCodeError::NotFound(format!("tool {name}"))
+        })?;
 
-        let todo_store = self
-            .services
-            .todo_store
-            .as_ref()
-            .map(|store| Arc::new(crate::todo::StorageTodoStoreOps(store.clone())) as Arc<dyn deepseekcode_schema::tool::TodoStoreOps>);
+        let todo_store = self.services.todo_store.as_ref().map(|store| {
+            Arc::new(crate::todo::StorageTodoStoreOps(store.clone()))
+                as Arc<dyn deepseekcode_schema::tool::TodoStoreOps>
+        });
 
         let ctx = ToolContext {
             session_id,
@@ -236,11 +247,9 @@ impl ToolRegistry {
 
         if let Some(store) = &self.snapshot_store {
             if store.is_enabled() && FileSnapshotStore::is_write_tool(name) {
-                for path in FileSnapshotStore::paths_from_tool_input(
-                    name,
-                    &input,
-                    &self.working_directory,
-                ) {
+                for path in
+                    FileSnapshotStore::paths_from_tool_input(name, &input, &self.working_directory)
+                {
                     if !crate::project_context::path_within_project(&self.working_directory, &path)
                     {
                         return Err(deepseekcode_types::DeepSeekCodeError::ToolFailure(format!(
@@ -307,14 +316,8 @@ impl ToolRegistry {
                     hook_title = Some(after_out.title);
                     hook_metadata = after_out.metadata;
                 }
-                let envelope = build_tool_result(
-                    name,
-                    &input,
-                    value,
-                    duration_ms,
-                    hook_title,
-                    hook_metadata,
-                );
+                let envelope =
+                    build_tool_result(name, &input, value, duration_ms, hook_title, hook_metadata);
                 let size = serde_json::to_string(&envelope.output)
                     .map(|s| s.len())
                     .unwrap_or(0);
@@ -338,7 +341,9 @@ impl ToolRegistry {
                     error = %e.message,
                     "tool failed"
                 );
-                Err(deepseekcode_types::DeepSeekCodeError::ToolFailure(e.message))
+                Err(deepseekcode_types::DeepSeekCodeError::ToolFailure(
+                    e.message,
+                ))
             }
         }
     }
@@ -351,7 +356,10 @@ pub fn preview_tool_start(name: &str, input: &Value) -> (String, Value) {
     )
 }
 
-fn agent_allowed_tools(agent: &str, config: &deepseekcode_config::DeepSeekCodeConfig) -> Vec<String> {
+fn agent_allowed_tools(
+    agent: &str,
+    config: &deepseekcode_config::DeepSeekCodeConfig,
+) -> Vec<String> {
     if let Some(agent_cfg) = config.agents.get(agent) {
         if let Some(tools) = &agent_cfg.tools {
             return tools.clone();
@@ -447,7 +455,11 @@ mod tests {
         assert!(defs.iter().any(|d| d.name == "plan_complete"));
         assert!(!defs.iter().any(|d| d.name == "plan.complete"));
         for def in &defs {
-            assert!(is_llm_safe_tool_name(&def.name), "bad tool name: {}", def.name);
+            assert!(
+                is_llm_safe_tool_name(&def.name),
+                "bad tool name: {}",
+                def.name
+            );
         }
     }
 

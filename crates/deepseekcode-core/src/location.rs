@@ -62,16 +62,17 @@ impl LocationMap {
 
         let config = self.config.read().await.clone();
         let policy_store = PolicyStore::new(self.db.pool().clone());
-        let events = Arc::new(deepseekcode_storage::EventStore::new(self.db.pool().clone()));
+        let events = Arc::new(deepseekcode_storage::EventStore::new(
+            self.db.pool().clone(),
+        ));
         let permissions = Arc::new(
-            PermissionService::new(&config, project_dir, Some(policy_store)).with_events(events.clone()),
+            PermissionService::new(&config, project_dir, Some(policy_store))
+                .with_events(events.clone()),
         );
         let _ = permissions.load_from_db().await;
 
         let providers = Arc::new(ProviderCatalog::with_store(self.credentials.clone()));
-        providers
-            .load_from_config(&config.providers)
-            .await;
+        providers.load_from_config(&config.providers).await;
         let _ = providers.load_from_store().await.map_err(|e| {
             tracing::warn!(
                 target: deepseekcode_telemetry::APP,
@@ -86,9 +87,7 @@ impl LocationMap {
             .as_ref()
             .map(|m| m.servers.clone())
             .unwrap_or_default();
-        let mcp = Arc::new(
-            McpConnectionPool::new(mcp_servers).with_events(events.clone()),
-        );
+        let mcp = Arc::new(McpConnectionPool::new(mcp_servers).with_events(events.clone()));
         mcp.connect_all().await;
 
         let mut plugin_host = PluginHost::new();
@@ -112,8 +111,8 @@ impl LocationMap {
         let proxy_tools = wasm_tools.clone();
         let proxy_active = active_session_id.clone();
         deepseekcode_plugin::set_wasm_tool_proxy(Arc::new(move |tool, args| {
-            let args_value: serde_json::Value = serde_json::from_str(args)
-                .map_err(|e| format!("invalid tool args json: {e}"))?;
+            let args_value: serde_json::Value =
+                serde_json::from_str(args).map_err(|e| format!("invalid tool args json: {e}"))?;
             let registry = proxy_tools
                 .lock()
                 .map_err(|_| "tool registry lock poisoned".to_string())?;
@@ -127,13 +126,7 @@ impl LocationMap {
             let message_id = deepseekcode_types::MessageId::new();
             let call_id = deepseekcode_types::ToolCallId::new();
             let result = rt.block_on(registry.execute(
-                tool,
-                args_value,
-                session_id,
-                message_id,
-                call_id,
-                "build",
-                None,
+                tool, args_value, session_id, message_id, call_id, "build", None,
             ));
             match result {
                 Ok(value) => serde_json::to_string(&value.to_stored()).map_err(|e| e.to_string()),

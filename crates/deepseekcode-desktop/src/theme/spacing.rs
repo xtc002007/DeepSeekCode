@@ -1,5 +1,5 @@
-use gpui::Pixels;
 use gpui::px;
+use gpui::Pixels;
 
 /// Spacing scale — tightened for IDE-like density (Cursor-aligned).
 #[derive(Clone, Copy, Debug)]

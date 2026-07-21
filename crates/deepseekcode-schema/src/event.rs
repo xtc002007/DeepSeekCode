@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use deepseekcode_types::{MessageId, PermissionId, SessionId, ToolCallId};
-use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema, JsonSchema)]

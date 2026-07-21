@@ -211,9 +211,7 @@ fn normalize_pty_cwd(cwd: &str) -> String {
     let s = canonical.display().to_string();
     #[cfg(windows)]
     {
-        s.strip_prefix(r"\\?\")
-            .unwrap_or(&s)
-            .to_string()
+        s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
     }
     #[cfg(not(windows))]
     {

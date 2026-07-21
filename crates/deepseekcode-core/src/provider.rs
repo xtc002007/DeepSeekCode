@@ -32,17 +32,17 @@ impl ProviderCatalog {
         if let Some(store) = &self.store {
             for provider_id in store.list_connected().await? {
                 if let Some(key) = store.get(&provider_id).await? {
-                    self.credentials
-                        .write()
-                        .await
-                        .insert(provider_id, key);
+                    self.credentials.write().await.insert(provider_id, key);
                 }
             }
         }
         Ok(())
     }
 
-    pub async fn load_from_config(&self, providers: &HashMap<String, deepseekcode_config::ProviderConfig>) {
+    pub async fn load_from_config(
+        &self,
+        providers: &HashMap<String, deepseekcode_config::ProviderConfig>,
+    ) {
         for (id, cfg) in providers {
             if let Some(key) = &cfg.api_key {
                 self.credentials

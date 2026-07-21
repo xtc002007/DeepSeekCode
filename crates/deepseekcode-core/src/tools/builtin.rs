@@ -76,8 +76,10 @@ impl Tool for ReadTool {
                 retryable: false,
             });
         }
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| ToolFailure { message: e.to_string(), retryable: false })?;
+        let content = std::fs::read_to_string(&path).map_err(|e| ToolFailure {
+            message: e.to_string(),
+            retryable: false,
+        })?;
         let offset = input["offset"].as_u64().unwrap_or(1).max(1) as usize;
         let limit = input["limit"].as_u64().unwrap_or(2000) as usize;
         let lines: Vec<&str> = content.lines().skip(offset - 1).take(limit).collect();
@@ -137,11 +139,15 @@ impl Tool for WriteTool {
         let content = input["content"].as_str().unwrap_or("");
         let old = std::fs::read_to_string(&path).unwrap_or_default();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| ToolFailure { message: e.to_string(), retryable: false })?;
+            std::fs::create_dir_all(parent).map_err(|e| ToolFailure {
+                message: e.to_string(),
+                retryable: false,
+            })?;
         }
-        std::fs::write(&path, content)
-            .map_err(|e| ToolFailure { message: e.to_string(), retryable: false })?;
+        std::fs::write(&path, content).map_err(|e| ToolFailure {
+            message: e.to_string(),
+            retryable: false,
+        })?;
         let diff_stats = compute_text_diff_stats(&old, content);
         Ok(json!({
             "path": path.display().to_string(),
@@ -194,8 +200,10 @@ impl Tool for EditTool {
         let path = resolve_path(ctx, input["path"].as_str().unwrap_or(""))?;
         let old = input["old_string"].as_str().unwrap_or("");
         let new = input["new_string"].as_str().unwrap_or("");
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| ToolFailure { message: e.to_string(), retryable: false })?;
+        let content = std::fs::read_to_string(&path).map_err(|e| ToolFailure {
+            message: e.to_string(),
+            retryable: false,
+        })?;
         let count = content.matches(old).count();
         if count != 1 {
             return Err(ToolFailure {
@@ -204,8 +212,10 @@ impl Tool for EditTool {
             });
         }
         let updated = content.replacen(old, new, 1);
-        std::fs::write(&path, &updated)
-            .map_err(|e| ToolFailure { message: e.to_string(), retryable: false })?;
+        std::fs::write(&path, &updated).map_err(|e| ToolFailure {
+            message: e.to_string(),
+            retryable: false,
+        })?;
         let diff_stats = compute_text_diff_stats(&content, &updated);
         Ok(json!({
             "path": path.display().to_string(),
@@ -319,9 +329,16 @@ impl Tool for GlobTool {
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
         let pattern = input["pattern"].as_str().unwrap_or("*");
-        let full_pattern = format!("{}/{}", ctx.working_directory.trim_end_matches('/'), pattern);
+        let full_pattern = format!(
+            "{}/{}",
+            ctx.working_directory.trim_end_matches('/'),
+            pattern
+        );
         let files: Vec<String> = glob::glob(&full_pattern)
-            .map_err(|e| ToolFailure { message: e.to_string(), retryable: false })?
+            .map_err(|e| ToolFailure {
+                message: e.to_string(),
+                retryable: false,
+            })?
             .filter_map(|p| p.ok())
             .map(|p| p.display().to_string())
             .take(200)
@@ -429,16 +446,20 @@ impl Tool for BashTool {
                 retryable: false,
             });
         }
-        if let Some(reason) =
-            crate::project_context::command_escapes_project_directory(command, &ctx.working_directory)
-        {
+        if let Some(reason) = crate::project_context::command_escapes_project_directory(
+            command,
+            &ctx.working_directory,
+        ) {
             return Err(ToolFailure {
                 message: reason,
                 retryable: false,
             });
         }
         let command = prepare_background_bash_command(command);
-        let timeout_ms = input["timeout_ms"].as_u64().unwrap_or(60_000).clamp(1_000, 600_000);
+        let timeout_ms = input["timeout_ms"]
+            .as_u64()
+            .unwrap_or(60_000)
+            .clamp(1_000, 600_000);
 
         let mut cmd = if let Some(shell) = &self.shell {
             let mut c = Command::new(shell);
@@ -504,13 +525,7 @@ async fn run_command_streaming(
             if let Some(services) = &services {
                 if let Some(sink) = services.progress.as_ref() {
                     let _ = sink
-                        .progress(
-                            ctx.session_id,
-                            &ctx.tool_call_id,
-                            "bash",
-                            &line,
-                            "stdout",
-                        )
+                        .progress(ctx.session_id, &ctx.tool_call_id, "bash", &line, "stdout")
                         .await;
                 }
             }
@@ -526,13 +541,7 @@ async fn run_command_streaming(
             if let Some(services) = &services {
                 if let Some(sink) = services.progress.as_ref() {
                     let _ = sink
-                        .progress(
-                            ctx.session_id,
-                            &ctx.tool_call_id,
-                            "bash",
-                            &line,
-                            "stderr",
-                        )
+                        .progress(ctx.session_id, &ctx.tool_call_id, "bash", &line, "stderr")
                         .await;
                 }
             }
@@ -592,8 +601,10 @@ impl Tool for ApplyPatchTool {
                     let stats = compute_text_diff_stats(&old, &file_content);
                     total_added += stats.added;
                     total_removed += stats.removed;
-                    std::fs::write(&path, &file_content)
-                        .map_err(|e| ToolFailure { message: e.to_string(), retryable: false })?;
+                    std::fs::write(&path, &file_content).map_err(|e| ToolFailure {
+                        message: e.to_string(),
+                        retryable: false,
+                    })?;
                     applied.push(path.display().to_string());
                 }
                 if line.starts_with("+++ b/") {
@@ -623,8 +634,10 @@ impl Tool for ApplyPatchTool {
             let stats = compute_text_diff_stats(&old, &file_content);
             total_added += stats.added;
             total_removed += stats.removed;
-            std::fs::write(&path, &file_content)
-                .map_err(|e| ToolFailure { message: e.to_string(), retryable: false })?;
+            std::fs::write(&path, &file_content).map_err(|e| ToolFailure {
+                message: e.to_string(),
+                retryable: false,
+            })?;
             applied.push(path.display().to_string());
         }
         Ok(json!({
@@ -637,8 +650,7 @@ impl Tool for ApplyPatchTool {
 
 pub struct TodoWriteTool;
 
-const TODOWRITE_DESCRIPTION: &str =
-    include_str!("descriptions/todowrite.txt");
+const TODOWRITE_DESCRIPTION: &str = include_str!("descriptions/todowrite.txt");
 
 #[async_trait]
 impl Tool for TodoWriteTool {
@@ -681,10 +693,7 @@ impl Tool for TodoWriteTool {
                     .map(|t| TodoItem {
                         content: t["content"].as_str().unwrap_or("").to_string(),
                         status: t["status"].as_str().unwrap_or("pending").to_string(),
-                        priority: t["priority"]
-                            .as_str()
-                            .unwrap_or("medium")
-                            .to_string(),
+                        priority: t["priority"].as_str().unwrap_or("medium").to_string(),
                     })
                     .collect()
             })
@@ -730,10 +739,13 @@ impl Tool for TodoReadTool {
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
         let store = resolve_todo_store(ctx)?;
-        let todos = store.get_todos(ctx.session_id).await.map_err(|e| ToolFailure {
-            message: e,
-            retryable: false,
-        })?;
+        let todos = store
+            .get_todos(ctx.session_id)
+            .await
+            .map_err(|e| ToolFailure {
+                message: e,
+                retryable: false,
+            })?;
         Ok(json!({ "todos": todos }))
     }
 }
@@ -895,11 +907,18 @@ impl Tool for LspTool {
             retryable: false,
         })?;
 
-        let payload = format!("Content-Length: {}\r\n\r\n{}", request.to_string().len(), request);
-        stdin.write_all(payload.as_bytes()).await.map_err(|e| ToolFailure {
-            message: e.to_string(),
-            retryable: true,
-        })?;
+        let payload = format!(
+            "Content-Length: {}\r\n\r\n{}",
+            request.to_string().len(),
+            request
+        );
+        stdin
+            .write_all(payload.as_bytes())
+            .await
+            .map_err(|e| ToolFailure {
+                message: e.to_string(),
+                retryable: true,
+            })?;
         stdin.shutdown().await.ok();
 
         let mut reader = BufReader::new(stdout);
@@ -923,10 +942,13 @@ impl Tool for LspTool {
         let mut body = vec![0u8; content_length];
         if content_length > 0 {
             use tokio::io::AsyncReadExt;
-            reader.read_exact(&mut body).await.map_err(|e| ToolFailure {
-                message: e.to_string(),
-                retryable: true,
-            })?;
+            reader
+                .read_exact(&mut body)
+                .await
+                .map_err(|e| ToolFailure {
+                    message: e.to_string(),
+                    retryable: true,
+                })?;
         }
         let response: Value = serde_json::from_slice(&body).unwrap_or(json!({
             "error": "invalid JSON-RPC response"
@@ -958,7 +980,10 @@ fn resolve_todo_store(
     Ok(Arc::new(crate::todo::StorageTodoStoreOps(store)))
 }
 
-pub(crate) fn resolve_path(ctx: &ToolContext, path: &str) -> std::result::Result<PathBuf, ToolFailure> {
+pub(crate) fn resolve_path(
+    ctx: &ToolContext,
+    path: &str,
+) -> std::result::Result<PathBuf, ToolFailure> {
     let p = PathBuf::from(path);
     let resolved = if p.is_absolute() {
         p
@@ -981,9 +1006,8 @@ fn prepare_background_bash_command(command: &str) -> String {
         || lower.contains(" vite"))
         && !lower.contains("next build")
         && !lower.contains("vite build");
-    let already_background = lower.contains("start /b")
-        || lower.contains("start /min")
-        || lower.contains("nohup ");
+    let already_background =
+        lower.contains("start /b") || lower.contains("start /min") || lower.contains("nohup ");
     if is_dev_server && !already_background {
         format!("start /B {command}")
     } else {

@@ -1,4 +1,3 @@
-
 use deepseekcode_schema::activity::DiffStats;
 use deepseekcode_schema::tool::ToolResultEnvelope;
 use serde_json::{json, Value};
@@ -85,10 +84,9 @@ pub fn preview_title_from_input(tool: &str, input: &Value) -> String {
         "todoread" => "Read todos".into(),
         "task" => format!("Task {}", input["agent"].as_str().unwrap_or("agent")),
         "question" => "Ask question".into(),
-        "plan_complete" | "plan.complete" => format!(
-            "Complete plan {}",
-            input["title"].as_str().unwrap_or("")
-        ),
+        "plan_complete" | "plan.complete" => {
+            format!("Complete plan {}", input["title"].as_str().unwrap_or(""))
+        }
         "lsp" => "LSP".into(),
         other => other.to_string(),
     }
@@ -109,11 +107,11 @@ pub fn enrich_metadata(tool: &str, input: &Value, output: &Value) -> Value {
                 obj.insert("line_end".into(), json!(end));
             } else if let Some(content) = output.get("content").and_then(|v| v.as_str()) {
                 let line_count = content.lines().count().max(1) as u32;
-                let start = obj
-                    .get("line_start")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(1) as u32;
-                obj.insert("line_end".into(), json!(start + line_count.saturating_sub(1)));
+                let start = obj.get("line_start").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+                obj.insert(
+                    "line_end".into(),
+                    json!(start + line_count.saturating_sub(1)),
+                );
             }
         }
         "write" | "edit" => {
@@ -140,10 +138,7 @@ pub fn enrich_metadata(tool: &str, input: &Value, output: &Value) -> Value {
                         first.get("path").and_then(|v| v.as_str()),
                         first.get("line").and_then(|v| v.as_u64()),
                     ) {
-                        obj.insert(
-                            "first_match".into(),
-                            json!({ "path": path, "line": line }),
-                        );
+                        obj.insert("first_match".into(), json!({ "path": path, "line": line }));
                         obj.insert("first_match_path".into(), json!(path));
                         obj.insert("first_match_line".into(), json!(line));
                     }
@@ -231,7 +226,8 @@ pub fn build_tool_result(
 ) -> ToolResultEnvelope {
     let title = hook_title.unwrap_or_else(|| preview_title_from_input(tool, input));
     let mut metadata = enrich_metadata(tool, input, &output);
-    if let (Some(hook_obj), Some(meta_obj)) = (hook_metadata.as_object(), metadata.as_object_mut()) {
+    if let (Some(hook_obj), Some(meta_obj)) = (hook_metadata.as_object(), metadata.as_object_mut())
+    {
         for (k, v) in hook_obj {
             meta_obj.insert(k.clone(), v.clone());
         }
@@ -250,11 +246,7 @@ pub fn line_diff_stats(old: &str, new: &str) -> DiffStats {
     if new_lines >= old_lines {
         DiffStats {
             added: (new_lines - old_lines) as u32 + if old != new { 1 } else { 0 },
-            removed: if old != new && old_lines > 0 {
-                1
-            } else {
-                0
-            },
+            removed: if old != new && old_lines > 0 { 1 } else { 0 },
         }
     } else {
         DiffStats {

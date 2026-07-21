@@ -225,8 +225,8 @@ pub fn total_height_px(rows: &[FlattenedActivityRow]) -> f32 {
 mod tests {
     use super::*;
     use deepseekcode_schema::activity::{
-        ActivityGroup, ActivityGroupKind, ActivityKind, ActivityLeaf, ActivityMeta,
-        ActivityNode, ActivityStatus, ActivityTargetKind, ActivityTree,
+        ActivityGroup, ActivityGroupKind, ActivityKind, ActivityLeaf, ActivityMeta, ActivityNode,
+        ActivityStatus, ActivityTargetKind, ActivityTree,
     };
 
     fn sample_tree() -> ActivityTree {

@@ -180,7 +180,9 @@ fn decrypt_secret(cipher: &Aes256Gcm, payload: &str) -> Result<String> {
         .decode(payload)
         .map_err(|e| DeepSeekCodeError::Storage(format!("decode: {e}")))?;
     if bytes.len() <= 12 {
-        return Err(DeepSeekCodeError::Storage("invalid encrypted payload".into()));
+        return Err(DeepSeekCodeError::Storage(
+            "invalid encrypted payload".into(),
+        ));
     }
     let (nonce_bytes, ciphertext) = bytes.split_at(12);
     let plaintext = cipher

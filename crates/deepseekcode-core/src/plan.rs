@@ -14,10 +14,7 @@ pub fn session_plans_from_events(
         if event.kind != EventKind::PlanCompleted {
             continue;
         }
-        let plan_id = event.payload["plan_id"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let plan_id = event.payload["plan_id"].as_str().unwrap_or("").to_string();
         if plan_id.is_empty() {
             continue;
         }

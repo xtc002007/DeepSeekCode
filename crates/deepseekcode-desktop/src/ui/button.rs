@@ -26,18 +26,10 @@ fn size_styles(size: ButtonSize) -> (Pixels, Pixels, Pixels) {
     }
 }
 
-fn variant_colors(
-    variant: ButtonVariant,
-    theme: &ThemeTokens,
-) -> (Rgba, Rgba, Rgba, Option<Rgba>) {
+fn variant_colors(variant: ButtonVariant, theme: &ThemeTokens) -> (Rgba, Rgba, Rgba, Option<Rgba>) {
     let btn = &theme.components.button;
     match variant {
-        ButtonVariant::Primary => (
-            btn.primary_bg,
-            btn.primary_bg_hover,
-            btn.primary_text,
-            None,
-        ),
+        ButtonVariant::Primary => (btn.primary_bg, btn.primary_bg_hover, btn.primary_text, None),
         ButtonVariant::Secondary => (
             btn.secondary_bg,
             btn.secondary_bg_hover,

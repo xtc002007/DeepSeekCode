@@ -33,8 +33,9 @@ pub async fn generate(
     api_key: Option<String>,
     base_url: Option<&str>,
 ) -> Result<crate::request::LlmResponse> {
-    let api_key =
-        api_key.ok_or_else(|| DeepSeekCodeError::Llm("DeepSeek API key not set (DEEPSEEK_API_KEY)".into()))?;
+    let api_key = api_key.ok_or_else(|| {
+        DeepSeekCodeError::Llm("DeepSeek API key not set (DEEPSEEK_API_KEY)".into())
+    })?;
     let body = openai::build_chat_body(request, false, Some(&deepseek_extras(request)));
 
     let response = http
@@ -64,8 +65,9 @@ pub async fn stream(
     api_key: Option<String>,
     base_url: Option<&str>,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent>> + Send>>> {
-    let api_key =
-        api_key.ok_or_else(|| DeepSeekCodeError::Llm("DeepSeek API key not set (DEEPSEEK_API_KEY)".into()))?;
+    let api_key = api_key.ok_or_else(|| {
+        DeepSeekCodeError::Llm("DeepSeek API key not set (DEEPSEEK_API_KEY)".into())
+    })?;
     let body = openai::build_chat_body(request, true, Some(&deepseek_extras(request)));
 
     let response = http
@@ -85,7 +87,10 @@ pub async fn stream(
     let mapped = byte_stream
         .map(|chunk| chunk.map_err(|e| DeepSeekCodeError::Llm(e.to_string())))
         .scan(
-            (String::new(), HashMap::<usize, (String, String, String)>::new()),
+            (
+                String::new(),
+                HashMap::<usize, (String, String, String)>::new(),
+            ),
             |state, chunk| {
                 let (buffer, tool_acc) = state;
                 match chunk {

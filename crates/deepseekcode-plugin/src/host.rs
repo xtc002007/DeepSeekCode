@@ -76,8 +76,10 @@ impl PluginHost {
                 WasmPluginRuntime::validate(&path)?;
                 let module = Module::from_file(&engine, &path)
                     .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
-                self.wasm_modules
-                    .insert(path.file_name().unwrap().to_string_lossy().to_string(), module);
+                self.wasm_modules.insert(
+                    path.file_name().unwrap().to_string_lossy().to_string(),
+                    module,
+                );
             }
         }
         Ok(())
@@ -133,9 +135,8 @@ impl PluginHost {
                 ))
             })?;
 
-            let init: Symbol<unsafe extern "C" fn() -> i32> = library
-                .get(b"deepseekcode_plugin_init")
-                .map_err(|e| {
+            let init: Symbol<unsafe extern "C" fn() -> i32> =
+                library.get(b"deepseekcode_plugin_init").map_err(|e| {
                     deepseekcode_types::DeepSeekCodeError::Other(format!(
                         "native plugin {} missing deepseekcode_plugin_init: {e}",
                         path.display()
@@ -148,9 +149,8 @@ impl PluginHost {
                 )));
             }
 
-            let id_fn: Symbol<unsafe extern "C" fn() -> *const u8> = library
-                .get(b"deepseekcode_plugin_id")
-                .map_err(|e| {
+            let id_fn: Symbol<unsafe extern "C" fn() -> *const u8> =
+                library.get(b"deepseekcode_plugin_id").map_err(|e| {
                     deepseekcode_types::DeepSeekCodeError::Other(format!(
                         "native plugin {} missing deepseekcode_plugin_id: {e}",
                         path.display()
@@ -197,10 +197,7 @@ impl PluginHost {
                 let module = Module::from_file(&engine, path)
                     .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
                 self.wasm_modules.insert(
-                    path.file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .to_string(),
+                    path.file_name().unwrap().to_string_lossy().to_string(),
                     module,
                 );
             } else if Self::is_native_plugin(path) {
@@ -245,10 +242,9 @@ impl PluginHost {
     }
 
     pub fn invoke_wasm_export(&self, name: &str, export: &str) -> Result<()> {
-        let module = self
-            .wasm_modules
-            .get(name)
-            .ok_or_else(|| deepseekcode_types::DeepSeekCodeError::NotFound(format!("wasm plugin {name}")))?;
+        let module = self.wasm_modules.get(name).ok_or_else(|| {
+            deepseekcode_types::DeepSeekCodeError::NotFound(format!("wasm plugin {name}"))
+        })?;
         WasmPluginRuntime::invoke(module, name, export)
     }
 }

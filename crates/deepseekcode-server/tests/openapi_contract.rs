@@ -63,11 +63,7 @@ async fn live_openapi_paths_match_utoipa_spec() {
 #[tokio::test]
 async fn openapi_includes_policy_schemas() {
     let spec = deepseekcode_server::openapi::spec();
-    let schemas = &spec
-        .components
-        .as_ref()
-        .expect("components")
-        .schemas;
+    let schemas = &spec.components.as_ref().expect("components").schemas;
     for name in ["PolicyRequest", "PolicyReply", "PolicyGrant"] {
         assert!(
             schemas.contains_key(name),
@@ -125,7 +121,9 @@ async fn sse_gap_too_large_when_replay_exceeds_limit() {
     }
 
     let resp = client
-        .get(format!("{base_url}/api/v1/event?since_seq=0&session_id={session_id}"))
+        .get(format!(
+            "{base_url}/api/v1/event?since_seq=0&session_id={session_id}"
+        ))
         .header("x-deepseekcode-directory", &path)
         .send()
         .await

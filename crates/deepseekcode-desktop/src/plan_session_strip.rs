@@ -48,9 +48,12 @@ impl PlanSessionStrip {
                         .items_center()
                         .justify_between()
                         .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.toggle_plan_picker(cx);
-                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.toggle_plan_picker(cx);
+                            }),
+                        )
                         .child(
                             div()
                                 .text_xs()
@@ -82,10 +85,7 @@ impl PlanSessionStrip {
                                     .flex_col()
                                     .gap_0p5()
                                     .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.text_primary)
-                                            .child(title),
+                                        div().text_xs().text_color(theme.text_primary).child(title),
                                     )
                                     .child(
                                         div()
@@ -99,26 +99,14 @@ impl PlanSessionStrip {
                                 div()
                                     .flex()
                                     .gap_2()
-                                    .child(strip_button(
-                                        cx,
-                                        "View",
-                                        {
-                                            let plan_path = plan_path.clone();
-                                            move |this, _, _, cx| {
-                                                this.open_plan_file(&plan_path, cx)
-                                            }
-                                        },
-                                    ))
-                                    .child(strip_button(
-                                        cx,
-                                        "Implement",
-                                        {
-                                            let plan_id = plan_id.clone();
-                                            move |this, _, _, cx| {
-                                                this.implement_from_plan(&plan_id, cx)
-                                            }
-                                        },
-                                    )),
+                                    .child(strip_button(cx, "View", {
+                                        let plan_path = plan_path.clone();
+                                        move |this, _, _, cx| this.open_plan_file(&plan_path, cx)
+                                    }))
+                                    .child(strip_button(cx, "Implement", {
+                                        let plan_id = plan_id.clone();
+                                        move |this, _, _, cx| this.implement_from_plan(&plan_id, cx)
+                                    })),
                             )
                     }))
                 }),

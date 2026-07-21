@@ -28,7 +28,12 @@ pub struct SessionExecution {
     mcp: Arc<McpConnectionPool>,
     hooks: Arc<HookRegistry>,
     runners: Mutex<HashMap<SessionId, Arc<SessionRunner>>>,
-    question_channels: Mutex<HashMap<SessionId, Arc<tokio::sync::Mutex<Option<crate::tools::services::QuestionResponder>>>>>,
+    question_channels: Mutex<
+        HashMap<
+            SessionId,
+            Arc<tokio::sync::Mutex<Option<crate::tools::services::QuestionResponder>>>,
+        >,
+    >,
     child_sessions: Mutex<HashMap<SessionId, Vec<SessionId>>>,
     child_handles: Mutex<HashMap<SessionId, tokio::task::JoinHandle<()>>>,
     active_session_id: Option<Arc<std::sync::RwLock<Option<SessionId>>>>,
@@ -217,10 +222,7 @@ impl SessionExecution {
             }
             execution.child_handles.lock().await.remove(&child_id);
         });
-        self.child_handles
-            .lock()
-            .await
-            .insert(child_id, handle);
+        self.child_handles.lock().await.insert(child_id, handle);
 
         Ok(child_id)
     }

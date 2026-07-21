@@ -11,11 +11,7 @@ pub struct TabItem {
 }
 
 /// Single tab item shell — attach `.on_mouse_down(cx.listener(...))` at the call site.
-pub fn tab_item_shell(
-    tab: TabItem,
-    active: bool,
-    theme: &ThemeTokens,
-) -> Stateful<Div> {
+pub fn tab_item_shell(tab: TabItem, active: bool, theme: &ThemeTokens) -> Stateful<Div> {
     let theme = theme.clone();
     let text_color = if active {
         theme.text_primary
@@ -28,7 +24,10 @@ pub fn tab_item_shell(
     let bg_hover = theme.bg_hover;
 
     div()
-        .id(ElementId::Name(SharedString::from(format!("tab-{}", tab.id))))
+        .id(ElementId::Name(SharedString::from(format!(
+            "tab-{}",
+            tab.id
+        ))))
         .flex()
         .items_center()
         .gap(px(4.))

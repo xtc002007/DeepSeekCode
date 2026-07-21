@@ -66,7 +66,11 @@ async fn mcp_stdio_connect_lists_and_calls_echo_tool() {
     assert!(tools.iter().any(|t| t == "echo"));
 
     let result = pool
-        .call_tool("echo", "echo", serde_json::json!({ "message": "hello-mcp" }))
+        .call_tool(
+            "echo",
+            "echo",
+            serde_json::json!({ "message": "hello-mcp" }),
+        )
         .await
         .expect("mcp call");
     let text = result
@@ -214,6 +218,9 @@ async fn mcp_tool_invoked_in_mock_llm_session() {
         }
     }
 
-    assert!(saw_mcp_tool, "expected echo_echo tool.completed from MCP bridge");
+    assert!(
+        saw_mcp_tool,
+        "expected echo_echo tool.completed from MCP bridge"
+    );
     assert!(saw_idle, "expected session.idle after MCP tool settlement");
 }

@@ -1,9 +1,7 @@
 use async_trait::async_trait;
 use deepseekcode_core::tools::question::QuestionTool;
 use deepseekcode_core::tools::registry::Tool;
-use deepseekcode_core::tools::services::{
-    submit_question_answer, ToolProgressSink, ToolServices,
-};
+use deepseekcode_core::tools::services::{submit_question_answer, ToolProgressSink, ToolServices};
 use deepseekcode_core::tools::task::TaskTool;
 use deepseekcode_types::{Result, SessionId, ToolCallId};
 use serde_json::json;
@@ -96,7 +94,10 @@ async fn question_tool_waits_for_submitted_answer() {
     let answer_task = tokio::spawn(async move {
         deepseekcode_core::tools::services::with_services_async(services.clone(), async {
             QuestionTool
-                .execute(json!({ "question": "Pick one", "options": ["a", "b"] }), &ctx)
+                .execute(
+                    json!({ "question": "Pick one", "options": ["a", "b"] }),
+                    &ctx,
+                )
                 .await
                 .expect("question execute")
         })

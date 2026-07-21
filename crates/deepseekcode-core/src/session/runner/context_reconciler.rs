@@ -65,7 +65,9 @@ impl SessionRunner {
                         try_restore = false;
                         continue;
                     }
-                    return Err(DeepSeekCodeError::ContextUnavailable("replacement blocked".into()));
+                    return Err(DeepSeekCodeError::ContextUnavailable(
+                        "replacement blocked".into(),
+                    ));
                 }
             }
         }
@@ -156,7 +158,9 @@ impl SessionRunner {
                         try_restore = false;
                         continue;
                     }
-                    return Err(DeepSeekCodeError::ContextUnavailable("replacement blocked".into()));
+                    return Err(DeepSeekCodeError::ContextUnavailable(
+                        "replacement blocked".into(),
+                    ));
                 }
             }
         }

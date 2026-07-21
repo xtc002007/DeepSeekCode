@@ -31,7 +31,11 @@ impl SkillCatalog {
                 }
             })
             .collect();
-        roots.push(PathBuf::from(project_dir).join(".deepseekcode").join("skills"));
+        roots.push(
+            PathBuf::from(project_dir)
+                .join(".deepseekcode")
+                .join("skills"),
+        );
 
         for base in roots {
             if !base.is_dir() {
@@ -135,12 +139,10 @@ impl crate::tools::registry::Tool for SkillTool {
         input: Value,
         _ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
-        let name = input["name"]
-            .as_str()
-            .ok_or_else(|| ToolFailure {
-                message: "missing skill name".into(),
-                retryable: false,
-            })?;
+        let name = input["name"].as_str().ok_or_else(|| ToolFailure {
+            message: "missing skill name".into(),
+            retryable: false,
+        })?;
         let skill = self
             .skills
             .iter()
@@ -245,7 +247,10 @@ fn fetch_remote_index(url: &str) -> Vec<SkillEntry> {
     items
         .into_iter()
         .filter_map(|item| {
-            let name = item.get("name").and_then(|v| v.as_str()).map(String::from)?;
+            let name = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(String::from)?;
             let description = item
                 .get("description")
                 .and_then(|v| v.as_str())
@@ -319,7 +324,11 @@ mod tests {
     #[test]
     fn discovers_skill_with_frontmatter() {
         let dir = TempDir::new().unwrap();
-        let skill_dir = dir.path().join(".deepseekcode").join("skills").join("my-skill");
+        let skill_dir = dir
+            .path()
+            .join(".deepseekcode")
+            .join("skills")
+            .join("my-skill");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
             skill_dir.join("SKILL.md"),

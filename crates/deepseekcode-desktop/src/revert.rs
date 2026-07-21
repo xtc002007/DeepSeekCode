@@ -88,8 +88,20 @@ impl RevertDock {
                         stage_enabled,
                         &theme,
                     ))
-                    .child(revert_button(cx, "Clear", RevertAction::Clear, true, &theme))
-                    .child(revert_button(cx, "Commit", RevertAction::Commit, true, &theme))
+                    .child(revert_button(
+                        cx,
+                        "Clear",
+                        RevertAction::Clear,
+                        true,
+                        &theme,
+                    ))
+                    .child(revert_button(
+                        cx,
+                        "Commit",
+                        RevertAction::Commit,
+                        true,
+                        &theme,
+                    ))
                     .child(
                         div()
                             .px_2()
@@ -98,9 +110,12 @@ impl RevertDock {
                             .text_xs()
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.bg_hover))
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                this.close_revert_dock(cx);
-                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.close_revert_dock(cx);
+                                }),
+                            )
                             .child("Close"),
                     ),
             )
@@ -142,9 +157,12 @@ fn revert_button(
         button = button
             .cursor_pointer()
             .hover(|s| s.bg(theme.bg_hover))
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                this.handle_revert_action(action, cx);
-            }));
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.handle_revert_action(action, cx);
+                }),
+            );
     }
 
     button.child(label)

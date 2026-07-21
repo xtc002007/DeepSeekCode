@@ -21,9 +21,11 @@ pub fn shared_engine() -> Arc<Mutex<Option<EmbeddedEngine>>> {
 }
 
 /// Build a directory-scoped client for an already-running embedded engine.
-pub fn engine_client_for(embedded: &EmbeddedEngine, directory: impl Into<String>) -> DeepSeekCodeClient {
-    let mut client =
-        DeepSeekCodeClient::new(format!("http://{}", embedded.addr), directory.into());
+pub fn engine_client_for(
+    embedded: &EmbeddedEngine,
+    directory: impl Into<String>,
+) -> DeepSeekCodeClient {
+    let mut client = DeepSeekCodeClient::new(format!("http://{}", embedded.addr), directory.into());
     if let Ok(password) = std::env::var("DEEPSEEKCODE_SERVER_PASSWORD") {
         client = client.with_auth("deepseekcode", password);
     }

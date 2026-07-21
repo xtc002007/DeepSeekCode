@@ -67,14 +67,18 @@ pub fn build_openai_chat_body(request: &LlmRequest, stream: bool) -> Value {
     });
 
     if !request.tools.is_empty() {
-        body["tools"] = json!(request.tools.iter().map(|t| json!({
-            "type": "function",
-            "function": {
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.input_schema,
-            }
-        })).collect::<Vec<_>>());
+        body["tools"] = json!(request
+            .tools
+            .iter()
+            .map(|t| json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.input_schema,
+                }
+            }))
+            .collect::<Vec<_>>());
     }
     body
 }

@@ -29,7 +29,13 @@ pub fn is_git_repository(path: &Path) -> bool {
 pub fn worktree_info(path: &Path) -> Option<WorktreeInfo> {
     let root = discover_git_root(path)?;
     let branch = Command::new("git")
-        .args(["-C", &root.to_string_lossy(), "rev-parse", "--abbrev-ref", "HEAD"])
+        .args([
+            "-C",
+            &root.to_string_lossy(),
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+        ])
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -67,7 +73,10 @@ impl GitWorktreeManager {
         Ok(parse_worktree_porcelain(&output))
     }
 
-    pub fn create(&self, branch: Option<&str>) -> Result<WorktreeEntry, deepseekcode_types::DeepSeekCodeError> {
+    pub fn create(
+        &self,
+        branch: Option<&str>,
+    ) -> Result<WorktreeEntry, deepseekcode_types::DeepSeekCodeError> {
         if !self.is_git_repo() {
             return Err(deepseekcode_types::DeepSeekCodeError::Other(
                 "not a git repository".into(),
@@ -80,7 +89,8 @@ impl GitWorktreeManager {
             .join(".deepseekcode")
             .join("worktrees")
             .join(&name);
-        std::fs::create_dir_all(&worktree_dir).map_err(deepseekcode_types::DeepSeekCodeError::Io)?;
+        std::fs::create_dir_all(&worktree_dir)
+            .map_err(deepseekcode_types::DeepSeekCodeError::Io)?;
 
         let mut args: Vec<&str> = vec!["worktree", "add"];
         if let Some(branch_name) = branch {
@@ -119,7 +129,9 @@ impl GitWorktreeManager {
             .args(args)
             .current_dir(&self.repo_root)
             .output()
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(format!("git command failed: {e}")))?;
+            .map_err(|e| {
+                deepseekcode_types::DeepSeekCodeError::Other(format!("git command failed: {e}"))
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

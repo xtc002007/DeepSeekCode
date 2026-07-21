@@ -5,11 +5,7 @@ pub fn redact(value: &str) -> String {
 
 /// Redact every line in a log file (for diagnostic bundle export).
 pub fn redact_log_content(content: &str) -> String {
-    content
-        .lines()
-        .map(redact)
-        .collect::<Vec<_>>()
-        .join("\n")
+    content.lines().map(redact).collect::<Vec<_>>().join("\n")
 }
 
 const SECRET_PATTERNS: &[&str] = &[
@@ -72,7 +68,10 @@ fn redact_with_patterns(value: &str, patterns: &[&str]) -> String {
         out = out
             .split_whitespace()
             .map(|w| {
-                if w.len() > 20 && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                if w.len() > 20
+                    && w.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
                     "[REDACTED]"
                 } else {
                     w
@@ -96,7 +95,8 @@ pub fn summarize_prompt(prompt: &str, include_full: bool) -> String {
 }
 
 fn simple_hash(s: &str) -> u32 {
-    s.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32))
+    s.bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32))
 }
 
 #[cfg(test)]

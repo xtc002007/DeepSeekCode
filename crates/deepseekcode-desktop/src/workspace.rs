@@ -4,12 +4,14 @@ pub(crate) mod activity_click_router;
 use deepseekcode_schema::activity::ActivityTree;
 use deepseekcode_schema::agent::AgentKind;
 use deepseekcode_schema::event::{EventEnvelope, EventKind};
+use deepseekcode_schema::plan::SessionPlanSummary;
 use deepseekcode_schema::policy::{PolicyReply, PolicyReplyKind};
 use deepseekcode_schema::provider::ProviderInfo;
-use deepseekcode_schema::plan::SessionPlanSummary;
-use deepseekcode_schema::session::{CreateSessionRequest, PromptDelivery, PromptRequest, RevertFileEntry};
+use deepseekcode_schema::session::{
+    CreateSessionRequest, PromptDelivery, PromptRequest, RevertFileEntry,
+};
 use deepseekcode_schema::todo::TodoItem;
-use deepseekcode_sdk::{client::DeepSeekCodeClient, EventStreamItem, EmbeddedEngine};
+use deepseekcode_sdk::{client::DeepSeekCodeClient, EmbeddedEngine, EventStreamItem};
 use deepseekcode_types::{
     MessageId, SessionId, CONFIG_FILE, DIAGNOSTICS_ARCHIVE_PREFIX, PRODUCT_NAME,
     SESSION_EXPORT_PREFIX,
@@ -23,39 +25,47 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-use crate::composer::{ComposerView, PromptAttachment, PromptInput, PromptInputEvent, PromptSubmit, SessionTitleCancel, SessionTitleSave};
+use crate::composer::{
+    ComposerView, PromptAttachment, PromptInput, PromptInputEvent, PromptSubmit,
+    SessionTitleCancel, SessionTitleSave,
+};
 use crate::context_usage::ContextUsageState;
 use crate::editor::EditorState;
 use crate::file_tree::FileTreeState;
 use crate::home::{HomeEvent, HomeView, RecentProject};
 use crate::layout::{LayoutState, ProjectNavItem, RightPanelTab};
 use crate::logic::{
-    activity_visible_row_index, ancestor_group_ids_for_leaf, classify_git_porcelain,
-    estimate_tokens, extract_tool_path,
-    find_todo_leaf_id_for_index, git_unified_diff, git_worktree_file_content,
-    pick_latest_by_timestamp, revert_files_preview,
-    sessions_for_project, token_usage_from_payload, toggle_activity_group_expansion,
-    truncate_preview, first_user_message_text, agent_selector_for_kind,
-    implement_prompt_from_plan_path, ACTIVITY_ROW_HEIGHT_PX,
+    activity_visible_row_index, agent_selector_for_kind, ancestor_group_ids_for_leaf,
+    classify_git_porcelain, estimate_tokens, extract_tool_path, find_todo_leaf_id_for_index,
+    first_user_message_text, git_unified_diff, git_worktree_file_content,
+    implement_prompt_from_plan_path, pick_latest_by_timestamp, revert_files_preview,
+    sessions_for_project, toggle_activity_group_expansion, token_usage_from_payload,
+    truncate_preview, ACTIVITY_ROW_HEIGHT_PX,
 };
-use crate::panel_resize::PanelResizeEdge;
 use crate::multi_window::{engine_client_for, shared_engine, WindowManager};
+use crate::panel_resize::PanelResizeEdge;
 use crate::permission_dock::{PermissionDock, PolicyPromptState};
 use crate::plan_implement_dock::{PlanImplementDock, PlanImplementPromptState};
 use crate::plan_session_strip::PlanSessionStrip;
+use crate::preferences::{load_preferences, save_preferences, AppPreferences, ThemeId};
 use crate::revert::{RevertAction, RevertDock, RevertDockState};
 use crate::right_panel::RightPanelView;
-use crate::session_activity::{push_session_event, truncate_session_events_on_compaction, SessionActivityStore};
+use crate::session_activity::{
+    push_session_event, truncate_session_events_on_compaction, SessionActivityStore,
+};
 use crate::session_header::SessionHeaderView;
-use crate::settings::{PolicyRuleRow, SettingsCatalog, SettingsSection, SettingsView, POLICY_SCOPES};
-use deepseekcode_config::PolicyMode;
-use deepseekcode_schema::policy::PolicyAction;
-use crate::preferences::{load_preferences, save_preferences, AppPreferences, ThemeId};
+use crate::settings::{
+    PolicyRuleRow, SettingsCatalog, SettingsSection, SettingsView, POLICY_SCOPES,
+};
 use crate::sidebar::SidebarView;
 use crate::terminal::TerminalTab;
 use crate::titlebar::TitlebarView;
+use deepseekcode_config::PolicyMode;
+use deepseekcode_schema::policy::PolicyAction;
 
-async fn lock_sdk_client(slot: &Arc<Mutex<Option<DeepSeekCodeClient>>>) -> Option<DeepSeekCodeClient> {
+async fn lock_sdk_client(
+    slot: &Arc<Mutex<Option<DeepSeekCodeClient>>>,
+) -> Option<DeepSeekCodeClient> {
     slot.lock().await.clone()
 }
 
@@ -483,7 +493,8 @@ impl WorkspaceView {
         let pending_switch = self.pending_switch_session;
         self.hydrate_generation.fetch_add(1, Ordering::SeqCst);
         self.event_stream_generation.fetch_add(1, Ordering::SeqCst);
-        self.activity.timeline_render_generation = self.activity.timeline_render_generation.wrapping_add(1);
+        self.activity.timeline_render_generation =
+            self.activity.timeline_render_generation.wrapping_add(1);
         self.session_id = None;
         self.activity.since_seq = 0;
         self.selected_message_id = None;
@@ -863,9 +874,7 @@ impl WorkspaceView {
                 return;
             };
             let base = lock_sdk_client(&client_slot).await;
-            let auth = base
-                .as_ref()
-                .and_then(|client| client.auth_credentials());
+            let auth = base.as_ref().and_then(|client| client.auth_credentials());
             let mut scoped =
                 DeepSeekCodeClient::new(format!("http://{engine_addr}"), project_path.clone());
             if let Some((user, pass)) = auth {
@@ -965,7 +974,9 @@ impl WorkspaceView {
         match tab {
             RightPanelTab::Terminal => {
                 if self.terminals.get(self.active_terminal).is_some_and(|tab| {
-                    tab.bash_detail_key.is_none() && !tab.state.connected && !tab.state.pty_connecting
+                    tab.bash_detail_key.is_none()
+                        && !tab.state.connected
+                        && !tab.state.pty_connecting
                 }) {
                     self.connect_terminal_tab(self.active_terminal, cx);
                 }
@@ -1111,8 +1122,10 @@ impl WorkspaceView {
         self.project_sessions_loaded.remove(&key);
         self.project_sessions_loading.remove(&key);
         self.session_nav_visible.remove(&path);
-        self.project_nav.retain(|item| project_path_key(&item.path) != key);
-        self.home_view.update(cx, |home, _| home.remove_recent(&path));
+        self.project_nav
+            .retain(|item| project_path_key(&item.path) != key);
+        self.home_view
+            .update(cx, |home, _| home.remove_recent(&path));
         if self
             .project_dir
             .as_ref()
@@ -1204,9 +1217,7 @@ impl WorkspaceView {
             } else {
                 HashSet::new()
             };
-            let auth = base
-                .as_ref()
-                .and_then(|client| client.auth_credentials());
+            let auth = base.as_ref().and_then(|client| client.auth_credentials());
             let prompts = first_prompts;
 
             let mut nav: Vec<ProjectNavItem> = Vec::new();
@@ -1245,7 +1256,8 @@ impl WorkspaceView {
             let mut paths_to_fetch: Vec<String> = nav
                 .iter()
                 .filter(|item| {
-                    paths_to_load.contains(&project_path_key(&item.path)) && item.sessions.is_empty()
+                    paths_to_load.contains(&project_path_key(&item.path))
+                        && item.sessions.is_empty()
                 })
                 .map(|item| item.path.clone())
                 .collect();
@@ -1317,42 +1329,38 @@ impl WorkspaceView {
 
     fn start_health_poll(&mut self, cx: &mut Context<Self>) {
         let client_slot = Arc::clone(&self.client);
-        cx.spawn(async move |view, cx| {
-            loop {
-                let ok = {
-                    let client = lock_sdk_client(&client_slot).await;
-                    match client {
-                        Some(c) => c.health().await.is_ok(),
-                        None => false,
-                    }
-                };
-                let _ = view.update(cx, |this, cx| {
-                    this.health_ok = ok;
-                    cx.notify();
-                });
-                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-            }
+        cx.spawn(async move |view, cx| loop {
+            let ok = {
+                let client = lock_sdk_client(&client_slot).await;
+                match client {
+                    Some(c) => c.health().await.is_ok(),
+                    None => false,
+                }
+            };
+            let _ = view.update(cx, |this, cx| {
+                this.health_ok = ok;
+                cx.notify();
+            });
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
         })
         .detach();
     }
 
     fn schedule_session_loading_repaint(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |view, cx| {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-                let continue_anim = view
-                    .update(cx, |this, cx| {
-                        if this.session_status.as_ref() == "Loading session…" {
-                            cx.notify();
-                            true
-                        } else {
-                            false
-                        }
-                    })
-                    .unwrap_or(false);
-                if !continue_anim {
-                    break;
-                }
+        cx.spawn(async move |view, cx| loop {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            let continue_anim = view
+                .update(cx, |this, cx| {
+                    if this.session_status.as_ref() == "Loading session…" {
+                        cx.notify();
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
+            if !continue_anim {
+                break;
             }
         })
         .detach();
@@ -1389,10 +1397,7 @@ impl WorkspaceView {
             };
             let messages = client.list_messages(session_id).await.unwrap_or_default();
             let session_meta = client.get_session(session_id).await.ok();
-            let latest_event_seq = client
-                .latest_event_seq(session_id)
-                .await
-                .unwrap_or(0);
+            let latest_event_seq = client.latest_event_seq(session_id).await.unwrap_or(0);
             let resume_seq = latest_event_seq;
 
             let activity = client
@@ -1415,8 +1420,7 @@ impl WorkspaceView {
                 "hydrating session activity from api"
             );
 
-            let detail_store =
-                crate::activity_timeline::rebuild_detail_store(&session_events);
+            let detail_store = crate::activity_timeline::rebuild_detail_store(&session_events);
             let activity_tree = activity;
             let child_ids = task_child_session_ids(&session_events);
             let expanded_group = last_provider_turn_group_id(&activity_tree);
@@ -1516,8 +1520,7 @@ impl WorkspaceView {
     pub fn with_project(project_dir: PathBuf, cx: &mut Context<Self>) -> Self {
         let mut view = Self::new(cx);
         view.project_dir = Some(project_dir.clone());
-        if let Some(message) = Self::ensure_agents_md(&project_dir) {
-        }
+        if let Some(message) = Self::ensure_agents_md(&project_dir) {}
         view.bootstrap_project(project_dir, cx);
         view
     }
@@ -1588,9 +1591,10 @@ Describe this project so the AI assistant has context.\n\n\
         let engine_slot = Arc::clone(&self.engine);
         let client_slot = Arc::clone(&self.client);
         let path_str = canonical_project_path(&path);
-        let remote_url = self.server_url.clone().filter(|url| {
-            !url.contains("127.0.0.1") && !url.contains("localhost")
-        });
+        let remote_url = self
+            .server_url
+            .clone()
+            .filter(|url| !url.contains("127.0.0.1") && !url.contains("localhost"));
         let remote_password = self.server_password.clone();
         cx.spawn(async move |view, cx| {
             let client = if let Some(url) = remote_url {
@@ -1821,20 +1825,20 @@ Describe this project so the AI assistant has context.\n\n\
         let client_slot = Arc::clone(&self.client);
         cx.spawn(async move |view, cx| {
             let page = if let Some(client) = lock_sdk_client(&client_slot).await {
-                client.fs_tree_page(Some(&dir_str), None, Some(500)).await.ok()
+                client
+                    .fs_tree_page(Some(&dir_str), None, Some(500))
+                    .await
+                    .ok()
             } else {
                 None
             };
             let _ = view.update(cx, |this, cx| {
                 this.file_tree.loading.retain(|p| p != &dir_str);
                 if let Some(page) = page {
+                    this.file_tree.totals.insert(dir_str.clone(), page.total);
                     this.file_tree
-                        .totals
-                        .insert(dir_str.clone(), page.total);
-                    this.file_tree.offsets.insert(
-                        dir_str.clone(),
-                        page.offset + page.entries.len(),
-                    );
+                        .offsets
+                        .insert(dir_str.clone(), page.offset + page.entries.len());
                     this.file_tree.entries.insert(dir_str, page.entries);
                 }
                 cx.notify();
@@ -1869,10 +1873,9 @@ Describe this project so the AI assistant has context.\n\n\
                 this.file_tree.loading.retain(|p| p != &path);
                 if let Some(page) = page {
                     this.file_tree.totals.insert(path.clone(), page.total);
-                    this.file_tree.offsets.insert(
-                        path.clone(),
-                        page.offset + page.entries.len(),
-                    );
+                    this.file_tree
+                        .offsets
+                        .insert(path.clone(), page.offset + page.entries.len());
                     this.file_tree.entries.insert(path, page.entries);
                 }
                 cx.notify();
@@ -1910,10 +1913,9 @@ Describe this project so the AI assistant has context.\n\n\
                 this.file_tree.loading.retain(|p| p != &path);
                 if let Some(page) = page {
                     this.file_tree.totals.insert(path.clone(), page.total);
-                    this.file_tree.offsets.insert(
-                        path.clone(),
-                        page.offset + page.entries.len(),
-                    );
+                    this.file_tree
+                        .offsets
+                        .insert(path.clone(), page.offset + page.entries.len());
                     let existing = this.file_tree.entries.entry(path).or_default();
                     existing.extend(page.entries);
                 }
@@ -1936,10 +1938,7 @@ Describe this project so the AI assistant has context.\n\n\
         cx.spawn(async move |view, cx| {
             let result = if let Some(client) = lock_sdk_client(&client_slot).await {
                 let content = client.fs_file(&path).await.ok();
-                let diff = match client
-                    .fs_diff(&path, None, snapshot_id.as_deref())
-                    .await
-                {
+                let diff = match client.fs_diff(&path, None, snapshot_id.as_deref()).await {
                     Ok(hunks) if !hunks.is_empty() => Some(hunks),
                     _ => content
                         .as_ref()
@@ -1994,7 +1993,8 @@ Describe this project so the AI assistant has context.\n\n\
             home.refresh_recent();
         });
         self.reset_session_workspace_state();
-        self.session_nav_visible.insert(path.display().to_string(), 5);
+        self.session_nav_visible
+            .insert(path.display().to_string(), 5);
         self.expanded_projects
             .insert(project_path_key(&path.display().to_string()));
         self.project_dir = Some(path.clone());
@@ -2006,12 +2006,7 @@ Describe this project so the AI assistant has context.\n\n\
 
     pub(crate) fn show_more_project_sessions(&mut self, path: String, cx: &mut Context<Self>) {
         const PAGE: usize = 5;
-        let next = self
-            .session_nav_visible
-            .get(&path)
-            .copied()
-            .unwrap_or(PAGE)
-            + PAGE;
+        let next = self.session_nav_visible.get(&path).copied().unwrap_or(PAGE) + PAGE;
         self.session_nav_visible.insert(path, next);
         cx.notify();
     }
@@ -2033,11 +2028,7 @@ Describe this project so the AI assistant has context.\n\n\
         };
         const PAGE: usize = 5;
         let need = index + 1;
-        let current = self
-            .session_nav_visible
-            .get(&path)
-            .copied()
-            .unwrap_or(PAGE);
+        let current = self.session_nav_visible.get(&path).copied().unwrap_or(PAGE);
         if need > current {
             self.session_nav_visible.insert(path, need);
         }
@@ -2230,10 +2221,9 @@ Describe this project so the AI assistant has context.\n\n\
             .iter()
             .find(|t| t.id == tab_id)
             .and_then(|tab| tab.buffer.try_lock().ok().map(|guard| guard.clone()));
-        if let (Some(tab), Some(text)) = (
-            self.terminals.iter_mut().find(|t| t.id == tab_id),
-            output,
-        ) {
+        if let (Some(tab), Some(text)) =
+            (self.terminals.iter_mut().find(|t| t.id == tab_id), output)
+        {
             tab.state.output = text.into();
         }
     }
@@ -2351,9 +2341,8 @@ Describe this project so the AI assistant has context.\n\n\
                                         "sse gap detected, backfilling via REST"
                                     );
                                     if let Some(session_id) = filter_session {
-                                        if let Ok(events) = client
-                                            .list_session_events(session_id, since_seq)
-                                            .await
+                                        if let Ok(events) =
+                                            client.list_session_events(session_id, since_seq).await
                                         {
                                             for event in events {
                                                 since_seq = event.seq;
@@ -2453,11 +2442,7 @@ Describe this project so the AI assistant has context.\n\n\
     }
 
     fn push_policy_prompt(&mut self, prompt: PolicyPromptState) {
-        if self
-            .pending_policies
-            .iter()
-            .any(|p| p.id == prompt.id)
-        {
+        if self.pending_policies.iter().any(|p| p.id == prompt.id) {
             return;
         }
         self.pending_policies.push_back(prompt);
@@ -2509,10 +2494,7 @@ Describe this project so the AI assistant has context.\n\n\
             .or_else(|| event.payload["permission_id"].as_str())
             .unwrap_or("")
             .to_string();
-        let scope = event.payload["scope"]
-            .as_str()
-            .unwrap_or(&tool)
-            .to_string();
+        let scope = event.payload["scope"].as_str().unwrap_or(&tool).to_string();
         let input = event.payload.get("input").cloned().unwrap_or_default();
         let detail = format_tool_input(&tool, &input);
         let patterns = event.payload["patterns"]
@@ -2540,9 +2522,7 @@ Describe this project so the AI assistant has context.\n\n\
         prompt.queue_total = total;
         prompt.queue_index = self.pending_policies.len();
         self.push_policy_prompt(prompt);
-        let tool = event.payload["tool_name"]
-            .as_str()
-            .unwrap_or("tool");
+        let tool = event.payload["tool_name"].as_str().unwrap_or("tool");
         self.set_session_busy(true, format!("Waiting for policy: {tool}"));
     }
 
@@ -2721,7 +2701,9 @@ Describe this project so the AI assistant has context.\n\n\
                 let has_tool_calls = event.payload["has_tool_calls"].as_bool().unwrap_or(false);
                 if !has_tool_calls {
                     if let Some(message_id) = event.payload["message_id"].as_str() {
-                        self.activity.expanded_activity_leaves.insert(message_id.to_string());
+                        self.activity
+                            .expanded_activity_leaves
+                            .insert(message_id.to_string());
                     }
                 }
                 let reasoning = event.payload["reasoning"]
@@ -2779,13 +2761,13 @@ Describe this project so the AI assistant has context.\n\n\
                     .and_then(|v| v.as_str())
                     .unwrap_or("tool")
                     .to_string();
-                let output = event
-                    .payload
-                    .get("output")
-                    .cloned()
-                    .unwrap_or_default();
+                let output = event.payload.get("output").cloned().unwrap_or_default();
                 if let Some(id) = event.payload["tool_call_id"].as_str() {
-                    let streamed = self.activity.detail_store.get(id).and_then(|d| d.output.clone());
+                    let streamed = self
+                        .activity
+                        .detail_store
+                        .get(id)
+                        .and_then(|d| d.output.clone());
                     let merged_display = if name == "bash" {
                         activity_click_router::merge_bash_completed_display(
                             streamed.as_deref(),
@@ -2807,7 +2789,8 @@ Describe this project so the AI assistant has context.\n\n\
                         id,
                         crate::activity_timeline::DetailPayload {
                             input: self
-                                .activity.detail_store
+                                .activity
+                                .detail_store
                                 .get(id)
                                 .and_then(|d| d.input.clone()),
                             output: Some(stored_output),
@@ -2895,7 +2878,8 @@ Describe this project so the AI assistant has context.\n\n\
                     format!("Calling model… ({message_count} msgs)")
                 };
                 self.set_session_busy(true, status.clone());
-                self.activity.expanded_activity_groups
+                self.activity
+                    .expanded_activity_groups
                     .insert(format!("turn-{}", event.seq));
             }
             EventKind::PermissionRequested | EventKind::PolicyPrompted => {
@@ -2928,10 +2912,7 @@ Describe this project so the AI assistant has context.\n\n\
                 self.hydrate_session_from_api(cx, true);
             }
             EventKind::SessionInterrupted => {
-                let error = event.payload["error"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
+                let error = event.payload["error"].as_str().unwrap_or("").to_string();
                 self.pending_policies.clear();
                 self.policy_reject_expanded = false;
                 self.activity.ignore_stale_run_events = true;
@@ -2965,8 +2946,7 @@ Describe this project so the AI assistant has context.\n\n\
                 let connected = event.payload["connected"].as_bool().unwrap_or(false);
                 self.refresh_mcp_catalog(cx);
             }
-            EventKind::RevertCommitted => {
-            }
+            EventKind::RevertCommitted => {}
             EventKind::ActivityUpdated => {}
             EventKind::PermissionResolved | EventKind::PolicyResolved => {
                 let id = event.payload["policy_id"]
@@ -2978,10 +2958,7 @@ Describe this project so the AI assistant has context.\n\n\
                 }
             }
             EventKind::QuestionRequested => {
-                let question = event.payload["question"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
+                let question = event.payload["question"].as_str().unwrap_or("").to_string();
                 let options: Vec<String> = event.payload["options"]
                     .as_array()
                     .map(|arr| {
@@ -3051,7 +3028,9 @@ Describe this project so the AI assistant has context.\n\n\
         self.composer_error = None;
         if let Some(dir) = self.project_dir.clone() {
             if let Some(message) = Self::ensure_agents_md(&dir) {
-                self.composer_error = Some(format!("{message} Send your prompt again after AGENTS.md is ready."));
+                self.composer_error = Some(format!(
+                    "{message} Send your prompt again after AGENTS.md is ready."
+                ));
                 cx.notify();
                 return;
             }
@@ -3119,12 +3098,7 @@ Describe this project so the AI assistant has context.\n\n\
             let client = lock_sdk_client(&client_slot).await;
             if let Some(client) = client {
                 if let Err(e) = client
-                    .update_model(
-                        session_id,
-                        Some(agent.as_str()),
-                        &model_id,
-                        &provider_id,
-                    )
+                    .update_model(session_id, Some(agent.as_str()), &model_id, &provider_id)
                     .await
                 {
                     tracing::error!(
@@ -3158,12 +3132,13 @@ Describe this project so the AI assistant has context.\n\n\
                             "prompt submitted"
                         );
                         if let Some(title) = title_candidate.as_ref() {
-                            let _ = client.update_session(session_id, Some(title.as_str())).await;
+                            let _ = client
+                                .update_session(session_id, Some(title.as_str()))
+                                .await;
                         }
                         let _ = view.update(cx, |this, cx| {
                             if let Some(title) = title_candidate {
-                                this.session_first_prompts
-                                    .insert(session_id, title.clone());
+                                this.session_first_prompts.insert(session_id, title.clone());
                                 this.update_session_title_in_nav(session_id, title);
                             }
                             this.refresh_project_nav_from_client(cx);
@@ -3218,7 +3193,11 @@ Describe this project so the AI assistant has context.\n\n\
         cx.notify();
     }
 
-    pub(crate) fn select_timeline_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+    pub(crate) fn select_timeline_message(
+        &mut self,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
         if self.selected_message_id == Some(message_id) {
             self.selected_message_id = None;
         } else {
@@ -3384,11 +3363,7 @@ Describe this project so the AI assistant has context.\n\n\
         };
         let dir = std::env::temp_dir().join("deepseekcode-paste");
         let _ = std::fs::create_dir_all(&dir);
-        let file_name = format!(
-            "paste-{}.{}",
-            chrono::Utc::now().timestamp_millis(),
-            ext
-        );
+        let file_name = format!("paste-{}.{}", chrono::Utc::now().timestamp_millis(), ext);
         let path = dir.join(file_name);
         if std::fs::write(&path, bytes).is_ok() {
             self.attach_path(path, cx);
@@ -3622,7 +3597,10 @@ Describe this project so the AI assistant has context.\n\n\
         cx.spawn(async move |view, cx| {
             let client = lock_sdk_client(&client_slot).await;
             let plans = if let Some(client) = client {
-                client.list_session_plans(session_id).await.unwrap_or_default()
+                client
+                    .list_session_plans(session_id)
+                    .await
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             };
@@ -3749,7 +3727,8 @@ Describe this project so the AI assistant has context.\n\n\
             self.highlighted_todo_leaf_id =
                 find_todo_leaf_id_for_index(&self.activity.activity_tree, index);
             if let Some(leaf_id) = self.highlighted_todo_leaf_id.clone() {
-                for group_id in ancestor_group_ids_for_leaf(&self.activity.activity_tree, &leaf_id) {
+                for group_id in ancestor_group_ids_for_leaf(&self.activity.activity_tree, &leaf_id)
+                {
                     self.activity.collapsed_activity_groups.remove(&group_id);
                 }
                 self.pending_scroll_to_activity_leaf = Some(leaf_id);
@@ -3794,10 +3773,7 @@ Describe this project so the AI assistant has context.\n\n\
             .unwrap_or_else(|| provider_id.to_string());
         self.api_key_input.update(cx, |input, cx| {
             input.clear(cx);
-            input.set_placeholder(
-                "Enter API key (stored securely in OS keychain)",
-                cx,
-            );
+            input.set_placeholder("Enter API key (stored securely in OS keychain)", cx);
         });
         self.base_url_input.update(cx, |input, cx| {
             input.clear(cx);
@@ -3840,9 +3816,7 @@ Describe this project so the AI assistant has context.\n\n\
         let label = if is_image {
             format!(
                 "[image: {}]",
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("image")
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("image")
             )
         } else {
             let content =
@@ -3856,7 +3830,11 @@ Describe this project so the AI assistant has context.\n\n\
         cx.notify();
     }
 
-    pub(crate) fn attach_external_paths(&mut self, paths: &gpui::ExternalPaths, cx: &mut Context<Self>) {
+    pub(crate) fn attach_external_paths(
+        &mut self,
+        paths: &gpui::ExternalPaths,
+        cx: &mut Context<Self>,
+    ) {
         let dropped: Vec<_> = paths.paths().to_vec();
         if dropped.is_empty() {
             return;
@@ -3878,54 +3856,62 @@ Describe this project so the AI assistant has context.\n\n\
         let project_dir = self.project_dir.clone();
         cx.spawn(async move |view, cx| {
             let client = lock_sdk_client(&client_slot).await;
-            let (mcp, skills, plugins, worktrees, location_summary, health_status, project_directories, policy_grants) =
-                if let Some(client) = client {
-                    let location_summary = client
-                        .get_location()
-                        .await
-                        .ok()
-                        .and_then(|v| serde_json::to_string_pretty(&v).ok())
-                        .unwrap_or_default();
-                    let health_status = if client.health().await.is_ok() {
-                        "ok".to_string()
-                    } else {
-                        "error".to_string()
-                    };
-                    let project_directories = client
-                        .list_project_directories()
-                        .await
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|entry| {
-                            entry
-                                .get("directory_path")
-                                .and_then(|v| v.as_str())
-                                .map(String::from)
-                        })
-                        .collect();
-                    let policy_grants = client.list_policy_grants().await.unwrap_or_default();
-                    (
-                        client.list_mcp().await.unwrap_or_default(),
-                        client.list_skills().await.unwrap_or_default(),
-                        client.list_plugins().await.unwrap_or_default(),
-                        client.list_worktrees().await.unwrap_or_default(),
-                        location_summary,
-                        health_status,
-                        project_directories,
-                        policy_grants,
-                    )
+            let (
+                mcp,
+                skills,
+                plugins,
+                worktrees,
+                location_summary,
+                health_status,
+                project_directories,
+                policy_grants,
+            ) = if let Some(client) = client {
+                let location_summary = client
+                    .get_location()
+                    .await
+                    .ok()
+                    .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                    .unwrap_or_default();
+                let health_status = if client.health().await.is_ok() {
+                    "ok".to_string()
                 } else {
-                    (
-                        Vec::new(),
-                        Vec::new(),
-                        Vec::new(),
-                        Vec::new(),
-                        String::new(),
-                        "unknown".to_string(),
-                        Vec::new(),
-                        Vec::new(),
-                    )
+                    "error".to_string()
                 };
+                let project_directories = client
+                    .list_project_directories()
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|entry| {
+                        entry
+                            .get("directory_path")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    })
+                    .collect();
+                let policy_grants = client.list_policy_grants().await.unwrap_or_default();
+                (
+                    client.list_mcp().await.unwrap_or_default(),
+                    client.list_skills().await.unwrap_or_default(),
+                    client.list_plugins().await.unwrap_or_default(),
+                    client.list_worktrees().await.unwrap_or_default(),
+                    location_summary,
+                    health_status,
+                    project_directories,
+                    policy_grants,
+                )
+            } else {
+                (
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    String::new(),
+                    "unknown".to_string(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+            };
             let compaction_summary = project_dir
                 .as_ref()
                 .and_then(|dir| {
@@ -4379,8 +4365,7 @@ Describe this project so the AI assistant has context.\n\n\
             cx.notify();
             return;
         }
-        self.session_first_prompts
-            .insert(session_id, title.clone());
+        self.session_first_prompts.insert(session_id, title.clone());
         self.update_session_title_in_nav(session_id, title.clone());
         self.session_title_editing = false;
         let client_slot = Arc::clone(&self.client);
@@ -4428,9 +4413,9 @@ Describe this project so the AI assistant has context.\n\n\
         let Some(dir) = self.project_dir.clone() else {
             return;
         };
-        if let Ok(cfg) =
-            deepseekcode_config::load_effective_config(camino::Utf8Path::new(&dir.to_string_lossy()))
-        {
+        if let Ok(cfg) = deepseekcode_config::load_effective_config(camino::Utf8Path::new(
+            &dir.to_string_lossy(),
+        )) {
             let policy_text = deepseekcode_config::policy_to_lines(&cfg.policy);
             self.policy_rule_rows = deepseekcode_config::ruleset_from_config(&cfg.policy)
                 .into_iter()
@@ -4679,7 +4664,11 @@ Describe this project so the AI assistant has context.\n\n\
         let provider_id = dialog.provider_id.clone();
         let provider_name = dialog.provider_name.clone();
         let api_key = self.api_key_input.read(cx).text();
-        let key = if api_key.is_empty() { None } else { Some(api_key) };
+        let key = if api_key.is_empty() {
+            None
+        } else {
+            Some(api_key)
+        };
         let base_url_text = self.base_url_input.read(cx).text();
         let base_url = if base_url_text.is_empty() {
             None
@@ -4780,12 +4769,7 @@ Describe this project so the AI assistant has context.\n\n\
             let client = lock_sdk_client(&client_slot).await;
             if let Some(client) = client {
                 let _ = client
-                    .update_model(
-                        session_id,
-                        Some(agent.as_str()),
-                        &model_id,
-                        &provider_id,
-                    )
+                    .update_model(session_id, Some(agent.as_str()), &model_id, &provider_id)
                     .await;
             }
             let _ = view.update(cx, |_, cx| cx.notify());
@@ -4848,11 +4832,10 @@ Describe this project so the AI assistant has context.\n\n\
             let exported = if let Some(client) = client {
                 match client.export_diagnostics(run_id.as_deref()).await {
                     Ok(bytes) => std::fs::write(&path, bytes).map(|_| path.clone()).ok(),
-                    Err(_) => deepseekcode_telemetry::export_diagnostic_bundle(
-                        run_id.as_deref(),
-                        &path,
-                    )
-                    .ok(),
+                    Err(_) => {
+                        deepseekcode_telemetry::export_diagnostic_bundle(run_id.as_deref(), &path)
+                            .ok()
+                    }
                 }
             } else {
                 deepseekcode_telemetry::export_diagnostic_bundle(run_id.as_deref(), &path).ok()
@@ -4945,11 +4928,7 @@ impl Render for WorkspaceView {
                     this.cancel_session_title_edit(cx);
                 }
             }))
-            .child(TitlebarView::render(
-                window,
-                cx,
-                self.health_ok,
-            ))
+            .child(TitlebarView::render(window, cx, self.health_ok))
             .child(
                 div()
                     .id("workspace-body")
@@ -4996,10 +4975,7 @@ impl WorkspaceView {
         let has_project = self.project_dir.is_some();
         let recent = self.merged_sidebar_recents(cx);
         let project_nav = self.filter_project_nav();
-        let project_path = self
-            .project_dir
-            .as_ref()
-            .map(|p| p.display().to_string());
+        let project_path = self.project_dir.as_ref().map(|p| p.display().to_string());
 
         div()
             .id("workspace-shell")
@@ -5040,11 +5016,8 @@ impl WorkspaceView {
             )
             .children(if has_project && self.layout.show_right_panel {
                 vec![
-                    crate::panel_resize::render_resize_handle(
-                        cx,
-                        PanelResizeEdge::RightPanel,
-                    )
-                    .into_any_element(),
+                    crate::panel_resize::render_resize_handle(cx, PanelResizeEdge::RightPanel)
+                        .into_any_element(),
                     RightPanelView::render(
                         cx,
                         self.layout.right_panel_width,
@@ -5102,12 +5075,9 @@ impl WorkspaceView {
                             .text_color(theme.text_primary)
                             .child("DeepSeekCode"),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.text_muted)
-                            .child("Open a project from the sidebar or create AGENTS.md after opening."),
-                    )
+                    .child(div().text_sm().text_color(theme.text_muted).child(
+                        "Open a project from the sidebar or create AGENTS.md after opening.",
+                    ))
                     .child(
                         div()
                             .text_xs()
@@ -5118,10 +5088,7 @@ impl WorkspaceView {
     }
 
     fn render_workspace(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let project_path = self
-            .project_dir
-            .as_ref()
-            .map(|p| p.display().to_string());
+        let project_path = self.project_dir.as_ref().map(|p| p.display().to_string());
 
         div()
             .id("workspace-center-column")
@@ -5152,13 +5119,14 @@ impl WorkspaceView {
                     .flex()
                     .flex_col()
                     .child({
-                        let timeline = crate::session_timeline_view::SessionTimelineView::from_store(
-                            &self.activity.activity_tree,
-                            &self.activity.expanded_activity_groups,
-                            &self.activity.collapsed_activity_groups,
-                            &self.activity.expanded_activity_leaves,
-                            self.activity.timeline_render_generation,
-                        );
+                        let timeline =
+                            crate::session_timeline_view::SessionTimelineView::from_store(
+                                &self.activity.activity_tree,
+                                &self.activity.expanded_activity_groups,
+                                &self.activity.collapsed_activity_groups,
+                                &self.activity.expanded_activity_leaves,
+                                self.activity.timeline_render_generation,
+                            );
                         timeline.render(
                             cx,
                             self.highlighted_todo_leaf_id.as_deref(),
@@ -5249,7 +5217,10 @@ impl WorkspaceView {
 
     fn render_popover_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::ui::dropdown::DropDirection;
-        use crate::ui::popover::{render_dismiss_layer, render_menu_panel, render_project_remove_row, render_session_delete_row};
+        use crate::ui::popover::{
+            render_dismiss_layer, render_menu_panel, render_project_remove_row,
+            render_session_delete_row,
+        };
 
         let Some(anchor) = self.popover_anchor else {
             return div().into_any_element();
@@ -5360,28 +5331,26 @@ impl WorkspaceView {
             panel = panel
                 .child(div().mt_3().child(self.question_input.clone()))
                 .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .mt_3()
-                        .justify_end()
-                        .child(
-                            div()
-                                .px_3()
-                                .py_1()
-                                .rounded_md()
-                                .bg(theme.info)
-                                .text_xs()
-                                .text_color(theme.text_on_accent)
-                                .cursor_pointer()
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    div().flex().gap_2().mt_3().justify_end().child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(theme.info)
+                            .text_xs()
+                            .text_color(theme.text_on_accent)
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
                                     let answer = this.question_input.read(cx).text();
                                     if !answer.trim().is_empty() {
                                         this.submit_question_answer(answer, cx);
                                     }
-                                }))
-                                .child("Submit"),
-                        ),
+                                }),
+                            )
+                            .child("Submit"),
+                    ),
                 );
         } else {
             let allow_custom = prompt.allow_custom;
@@ -5422,39 +5391,37 @@ impl WorkspaceView {
                         .text_xs()
                         .text_color(theme.text_primary)
                         .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.enable_question_custom_mode(cx);
-                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.enable_question_custom_mode(cx);
+                            }),
+                        )
                         .child("Other (custom input)"),
                 );
                 panel = panel.child(opts).child(
-                    div()
-                        .mt_3()
-                        .child(self.question_input.clone())
-                        .child(
+                    div().mt_3().child(self.question_input.clone()).child(
+                        div().flex().gap_2().mt_3().justify_end().child(
                             div()
-                                .flex()
-                                .gap_2()
-                                .mt_3()
-                                .justify_end()
-                                .child(
-                                    div()
-                                        .px_3()
-                                        .py_1()
-                                        .rounded_md()
-                                        .bg(theme.info)
-                                        .text_xs()
-                                        .text_color(theme.text_on_accent)
-                                        .cursor_pointer()
-                                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                            let answer = this.question_input.read(cx).text();
-                                            if !answer.trim().is_empty() {
-                                                this.submit_question_answer(answer, cx);
-                                            }
-                                        }))
-                                        .child("Submit"),
-                                ),
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(theme.info)
+                                .text_xs()
+                                .text_color(theme.text_on_accent)
+                                .cursor_pointer()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        let answer = this.question_input.read(cx).text();
+                                        if !answer.trim().is_empty() {
+                                            this.submit_question_answer(answer, cx);
+                                        }
+                                    }),
+                                )
+                                .child("Submit"),
                         ),
+                    ),
                 );
             } else {
                 panel = panel.child(opts);
@@ -5594,7 +5561,8 @@ impl WorkspaceView {
                         .unwrap_or_default();
                     let messages = client.list_messages(child_id).await.unwrap_or_default();
                     if !events.is_empty() || attempt == 1 {
-                        result = Some(deepseekcode_sdk::ChildSessionProjection { events, messages });
+                        result =
+                            Some(deepseekcode_sdk::ChildSessionProjection { events, messages });
                         break;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -5605,7 +5573,8 @@ impl WorkspaceView {
             };
             if let Some(projection) = projection {
                 let _ = view.update(cx, |this, cx| {
-                    this.activity.child_session_projections
+                    this.activity
+                        .child_session_projections
                         .insert(child_key, projection);
                     this.rebuild_activity_tree("child_projection_single");
                     cx.notify();
@@ -5634,10 +5603,7 @@ impl WorkspaceView {
         cx.spawn(async move |view, cx| {
             let result = if let Some(client) = lock_sdk_client(&client_slot).await {
                 let content = client.fs_file(&path).await.ok();
-                let diff = match client
-                    .fs_diff(&path, None, snapshot_id.as_deref())
-                    .await
-                {
+                let diff = match client.fs_diff(&path, None, snapshot_id.as_deref()).await {
                     Ok(hunks) if !hunks.is_empty() => Some(hunks),
                     _ => content
                         .as_ref()
@@ -5699,7 +5665,9 @@ impl WorkspaceView {
         if self.activity.expanded_activity_leaves.contains(id) {
             self.activity.expanded_activity_leaves.remove(id);
         } else {
-            self.activity.expanded_activity_leaves.insert(id.to_string());
+            self.activity
+                .expanded_activity_leaves
+                .insert(id.to_string());
         }
         cx.notify();
     }
@@ -5800,16 +5768,10 @@ impl WorkspaceView {
             badges.insert(entry.path.clone(), GitFileBadge::Untracked);
         }
         for entry in &self.git_unstaged {
-            badges.insert(
-                entry.path.clone(),
-                GitFileBadge::from_git_raw(&entry.raw),
-            );
+            badges.insert(entry.path.clone(), GitFileBadge::from_git_raw(&entry.raw));
         }
         for entry in &self.git_staged {
-            badges.insert(
-                entry.path.clone(),
-                GitFileBadge::from_git_raw(&entry.raw),
-            );
+            badges.insert(entry.path.clone(), GitFileBadge::from_git_raw(&entry.raw));
         }
         self.file_tree.git_badges = badges;
     }
@@ -5974,9 +5936,7 @@ pub fn canonical_project_path(path: impl AsRef<std::path::Path>) -> String {
 fn strip_windows_extended_path(path: &str) -> String {
     #[cfg(windows)]
     {
-        path.strip_prefix(r"\\?\")
-            .unwrap_or(path)
-            .to_string()
+        path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
     }
     #[cfg(not(windows))]
     {
@@ -6087,15 +6047,7 @@ fn collect_git_status(dir: &std::path::Path) -> GitStatusSnapshot {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty());
     let log = std::process::Command::new("git")
-        .args([
-            "-C",
-            &dir_str,
-            "log",
-            "--oneline",
-            "--decorate",
-            "-n",
-            "20",
-        ])
+        .args(["-C", &dir_str, "log", "--oneline", "--decorate", "-n", "20"])
         .output()
         .ok()
         .filter(|o| o.status.success())

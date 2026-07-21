@@ -30,8 +30,7 @@ impl DropdownView {
                 &mut crate::workspace::WorkspaceView,
                 Point<Pixels>,
                 &mut Context<crate::workspace::WorkspaceView>,
-            )
-            + 'static,
+            ) + 'static,
         cx: &mut Context<crate::workspace::WorkspaceView>,
         theme: &ThemeTokens,
     ) -> impl IntoElement {
@@ -53,7 +52,11 @@ impl DropdownView {
                 }
             }
         };
-        let bg = if open { theme.bg_selected } else { theme.bg_elevated };
+        let bg = if open {
+            theme.bg_selected
+        } else {
+            theme.bg_elevated
+        };
 
         div()
             .px_2()

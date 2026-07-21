@@ -1,10 +1,13 @@
 use deepseekcode_config::DeepSeekCodeConfig;
-use deepseekcode_llm::{is_context_overflow, LlmClient, LlmEvent, LlmMessage, LlmRequest, LlmResponse, LlmRole, LlmToolCall};
+use deepseekcode_llm::{
+    is_context_overflow, LlmClient, LlmEvent, LlmMessage, LlmRequest, LlmResponse, LlmRole,
+    LlmToolCall,
+};
 
-mod repair;
 mod context_reconciler;
-mod tool_executor;
 mod prompt_promoter;
+mod repair;
+mod tool_executor;
 use prompt_promoter::PromptPromoter;
 use repair::{
     agent_step_limit, estimate_message_tokens, message_text, message_to_text, message_tool_calls,
@@ -18,8 +21,12 @@ pub(super) struct ProviderTurnOutcome {
 use deepseekcode_schema::event::EventKind;
 use deepseekcode_schema::message::{Message, MessageRole, PartKind};
 use deepseekcode_schema::session::PromptDelivery;
-use deepseekcode_storage::{Database, EventStore, ManagedToolOutput, SessionStore, ToolOutputLimits};
-use deepseekcode_types::{DeepSeekCodeError, MessageId, Result, SessionId, ToolCallId, CONFIG_FILE, PRODUCT_NAME};
+use deepseekcode_storage::{
+    Database, EventStore, ManagedToolOutput, SessionStore, ToolOutputLimits,
+};
+use deepseekcode_types::{
+    DeepSeekCodeError, MessageId, Result, SessionId, ToolCallId, CONFIG_FILE, PRODUCT_NAME,
+};
 use futures::StreamExt;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -27,7 +34,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::compaction::{compaction_checkpoint_content, parse_compaction_message, CompactionContext, CompactionService};
+use crate::compaction::{
+    compaction_checkpoint_content, parse_compaction_message, CompactionContext, CompactionService,
+};
 use crate::mcp::McpConnectionPool;
 use crate::permission::PermissionService;
 use crate::provider::ProviderCatalog;
@@ -35,10 +44,10 @@ use crate::session::projector::EventProjector;
 use crate::snapshot::FileSnapshotStore;
 use crate::system_context::{ContextEpochStore, SystemContextRegistry};
 use crate::tools::{EventToolProgressSink, ToolRegistry, ToolServices};
-use deepseekcode_schema::tool::ToolResultEnvelope;
-use deepseekcode_storage::TodoStore;
 use deepseekcode_plugin::HookRegistry;
 use deepseekcode_schema::agent::AgentKind;
+use deepseekcode_schema::tool::ToolResultEnvelope;
+use deepseekcode_storage::TodoStore;
 
 const MAX_STEPS_PROMPT: &str = "CRITICAL - MAXIMUM STEPS REACHED\n\n\
 The maximum number of steps allowed for this task has been reached. Tools are disabled until next user input. Respond with text only.\n\n\
@@ -88,11 +97,7 @@ impl SessionRunner {
         task_spawner: Arc<dyn crate::tools::services::TaskSpawner>,
     ) -> Self {
         let pool = db.pool().clone();
-        let snapshots_enabled = config
-            .snapshots
-            .as_ref()
-            .map(|s| s.enabled)
-            .unwrap_or(true);
+        let snapshots_enabled = config.snapshots.as_ref().map(|s| s.enabled).unwrap_or(true);
         let snapshot_store = Arc::new(FileSnapshotStore::new(
             pool.clone(),
             project_dir.clone(),
@@ -242,11 +247,7 @@ impl SessionRunner {
         );
 
         self.context_registry
-            .ensure_epoch(
-                &self.context_epochs,
-                self.events.as_ref(),
-                self.session_id,
-            )
+            .ensure_epoch(&self.context_epochs, self.events.as_ref(), self.session_id)
             .await?;
 
         loop {
@@ -259,8 +260,7 @@ impl SessionRunner {
                 self.reconcile_context().await?;
             }
 
-            if self.has_pending_prompts().await?
-                && !self.context_registry.can_initialize_baseline()
+            if self.has_pending_prompts().await? && !self.context_registry.can_initialize_baseline()
             {
                 tracing::warn!(
                     target: deepseekcode_telemetry::SESSION,
@@ -619,9 +619,7 @@ impl SessionRunner {
                         let content = part
                             .tool_output
                             .as_ref()
-                            .map(|v| {
-                                serde_json::to_string(v).unwrap_or_else(|_| v.to_string())
-                            })
+                            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| v.to_string()))
                             .unwrap_or_default();
                         if content.is_empty() {
                             continue;
@@ -902,7 +900,11 @@ impl SessionRunner {
             .await?;
 
         let tool_part_offset = if reasoning.is_empty() {
-            if content.is_empty() { 0 } else { 1 }
+            if content.is_empty() {
+                0
+            } else {
+                1
+            }
         } else if content.is_empty() {
             1
         } else {

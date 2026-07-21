@@ -74,8 +74,7 @@ impl HomeView {
             last_opened: chrono::Utc::now().to_rfc3339(),
         };
         let key = recent_path_key(&path_str);
-        self.recent
-            .retain(|p| recent_path_key(&p.path) != key);
+        self.recent.retain(|p| recent_path_key(&p.path) != key);
         self.recent.insert(0, entry);
         if self.recent.len() > 12 {
             self.recent.truncate(12);
@@ -164,9 +163,12 @@ impl Render for HomeView {
                             .text_color(theme.text_on_accent)
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.accent_hover_rgba()))
-                            .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| {
-                                cx.emit(HomeEvent::PickFolder);
-                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|_, _, _, cx| {
+                                    cx.emit(HomeEvent::PickFolder);
+                                }),
+                            )
                             .child("Open Folder…"),
                     )
                     .child(
@@ -259,9 +261,7 @@ fn normalize_recent_path_str(path: &str) -> String {
     let s = canonical.display().to_string();
     #[cfg(windows)]
     {
-        s.strip_prefix(r"\\?\")
-            .unwrap_or(&s)
-            .to_string()
+        s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
     }
     #[cfg(not(windows))]
     {

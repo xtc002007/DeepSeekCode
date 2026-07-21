@@ -1,43 +1,43 @@
 #![recursion_limit = "256"]
 
+#[cfg(test)]
+mod acceptance_checklist;
 mod activity_leaf;
 mod activity_rows;
 mod activity_timeline;
-mod detail_inspector;
-mod git_panel;
-mod todo_panel;
-mod panel_resize;
-pub mod logic;
-#[cfg(test)]
-mod acceptance_checklist;
 mod app;
 mod assets;
 mod composer;
 mod context_usage;
-mod home;
-mod layout;
-mod markdown;
+mod detail_inspector;
 mod editor;
 mod file_editor_input;
 mod file_tree;
+mod git_panel;
+mod home;
+mod layout;
+pub mod logic;
+mod markdown;
 mod multi_window;
+mod panel_resize;
 mod permission_dock;
 mod plan_implement_dock;
 mod plan_session_strip;
+mod preferences;
 mod revert;
 mod right_panel;
 mod session;
-mod session_timeline_view;
 mod session_activity;
 mod session_header;
+mod session_timeline_view;
+mod settings;
 mod sidebar;
 mod syntax;
-mod preferences;
-mod settings;
 mod terminal;
 mod terminal_vt;
 mod theme;
 mod titlebar;
+mod todo_panel;
 mod ui;
 mod workspace;
 

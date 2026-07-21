@@ -71,10 +71,13 @@ impl Tool for McpBridgedTool {
         let pool = self.pool.clone();
         let server = self.server.clone();
         let tool = self.mcp_tool_name.clone();
-        let result = pool.call_tool(&server, &tool, input).await.map_err(|e| ToolFailure {
-            message: e.to_string(),
-            retryable: true,
-        })?;
+        let result = pool
+            .call_tool(&server, &tool, input)
+            .await
+            .map_err(|e| ToolFailure {
+                message: e.to_string(),
+                retryable: true,
+            })?;
         Ok(result)
     }
 }

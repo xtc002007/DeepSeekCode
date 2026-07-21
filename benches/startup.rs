@@ -15,8 +15,7 @@ fn main() {
     let elapsed = start.elapsed();
     println!("embedded_startup_ms={}", elapsed.as_millis());
     assert!(
-        elapsed.as_secs()
-            < if std::env::var("CI").is_ok() { 3 } else { 2 },
+        elapsed.as_secs() < if std::env::var("CI").is_ok() { 3 } else { 2 },
         "startup smoke threshold: {:?}",
         elapsed
     );

@@ -24,7 +24,11 @@ pub async fn basic_auth_middleware(
 
     let authorized = auth_header.is_some_and(|h| {
         h.strip_prefix("Basic ")
-            .and_then(|encoded| base64::engine::general_purpose::STANDARD.decode(encoded).ok())
+            .and_then(|encoded| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .ok()
+            })
             .and_then(|bytes| String::from_utf8(bytes).ok())
             .is_some_and(|creds| creds == format!("deepseekcode:{expected}"))
     });

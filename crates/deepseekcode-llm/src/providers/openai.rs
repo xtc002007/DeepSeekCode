@@ -1,8 +1,8 @@
+use crate::axis::protocol::{merge_extra, Protocol};
 use crate::axis::{
     auth::Auth, endpoint::Endpoint, framing::Framing, BearerAuth, OpenAiChatEndpoint,
     OpenAiChatProtocol, SseFraming,
 };
-use crate::axis::protocol::{merge_extra, Protocol};
 use crate::event::LlmEvent;
 use crate::request::LlmRequest;
 use deepseekcode_types::{DeepSeekCodeError, Result};
@@ -34,11 +34,7 @@ pub(crate) fn chat_endpoint(base_url: Option<&str>) -> String {
     OpenAiChatEndpoint.resolve(base_url)
 }
 
-pub(crate) fn build_chat_body(
-    request: &LlmRequest,
-    stream: bool,
-    extra: Option<&Value>,
-) -> Value {
+pub(crate) fn build_chat_body(request: &LlmRequest, stream: bool, extra: Option<&Value>) -> Value {
     let route = OpenAiRoute::new();
     let mut body = route.protocol.build_body(request, stream);
     merge_extra(&mut body, extra);
@@ -105,7 +101,10 @@ pub async fn stream(
     let mapped = byte_stream
         .map(|chunk| chunk.map_err(|e| DeepSeekCodeError::Llm(e.to_string())))
         .scan(
-            (String::new(), HashMap::<usize, (String, String, String)>::new()),
+            (
+                String::new(),
+                HashMap::<usize, (String, String, String)>::new(),
+            ),
             move |state, chunk| {
                 let framing = SseFraming;
                 let (buffer, tool_acc) = state;

@@ -91,7 +91,8 @@ fn mcp_scope_matches(rule_scope: &str, scope: &str) -> bool {
         return false;
     }
     if tool.is_empty() || tool == "*" {
-        return scope.starts_with(&format!("mcp_{server}_")) || scope.starts_with(&format!("{server}_"));
+        return scope.starts_with(&format!("mcp_{server}_"))
+            || scope.starts_with(&format!("{server}_"));
     }
     scope == format!("mcp_{server}_{tool}") || scope == format!("{server}_{tool}")
 }
