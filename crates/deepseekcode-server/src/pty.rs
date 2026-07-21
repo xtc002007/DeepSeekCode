@@ -170,7 +170,7 @@ impl PtyManager {
             .lock()
             .unwrap()
             .write_all(data)
-            .map_err(|e| DeepSeekCodeError::Io(e))?;
+            .map_err(DeepSeekCodeError::Io)?;
         Ok(())
     }
 

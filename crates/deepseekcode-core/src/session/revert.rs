@@ -5,6 +5,7 @@ use deepseekcode_storage::{EventStore, SessionStore};
 use deepseekcode_types::{DeepSeekCodeError, MessageId, Result, SessionId};
 use serde_json::json;
 use sqlx::SqlitePool;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::snapshot::{FileSnapshotStore, RevertDiffEntry};

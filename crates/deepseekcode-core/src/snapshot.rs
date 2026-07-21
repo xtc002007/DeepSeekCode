@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use crate::git::ProjectDirectories;
 

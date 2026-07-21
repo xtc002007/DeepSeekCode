@@ -64,9 +64,7 @@ impl CompactionSettings {
         let compaction = config.compaction.as_ref();
         Self {
             auto: compaction.map(|c| c.auto).unwrap_or(true),
-            buffer: compaction
-                .and_then(|c| Some(c.buffer))
-                .unwrap_or(DEFAULT_BUFFER),
+            buffer: compaction.map(|c| c.buffer).unwrap_or(DEFAULT_BUFFER),
             keep_tokens: compaction
                 .and_then(|c| c.keep.as_ref())
                 .and_then(|k| k.tokens)
@@ -136,8 +134,8 @@ impl CompactionService {
             registry,
             epochs,
             &session_service.sessions,
-            &session_service.events.as_ref(),
-            &session_service.providers().as_ref(),
+            session_service.events.as_ref(),
+            session_service.providers().as_ref(),
             session_id,
             config,
         )
@@ -314,11 +312,7 @@ fn estimate_request(system: &str, messages: &[LlmMessage], tools: &Value) -> u32
 }
 
 fn resolve_context_window(providers: &ProviderCatalog, session: &Session) -> Option<u32> {
-    let provider_id = session
-        .provider_id
-        .as_deref()
-        .or_else(|| None)
-        .unwrap_or("openai");
+    let provider_id = session.provider_id.as_deref().unwrap_or("openai");
     let model_id = session.model_id.as_deref().unwrap_or("gpt-4o-mini");
     providers.context_window_for(provider_id, model_id)
 }
@@ -386,7 +380,7 @@ fn latest_compaction_summary(history: &[Message]) -> Option<String> {
         .iter()
         .filter(|m| m.role == MessageRole::Compaction)
         .filter_map(parse_compaction_payload)
-        .last()
+        .next_back()
         .map(|(summary, _)| summary)
 }
 

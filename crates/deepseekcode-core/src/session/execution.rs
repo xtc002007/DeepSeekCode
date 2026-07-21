@@ -56,6 +56,7 @@ impl TaskSpawner for ExecutionTaskSpawner {
 }
 
 impl SessionExecution {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<Database>,
         config: DeepSeekCodeConfig,

@@ -10,7 +10,7 @@ mod repair;
 mod tool_executor;
 use prompt_promoter::PromptPromoter;
 use repair::{
-    agent_step_limit, estimate_message_tokens, message_text, message_to_text, message_tool_calls,
+    agent_step_limit, estimate_message_tokens, message_text, message_tool_calls,
     provider_tool_call_id, repair_llm_tool_chain,
 };
 
@@ -19,13 +19,12 @@ pub(super) struct ProviderTurnOutcome {
     assistant_message_id: MessageId,
 }
 use deepseekcode_schema::event::EventKind;
-use deepseekcode_schema::message::{Message, MessageRole, PartKind};
-use deepseekcode_schema::session::PromptDelivery;
+use deepseekcode_schema::message::{MessageRole, PartKind};
 use deepseekcode_storage::{
     Database, EventStore, ManagedToolOutput, SessionStore, ToolOutputLimits,
 };
 use deepseekcode_types::{
-    DeepSeekCodeError, MessageId, Result, SessionId, ToolCallId, CONFIG_FILE, PRODUCT_NAME,
+    DeepSeekCodeError, MessageId, Result, SessionId, CONFIG_FILE, PRODUCT_NAME,
 };
 use futures::StreamExt;
 use serde_json::json;
@@ -45,8 +44,6 @@ use crate::snapshot::FileSnapshotStore;
 use crate::system_context::{ContextEpochStore, SystemContextRegistry};
 use crate::tools::{EventToolProgressSink, ToolRegistry, ToolServices};
 use deepseekcode_plugin::HookRegistry;
-use deepseekcode_schema::agent::AgentKind;
-use deepseekcode_schema::tool::ToolResultEnvelope;
 use deepseekcode_storage::TodoStore;
 
 const MAX_STEPS_PROMPT: &str = "CRITICAL - MAXIMUM STEPS REACHED\n\n\
@@ -84,6 +81,7 @@ pub struct SessionRunner {
 }
 
 impl SessionRunner {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<Database>,
         session_id: SessionId,

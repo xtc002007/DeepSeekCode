@@ -6,7 +6,7 @@ use deepseekcode_types::{DeepSeekCodeError, Result};
 use serde_json::json;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
@@ -205,7 +205,7 @@ fn init_inner(component: &str, config: &LoggingConfig) -> Result<RunContext> {
 }
 
 fn open_log(
-    run_dir: &PathBuf,
+    run_dir: &Path,
     name: &str,
 ) -> Result<(
     tracing_appender::non_blocking::NonBlocking,
@@ -225,8 +225,8 @@ fn push_guard(guard: tracing_appender::non_blocking::WorkerGuard) {
     }
 }
 
-fn install_panic_hook(run_dir: &PathBuf) {
-    let dir = run_dir.clone();
+fn install_panic_hook(run_dir: &Path) {
+    let dir = run_dir.to_path_buf();
     std::panic::set_hook(Box::new(move |info| {
         let msg = format!("panic: {info}");
         tracing::error!(target: crate::targets::APP, "{msg}");

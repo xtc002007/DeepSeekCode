@@ -4,7 +4,7 @@ use chrono::Utc;
 use deepseekcode_core::activity::ActivityProjector;
 use deepseekcode_core::tools::display::{build_tool_result, enrich_metadata};
 use deepseekcode_schema::activity::{
-    ActivityGroupKind, ActivityKind, ActivityNode, ActivityStatus, ActivityTargetKind,
+    ActivityGroupKind, ActivityKind, ActivityNode, ActivityTargetKind,
 };
 use deepseekcode_schema::event::{EventEnvelope, EventKind};
 use deepseekcode_schema::todo::TodoItem;

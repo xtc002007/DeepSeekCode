@@ -89,21 +89,12 @@ pub struct AgentConfig {
     pub policy: Option<PolicyConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PermissionsConfig {
     #[serde(default)]
     pub allow: Vec<String>,
     #[serde(default)]
     pub deny: Vec<String>,
-}
-
-impl Default for PermissionsConfig {
-    fn default() -> Self {
-        Self {
-            allow: Vec::new(),
-            deny: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

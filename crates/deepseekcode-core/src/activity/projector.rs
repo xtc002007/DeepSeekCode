@@ -37,7 +37,6 @@ struct PendingTool {
     input: Value,
     title: Option<String>,
     metadata: Value,
-    started_at: DateTime<Utc>,
 }
 
 impl ActivityProjector {
@@ -70,7 +69,7 @@ impl ActivityProjector {
         for event in events {
             match event.kind {
                 EventKind::ProviderTurnStarted => {
-                    if let Some(mut finished) = turn.take() {
+                    if let Some(finished) = turn.take() {
                         roots.push(ActivityNode::Group(finished.finish()));
                     }
                     turn = Some(TurnBuilder {
@@ -145,7 +144,6 @@ impl ActivityProjector {
                             .get("metadata")
                             .cloned()
                             .unwrap_or(Value::Null),
-                        started_at: event.created_at,
                     };
                     if let Some(t) = turn.as_mut() {
                         t.pending_tools.insert(id.clone(), pending.clone());
@@ -301,7 +299,7 @@ impl ActivityProjector {
                         .or_else(|| {
                             user_messages
                                 .get(&id)
-                                .map(|m| join_text(m))
+                                .map(join_text)
                                 .filter(|t| !t.is_empty())
                         });
                     if let Some(text) = text {
@@ -385,7 +383,7 @@ impl ActivityProjector {
             }
         }
 
-        if let Some(mut t) = turn {
+        if let Some(t) = turn {
             roots.push(ActivityNode::Group(t.finish()));
         }
 
@@ -597,30 +595,30 @@ fn replace_or_push_assistant(children: &mut Vec<ActivityNode>, leaf: ActivityLea
 
 fn upgrade_assistant_in_tree(nodes: &mut [ActivityNode], id: &str, text: &str) -> bool {
     for node in nodes {
-        match node {
-            ActivityNode::Leaf(leaf)
-                if leaf.kind == ActivityKind::AssistantMessage && leaf.id == id =>
-            {
-                let existing_len = leaf
-                    .text
-                    .as_deref()
-                    .map(str::chars)
-                    .map(|c| c.count())
-                    .unwrap_or(0);
-                let new_len = text.chars().count();
-                if new_len > existing_len {
-                    leaf.text = Some(text.to_string());
-                    leaf.status = ActivityStatus::Completed;
-                }
+        if let ActivityNode::Group(group) = node {
+            if upgrade_assistant_in_tree(&mut group.children, id, text) {
                 return true;
             }
-            ActivityNode::Group(group) => {
-                if upgrade_assistant_in_tree(&mut group.children, id, text) {
-                    return true;
-                }
-            }
-            _ => {}
+            continue;
         }
+        let ActivityNode::Leaf(leaf) = node else {
+            continue;
+        };
+        if leaf.kind != ActivityKind::AssistantMessage || leaf.id != id {
+            continue;
+        }
+        let existing_len = leaf
+            .text
+            .as_deref()
+            .map(str::chars)
+            .map(|c| c.count())
+            .unwrap_or(0);
+        let new_len = text.chars().count();
+        if new_len > existing_len {
+            leaf.text = Some(text.to_string());
+            leaf.status = ActivityStatus::Completed;
+        }
+        return true;
     }
     false
 }
@@ -951,8 +949,10 @@ fn map_tool(
     input: &Value,
     metadata: &Value,
 ) -> (ActivityKind, String, ActivityTargetKind, ActivityMeta) {
-    let mut meta = ActivityMeta::default();
-    meta.diff_stats = parse_diff_stats(metadata);
+    let mut meta = ActivityMeta {
+        diff_stats: parse_diff_stats(metadata),
+        ..Default::default()
+    };
     if let Some(c) = metadata.get("match_count").and_then(|v| v.as_u64()) {
         meta.match_count = Some(c as u32);
     }

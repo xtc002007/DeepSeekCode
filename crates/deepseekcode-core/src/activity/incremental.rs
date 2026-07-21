@@ -18,7 +18,7 @@ pub struct ActivityApplyOutcome {
     pub bumped: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ActivityProjectionState {
     pub tree: ActivityTree,
     pub events: Vec<EventEnvelope>,
@@ -28,12 +28,7 @@ pub struct ActivityProjectionState {
 
 impl ActivityProjectionState {
     pub fn new() -> Self {
-        Self {
-            tree: ActivityTree::default(),
-            events: Vec::new(),
-            messages: Vec::new(),
-            children: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn rebuild(&mut self) {
@@ -220,24 +215,23 @@ pub fn patch_assistant_message_completed(
         has_tool_calls: bool,
     ) -> bool {
         for node in nodes {
-            match node {
-                ActivityNode::Leaf(leaf)
-                    if leaf.kind == ActivityKind::AssistantMessage && leaf.id == message_id =>
-                {
-                    leaf.text = Some(content.to_string());
-                    leaf.status = if has_tool_calls {
-                        ActivityStatus::Running
-                    } else {
-                        ActivityStatus::Completed
-                    };
+            if let ActivityNode::Group(group) = node {
+                if walk(&mut group.children, message_id, content, has_tool_calls) {
                     return true;
                 }
-                ActivityNode::Group(group) => {
-                    if walk(&mut group.children, message_id, content, has_tool_calls) {
-                        return true;
-                    }
-                }
-                _ => {}
+                continue;
+            }
+            let ActivityNode::Leaf(leaf) = node else {
+                continue;
+            };
+            if leaf.kind == ActivityKind::AssistantMessage && leaf.id == message_id {
+                leaf.text = Some(content.to_string());
+                leaf.status = if has_tool_calls {
+                    ActivityStatus::Running
+                } else {
+                    ActivityStatus::Completed
+                };
+                return true;
             }
         }
         false
@@ -255,23 +249,23 @@ pub fn patch_assistant_message_delta(
     }
     fn walk(nodes: &mut [ActivityNode], message_id: &str, delta: &str) -> bool {
         for node in nodes {
-            match node {
-                ActivityNode::Leaf(leaf)
-                    if leaf.kind == ActivityKind::AssistantMessage
-                        && leaf.id == message_id
-                        && leaf.status == ActivityStatus::Running =>
-                {
-                    let mut text = leaf.text.take().unwrap_or_default();
-                    text.push_str(delta);
-                    leaf.text = Some(text);
+            if let ActivityNode::Group(group) = node {
+                if walk(&mut group.children, message_id, delta) {
                     return true;
                 }
-                ActivityNode::Group(group) => {
-                    if walk(&mut group.children, message_id, delta) {
-                        return true;
-                    }
-                }
-                _ => {}
+                continue;
+            }
+            let ActivityNode::Leaf(leaf) = node else {
+                continue;
+            };
+            if leaf.kind == ActivityKind::AssistantMessage
+                && leaf.id == message_id
+                && leaf.status == ActivityStatus::Running
+            {
+                let mut text = leaf.text.take().unwrap_or_default();
+                text.push_str(delta);
+                leaf.text = Some(text);
+                return true;
             }
         }
         false
@@ -299,19 +293,18 @@ pub fn patch_running_tool_leaf_preview(
 ) -> bool {
     fn walk(nodes: &mut [ActivityNode], leaf_id: &str, preview: &str) -> bool {
         for node in nodes {
-            match node {
-                ActivityNode::Leaf(leaf)
-                    if leaf.id == leaf_id && leaf.status == ActivityStatus::Running =>
-                {
-                    leaf.text = Some(preview.to_string());
+            if let ActivityNode::Group(group) = node {
+                if walk(&mut group.children, leaf_id, preview) {
                     return true;
                 }
-                ActivityNode::Group(group) => {
-                    if walk(&mut group.children, leaf_id, preview) {
-                        return true;
-                    }
-                }
-                _ => {}
+                continue;
+            }
+            let ActivityNode::Leaf(leaf) = node else {
+                continue;
+            };
+            if leaf.id == leaf_id && leaf.status == ActivityStatus::Running {
+                leaf.text = Some(preview.to_string());
+                return true;
             }
         }
         false

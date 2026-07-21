@@ -1,5 +1,6 @@
 use deepseekcode_core::DeepSeekCodeEngine;
 use deepseekcode_server::{build_router, pty::PtyManager, state::AppState};
+use std::str::FromStr;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::RwLock;

@@ -31,7 +31,7 @@ pub fn clear_previous_runs(logs_root: &Path) -> Result<()> {
 /// Remove oldest run directories beyond `max_run_dirs`.
 pub fn prune_old_runs(logs_root: &Path, max_run_dirs: usize) -> Result<()> {
     let mut runs: Vec<PathBuf> = fs::read_dir(logs_root)
-        .map_err(|e| DeepSeekCodeError::Io(e))?
+        .map_err(DeepSeekCodeError::Io)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
@@ -92,10 +92,10 @@ pub fn export_diagnostic_bundle_with_options(
     };
 
     if let Some(parent) = out_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| DeepSeekCodeError::Io(e))?;
+        fs::create_dir_all(parent).map_err(DeepSeekCodeError::Io)?;
     }
 
-    let file = File::create(&out_path).map_err(|e| DeepSeekCodeError::Io(e))?;
+    let file = File::create(&out_path).map_err(DeepSeekCodeError::Io)?;
     let mut zip = ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
@@ -114,12 +114,12 @@ pub fn export_diagnostic_bundle_with_options(
         let mut buf = Vec::new();
         File::open(path)
             .and_then(|mut f| f.read_to_end(&mut buf))
-            .map_err(|e| DeepSeekCodeError::Io(e))?;
+            .map_err(DeepSeekCodeError::Io)?;
         if redact && should_redact_diagnostic_file(path) {
             let text = String::from_utf8_lossy(&buf);
             buf = redact_log_content(&text).into_bytes();
         }
-        zip.write_all(&buf).map_err(|e| DeepSeekCodeError::Io(e))?;
+        zip.write_all(&buf).map_err(DeepSeekCodeError::Io)?;
     }
 
     zip.finish()

@@ -567,6 +567,7 @@ async fn project_real_session_preserves_full_final_assistant_text() {
 
     use deepseekcode_storage::{Database, EventStore, SessionStore};
     use deepseekcode_types::SessionId;
+    use std::str::FromStr;
 
     let db = Database::open(&format!("sqlite://{}", db_path.display()))
         .await

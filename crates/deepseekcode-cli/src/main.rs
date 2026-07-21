@@ -6,6 +6,7 @@ use deepseekcode_telemetry::init;
 use deepseekcode_types::{MessageId, SessionId};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[derive(Parser)]
 #[command(name = "deepseekcode", about = "DeepSeekCode command-line interface")]
@@ -366,7 +367,6 @@ async fn main() -> anyhow::Result<()> {
                                 let events =
                                     client.list_session_events(session.id, since_seq).await?;
                                 for event in events {
-                                    since_seq = event.seq;
                                     if event.session_id != Some(session.id) {
                                         continue;
                                     }

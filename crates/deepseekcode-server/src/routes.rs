@@ -9,7 +9,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Json,
     },
-    routing::{delete, get, patch, post, put},
+    routing::{delete, get, post, put},
     Router,
 };
 use deepseekcode_schema::message::Message;
@@ -88,15 +88,6 @@ fn service_error_response(
     (status, Json(serde_json::json!({ "error": e.to_string() })))
 }
 
-macro_rules! service_err {
-    ($expr:expr) => {
-        match $expr {
-            Ok(value) => value,
-            Err(error) => return service_error_response(error).into_response(),
-        }
-    };
-}
-
 macro_rules! parse_session_path {
     ($id:expr) => {
         match parse_session_id($id) {
@@ -144,7 +135,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/session/{id}/prompt", post(prompt))
         .route("/api/v1/session/{id}/interrupt", post(interrupt))
         .route("/api/v1/session/{id}/messages", get(list_messages))
-        .route("/api/v1/session/{id}/timeline", get(list_timeline))
+        .route("/api/v1/session/{id}/timeline", {
+            #[allow(deprecated)]
+            get(list_timeline)
+        })
         .route("/api/v1/session/{id}/activity", get(list_activity))
         .route(
             "/api/v1/session/{id}/todo",

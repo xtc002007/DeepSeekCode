@@ -2,7 +2,7 @@
 
 use deepseekcode_schema::policy::PolicyRuleset;
 use serde_json::Value;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 /// Map a tool name to its primary policy scope.
 pub fn tool_scope(tool_name: &str) -> String {

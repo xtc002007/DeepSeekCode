@@ -193,11 +193,7 @@ fn resolve_plan_location(
         .unwrap_or_else(|| generate_plan_id(title));
 
     let plan_dir = working.join(".deepseekcode").join("plan").join(&plan_id);
-    let primary_file = if primary_path.contains('/') || primary_path.contains('\\') {
-        plan_dir.join(&primary_path)
-    } else {
-        plan_dir.join(&primary_path)
-    };
+    let primary_file = plan_dir.join(&primary_path);
 
     if !primary_file.is_file() {
         if let Some(found_id) = discover_plan_with_file(&working, primary_file_name) {
@@ -288,7 +284,7 @@ fn discover_plan_with_file(working: &Path, primary_file_name: &str) -> Option<St
     best.map(|(_, id)| id)
 }
 
-fn read_existing_created_at(plan_dir: &PathBuf) -> Option<chrono::DateTime<Utc>> {
+fn read_existing_created_at(plan_dir: &Path) -> Option<chrono::DateTime<Utc>> {
     let meta_path = plan_dir.join("meta.json");
     let raw = std::fs::read_to_string(meta_path).ok()?;
     let meta: PlanMeta = serde_json::from_str(&raw).ok()?;

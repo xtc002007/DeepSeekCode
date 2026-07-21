@@ -262,6 +262,7 @@ impl SessionRunner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn complete_tool_policy_failure(
         &self,
         _session: &deepseekcode_schema::session::Session,

@@ -51,8 +51,10 @@ async fn plan_agent_blocks_write_outside_plan_dir() {
 
 #[tokio::test]
 async fn plan_agent_permits_write_in_plan_dir() {
-    let mut config = DeepSeekCodeConfig::default();
-    config.policy_mode = Some(PolicyMode::Auto);
+    let config = DeepSeekCodeConfig {
+        policy_mode: Some(PolicyMode::Auto),
+        ..Default::default()
+    };
     let permissions = Arc::new(PolicyService::new(&config, "/tmp/project", None));
     let session_id = SessionId::new();
     let outcome = permissions
@@ -73,8 +75,10 @@ async fn plan_agent_permits_write_in_plan_dir() {
 
 #[tokio::test]
 async fn plan_agent_permits_absolute_write_in_plan_dir() {
-    let mut config = DeepSeekCodeConfig::default();
-    config.policy_mode = Some(PolicyMode::Auto);
+    let config = DeepSeekCodeConfig {
+        policy_mode: Some(PolicyMode::Auto),
+        ..Default::default()
+    };
     let project = std::env::temp_dir().join("deepseekcode-plan-policy-test");
     let _ = std::fs::create_dir_all(&project);
     let project_dir = project.to_string_lossy().into_owned();

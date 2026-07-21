@@ -88,7 +88,7 @@ fn repair_missing_tool_results(messages: &mut Vec<LlmMessage>) {
     }
 }
 
-fn repair_missing_assistant_tool_calls(messages: &mut Vec<LlmMessage>) {
+fn repair_missing_assistant_tool_calls(messages: &mut [LlmMessage]) {
     for i in 0..messages.len() {
         if messages[i].role != LlmRole::Tool {
             continue;
@@ -151,6 +151,7 @@ pub(crate) fn message_tool_calls(msg: &Message) -> Vec<LlmToolCall> {
         .collect()
 }
 
+#[allow(dead_code)]
 pub(crate) fn message_to_text(msg: &Message) -> String {
     msg.parts
         .iter()

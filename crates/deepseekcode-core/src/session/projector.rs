@@ -4,6 +4,7 @@ use deepseekcode_schema::event::{EventEnvelope, EventKind};
 use deepseekcode_schema::message::{Message, MessageRole};
 use deepseekcode_storage::{message_visible_to_runner, EventStore, SessionStore};
 use deepseekcode_types::{MessageId, Result, SessionId};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TimelineEntry {

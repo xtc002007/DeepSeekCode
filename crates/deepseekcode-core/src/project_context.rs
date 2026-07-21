@@ -15,10 +15,8 @@ pub fn ensure_agents_md(project_dir: &str) -> bool {
     if agents.exists() {
         return false;
     }
-    if !root.exists() {
-        if std::fs::create_dir_all(root).is_err() {
-            return false;
-        }
+    if !root.exists() && std::fs::create_dir_all(root).is_err() {
+        return false;
     }
     std::fs::write(&agents, AGENTS_MD_TEMPLATE).is_ok()
 }
@@ -655,7 +653,7 @@ mod tests {
         let project = project.to_string_lossy().to_string();
 
         let curl_cmd = "curl http://localhost:3000 -s -o NUL -w \"HTTP Status: %{http_code}\\n\"";
-        assert!(command_escapes_project_directory(&curl_cmd, &project).is_none());
+        assert!(command_escapes_project_directory(curl_cmd, &project).is_none());
 
         let ps_cmd = "powershell -Command \"try { Invoke-WebRequest -Uri 'http://localhost:3000' } catch { }\"";
         assert!(command_escapes_project_directory(ps_cmd, &project).is_none());

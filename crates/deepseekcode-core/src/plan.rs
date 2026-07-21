@@ -46,8 +46,7 @@ pub fn session_plans_from_events(
 pub fn latest_actionable_plan_id(plans: &[SessionPlanSummary]) -> Option<String> {
     plans
         .iter()
-        .filter(|p| !p.implement_prompt_dismissed)
-        .last()
+        .rfind(|p| !p.implement_prompt_dismissed)
         .map(|p| p.plan_id.clone())
 }
 

@@ -3,8 +3,7 @@
 use crate::policy::defaults::agent_default_ruleset;
 use crate::policy::evaluate::{evaluate_patterns, merge_rulesets};
 use crate::policy::patterns::{
-    extract_patterns, extract_patterns_for_workspace, remember_patterns,
-    remember_patterns_for_workspace, tool_scope,
+    extract_patterns_for_workspace, remember_patterns_for_workspace, tool_scope,
 };
 use deepseekcode_config::{
     merge_rulesets as merge_config_rulesets, ruleset_from_config, ruleset_from_permissions,
@@ -76,8 +75,8 @@ impl PolicyService {
         }
     }
 
-    fn is_auto_mode(&self) -> impl std::future::Future<Output = bool> + '_ {
-        async move { *self.policy_mode.read().await == PolicyMode::Auto }
+    async fn is_auto_mode(&self) -> bool {
+        *self.policy_mode.read().await == PolicyMode::Auto
     }
 
     pub fn with_events(mut self, events: Arc<EventStore>) -> Self {
@@ -167,7 +166,7 @@ impl PolicyService {
                     ),
                 });
             }
-            let ow_patterns: Vec<String> = outside.iter().cloned().collect();
+            let ow_patterns: Vec<String> = outside.to_vec();
             match self
                 .evaluate(session_id, agent, "outside_workspace", &ow_patterns)
                 .await
@@ -267,6 +266,7 @@ impl PolicyService {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn prompt(
         &self,
         session_id: SessionId,
@@ -571,6 +571,12 @@ fn policy_to_permission_request(req: PolicyRequest) -> PermissionRequest {
 /// Backward-compatible alias used across the codebase.
 pub type PermissionService = PolicyService;
 
+impl Default for PolicyService {
+    fn default() -> Self {
+        Self::new(&DeepSeekCodeConfig::default(), ".", None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,8 +586,10 @@ mod tests {
 
     #[tokio::test]
     async fn auto_mode_permits_without_pending() {
-        let mut config = DeepSeekCodeConfig::default();
-        config.policy_mode = Some(PolicyMode::Auto);
+        let mut config = DeepSeekCodeConfig {
+            policy_mode: Some(PolicyMode::Auto),
+            ..Default::default()
+        };
         config.policy.insert(
             "bash".into(),
             PolicyScopeConfig::Simple(PolicyAction::Prompt),
@@ -604,8 +612,10 @@ mod tests {
 
     #[tokio::test]
     async fn auto_mode_still_blocks() {
-        let mut config = DeepSeekCodeConfig::default();
-        config.policy_mode = Some(PolicyMode::Auto);
+        let mut config = DeepSeekCodeConfig {
+            policy_mode: Some(PolicyMode::Auto),
+            ..Default::default()
+        };
         config.policy.insert(
             "bash".into(),
             PolicyScopeConfig::Simple(PolicyAction::Block),
@@ -785,11 +795,5 @@ mod tests {
             .unwrap();
         assert!(matches!(outcome, PolicyOutcome::Blocked { .. }));
         assert!(svc.list_pending().await.is_empty());
-    }
-}
-
-impl Default for PolicyService {
-    fn default() -> Self {
-        Self::new(&DeepSeekCodeConfig::default(), ".", None)
     }
 }

@@ -20,6 +20,7 @@ use futures::{SinkExt, StreamExt};
 use gpui::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;

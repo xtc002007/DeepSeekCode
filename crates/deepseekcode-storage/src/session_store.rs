@@ -135,10 +135,9 @@ impl SessionStore {
         .await
         .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
 
-        Ok(rows
-            .into_iter()
+        rows.into_iter()
             .map(|r| r.into_input())
-            .collect::<Result<Vec<_>>>()?)
+            .collect::<Result<Vec<_>>>()
     }
 
     pub async fn promote_input(&self, message_id: MessageId) -> Result<()> {
@@ -498,10 +497,10 @@ impl SessionStore {
         &self,
         session_id: SessionId,
     ) -> Result<Vec<deepseekcode_schema::message::Message>> {
-        use deepseekcode_schema::message::{Message, MessagePart, MessageRole, PartKind};
+        use deepseekcode_schema::message::{Message, MessagePart};
 
         let rows = sqlx::query_as::<_, MessageRow>(
-            r#"SELECT id, session_id, role, seq, created_at FROM messages WHERE session_id = ? ORDER BY seq ASC, created_at ASC"#,
+            r#"SELECT id, role, seq, created_at FROM messages WHERE session_id = ? ORDER BY seq ASC, created_at ASC"#,
         )
         .bind(session_id.to_string())
         .fetch_all(&self.pool)
@@ -511,7 +510,7 @@ impl SessionStore {
         let mut messages = Vec::new();
         for row in rows {
             let parts = sqlx::query_as::<_, PartRow>(
-                r#"SELECT part_index, kind, text, tool_call_id, tool_name, tool_input, tool_output
+                r#"SELECT kind, text, tool_call_id, tool_name, tool_input, tool_output
                    FROM message_parts WHERE message_id = ? ORDER BY part_index ASC"#,
             )
             .bind(&row.id)
@@ -878,7 +877,6 @@ pub fn message_visible_to_runner(
 #[derive(sqlx::FromRow)]
 struct MessageRow {
     id: String,
-    session_id: String,
     role: String,
     seq: i64,
     created_at: String,
@@ -977,7 +975,6 @@ fn parse_agent(s: &str) -> AgentKind {
 
 #[derive(sqlx::FromRow)]
 struct PartRow {
-    part_index: i64,
     kind: String,
     text: Option<String>,
     tool_call_id: Option<String>,

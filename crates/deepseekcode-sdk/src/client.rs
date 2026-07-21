@@ -8,6 +8,7 @@ use futures::{Stream, StreamExt};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use std::pin::Pin;
+use std::str::FromStr;
 
 #[derive(Debug, Clone)]
 pub enum EventStreamItem {
@@ -321,11 +322,9 @@ impl DeepSeekCodeClient {
 
     pub async fn remove_worktree(&self, path: &str) -> Result<()> {
         let query = format!("?path={}", urlencoding_encode(path));
-        let mut req = self.http.delete(format!(
-            "{}{}",
-            self.base_url,
-            format!("/api/v1/worktree{query}")
-        ));
+        let mut req = self
+            .http
+            .delete(format!("{}/api/v1/worktree{query}", self.base_url,));
         req = req.header("x-deepseekcode-directory", &self.directory);
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));

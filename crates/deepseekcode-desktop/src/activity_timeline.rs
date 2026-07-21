@@ -1,6 +1,7 @@
 use crate::activity_rows::{flatten_activity_tree, FlattenedActivityRow};
 use deepseekcode_schema::activity::{ActivityGroup, ActivityGroupKind, ActivityNode, ActivityTree};
 use deepseekcode_schema::todo::TodoItem;
+use std::str::FromStr;
 
 #[derive(Clone, Debug, Default)]
 pub struct DetailPayload {

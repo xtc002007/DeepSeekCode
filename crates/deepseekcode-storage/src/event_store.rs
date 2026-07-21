@@ -2,8 +2,8 @@ use chrono::Utc;
 use deepseekcode_schema::event::{EventEnvelope, EventKind};
 use deepseekcode_schema::session::PromptDelivery;
 use deepseekcode_types::{DeepSeekCodeError, MessageId, Result, SessionId};
-use serde_json::Value;
 use sqlx::SqlitePool;
+use std::str::FromStr;
 use tokio::sync::broadcast;
 
 #[derive(Clone)]

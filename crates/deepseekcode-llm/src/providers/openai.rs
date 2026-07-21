@@ -83,6 +83,7 @@ pub async fn stream(
     let api_key = api_key.ok_or_else(|| DeepSeekCodeError::Llm("OpenAI API key not set".into()))?;
     let body = route.protocol.build_body(request, true);
     let url = route.endpoint.resolve(base_url);
+    let framing = route.framing;
 
     let response = route
         .auth
@@ -106,7 +107,6 @@ pub async fn stream(
                 HashMap::<usize, (String, String, String)>::new(),
             ),
             move |state, chunk| {
-                let framing = SseFraming;
                 let (buffer, tool_acc) = state;
                 match chunk {
                     Ok(bytes) => {
@@ -136,8 +136,4 @@ pub(crate) fn parse_sse_frame(
 
 pub(crate) fn parse_message_response(value: &Value) -> Result<crate::request::LlmResponse> {
     crate::axis::framing::parse_message_response(value)
-}
-
-pub(crate) fn build_body(request: &LlmRequest, stream: bool) -> Value {
-    OpenAiChatProtocol.build_body(request, stream)
 }

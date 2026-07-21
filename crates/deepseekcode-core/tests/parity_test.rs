@@ -4,7 +4,7 @@ use deepseekcode_config::DeepSeekCodeConfig;
 use deepseekcode_core::location::empty_location_deps;
 use deepseekcode_core::session::SessionService;
 use deepseekcode_core::system_context::SystemContextRegistry;
-use deepseekcode_schema::session::{CreateSessionRequest, PromptDelivery, PromptRequest};
+use deepseekcode_schema::session::PromptDelivery;
 use deepseekcode_storage::{admit_prompt, Database, EventStore, SessionStore};
 use deepseekcode_types::{MessageId, SessionId};
 use serde::Deserialize;
@@ -32,6 +32,7 @@ struct FixtureWhen {
     action: String,
     prompt: String,
     delivery: String,
+    #[allow(dead_code)]
     resume: bool,
 }
 
@@ -819,7 +820,7 @@ async fn run_all_fixtures() {
         if path.extension().and_then(|e| e.to_str()) == Some("json") {
             run_fixture(&path)
                 .await
-                .expect(&format!("fixture {:?}", path));
+                .unwrap_or_else(|_| panic!("fixture {:?}", path));
             count += 1;
         }
     }

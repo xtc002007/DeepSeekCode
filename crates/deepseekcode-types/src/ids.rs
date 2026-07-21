@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::str::FromStr;
 use ulid::Ulid;
 
 macro_rules! define_id {
@@ -13,10 +14,6 @@ macro_rules! define_id {
                 Self(Ulid::new())
             }
 
-            pub fn from_str(s: &str) -> Result<Self, ulid::DecodeError> {
-                Ok(Self(Ulid::from_string(s)?))
-            }
-
             pub fn as_str(&self) -> String {
                 self.0.to_string()
             }
@@ -25,6 +22,14 @@ macro_rules! define_id {
         impl Default for $name {
             fn default() -> Self {
                 Self::new()
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = ulid::DecodeError;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                Ok(Self(Ulid::from_string(s)?))
             }
         }
 

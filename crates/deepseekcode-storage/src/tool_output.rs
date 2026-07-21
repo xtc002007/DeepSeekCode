@@ -54,8 +54,7 @@ impl ManagedToolOutput {
 
         let file_name = format!("{}_{}_{}.json", session_id, tool_call_id, tool_name);
         let path = self.base_dir.join(&file_name);
-        let serialized =
-            serde_json::to_string_pretty(output).map_err(|e| DeepSeekCodeError::Serde(e))?;
+        let serialized = serde_json::to_string_pretty(output).map_err(DeepSeekCodeError::Serde)?;
         std::fs::write(&path, &serialized).map_err(DeepSeekCodeError::Io)?;
 
         let marker = format!(

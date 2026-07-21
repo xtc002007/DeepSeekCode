@@ -2,9 +2,7 @@ use deepseekcode_config::DeepSeekCodeConfig;
 use deepseekcode_schema::event::EventKind;
 use deepseekcode_schema::plan::SessionPlanSummary;
 use deepseekcode_schema::session::{CreateSessionRequest, PromptDelivery, PromptRequest, Session};
-use deepseekcode_storage::{
-    admit_prompt, Database, EventStore, PlanStore, SessionStore, TodoStore,
-};
+use deepseekcode_storage::{Database, EventStore, PlanStore, SessionStore, TodoStore};
 use deepseekcode_types::{LocationId, MessageId, Result, SessionId};
 use serde_json::json;
 use std::collections::HashSet;
@@ -32,6 +30,7 @@ pub struct SessionService {
 }
 
 impl SessionService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<Database>,
         config: DeepSeekCodeConfig,
@@ -439,7 +438,6 @@ impl SessionService {
                 parent.provider_id.as_deref(),
             )
             .await?;
-        let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
             "UPDATE sessions SET parent_session_id = ?, title = COALESCE(?, title) WHERE id = ?",
         )
