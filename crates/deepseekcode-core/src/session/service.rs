@@ -2,7 +2,10 @@ use deepseekcode_config::DeepSeekCodeConfig;
 use deepseekcode_schema::event::EventKind;
 use deepseekcode_schema::plan::SessionPlanSummary;
 use deepseekcode_schema::session::{CreateSessionRequest, PromptDelivery, PromptRequest, Session};
-use deepseekcode_storage::{Database, EventStore, PlanStore, SessionStore, TodoStore};
+use deepseekcode_storage::{
+    directory_paths_equal, normalize_directory_path, Database, EventStore, PlanStore, SessionStore,
+    TodoStore,
+};
 use deepseekcode_types::{LocationId, MessageId, Result, SessionId};
 use serde_json::json;
 use std::collections::HashSet;
@@ -98,12 +101,14 @@ impl SessionService {
             .provider_id
             .or_else(|| self.config.model.as_ref().and_then(|m| m.provider.clone()));
 
+        let directory = normalize_directory_path(&req.directory);
+
         let session = self
             .sessions
             .create(
                 id,
                 location_id,
-                &req.directory,
+                &directory,
                 agent,
                 model_id.as_deref(),
                 provider_id.as_deref(),
@@ -114,14 +119,14 @@ impl SessionService {
             .append(
                 EventKind::SessionCreated,
                 Some(session.id),
-                json!({ "directory": req.directory }),
+                json!({ "directory": directory }),
             )
             .await?;
 
         tracing::info!(
             target: deepseekcode_telemetry::SESSION,
             session_id = %session.id,
-            directory = %req.directory,
+            directory = %directory,
             "session created"
         );
 
@@ -512,6 +517,7 @@ impl SessionService {
     pub async fn move_session(&self, session_id: SessionId, new_directory: String) -> Result<()> {
         self.ensure_session_in_location(session_id).await?;
         self.execution.drop_runner(session_id).await;
+        let new_directory = normalize_directory_path(&new_directory);
         use crate::system_context::ContextEpochStore;
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(r#"UPDATE sessions SET working_directory = ?, updated_at = ? WHERE id = ?"#)
@@ -678,10 +684,5 @@ fn sanitize_messages(
 }
 
 fn session_belongs_to_location(session_dir: &str, project_dir: &str) -> bool {
-    fn normalize(path: &str) -> String {
-        path.trim_end_matches(['/', '\\'])
-            .replace('\\', "/")
-            .to_lowercase()
-    }
-    normalize(session_dir) == normalize(project_dir)
+    directory_paths_equal(session_dir, project_dir)
 }

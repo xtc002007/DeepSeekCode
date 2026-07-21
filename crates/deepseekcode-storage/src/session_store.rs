@@ -5,6 +5,8 @@ use deepseekcode_types::{DeepSeekCodeError, LocationId, MessageId, Result, Sessi
 use sqlx::SqlitePool;
 use std::str::FromStr;
 
+use crate::paths::normalize_directory_path_for_lookup;
+
 pub struct SessionStore {
     pool: SqlitePool,
 }
@@ -962,7 +964,7 @@ impl InputRow {
 }
 
 fn normalize_working_directory(path: &str) -> String {
-    path.replace('\\', "/").trim_end_matches('/').to_lowercase()
+    normalize_directory_path_for_lookup(path)
 }
 
 fn parse_agent(s: &str) -> AgentKind {

@@ -1,6 +1,6 @@
 use deepseekcode_config::DeepSeekCodeConfig;
 use deepseekcode_plugin::{HookRegistry, PluginHost};
-use deepseekcode_storage::{CredentialsStore, Database, PolicyStore};
+use deepseekcode_storage::{normalize_directory_path, CredentialsStore, Database, PolicyStore};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -55,8 +55,9 @@ impl LocationMap {
     }
 
     pub async fn get_or_create(&self, project_dir: &str) -> Arc<LocationServices> {
+        let project_dir = normalize_directory_path(project_dir);
         let mut locations = self.locations.write().await;
-        if let Some(services) = locations.get(project_dir) {
+        if let Some(services) = locations.get(&project_dir) {
             return services.clone();
         }
 
@@ -66,7 +67,7 @@ impl LocationMap {
             self.db.pool().clone(),
         ));
         let permissions = Arc::new(
-            PermissionService::new(&config, project_dir, Some(policy_store))
+            PermissionService::new(&config, &project_dir, Some(policy_store))
                 .with_events(events.clone()),
         );
         let _ = permissions.load_from_db().await;
@@ -91,7 +92,7 @@ impl LocationMap {
         mcp.connect_all().await;
 
         let mut plugin_host = PluginHost::new();
-        if let Err(e) = plugin_host.load_from_config(&config.plugins, project_dir) {
+        if let Err(e) = plugin_host.load_from_config(&config.plugins, &project_dir) {
             tracing::warn!(
                 target: deepseekcode_telemetry::APP,
                 error = %e,
@@ -104,7 +105,7 @@ impl LocationMap {
         let hooks = Arc::new(hooks);
 
         let wasm_tools = Arc::new(std::sync::Mutex::new(crate::tools::ToolRegistry::new(
-            project_dir.to_string(),
+            project_dir.clone(),
             &config,
         )));
         let active_session_id = Arc::new(std::sync::RwLock::new(None));
@@ -135,11 +136,11 @@ impl LocationMap {
         }));
 
         let services = Arc::new(LocationServices {
-            project_dir: project_dir.to_string(),
+            project_dir: project_dir.clone(),
             session_service: SessionService::new(
                 self.db.clone(),
                 config.clone(),
-                project_dir.to_string(),
+                project_dir.clone(),
                 permissions.clone(),
                 providers.clone(),
                 events,
@@ -155,15 +156,16 @@ impl LocationMap {
             active_session_id,
             wasm_tools,
         });
-        locations.insert(project_dir.to_string(), services.clone());
+        locations.insert(project_dir, services.clone());
         services
     }
 
     /// Re-materialize skill tools and refresh MCP tools on all cached session runners.
     pub async fn reload_materialization(&self, project_dir: &str) {
+        let project_dir = normalize_directory_path(project_dir);
         let config = self.config.read().await.clone();
         let locations = self.locations.read().await;
-        if let Some(services) = locations.get(project_dir) {
+        if let Some(services) = locations.get(&project_dir) {
             if let Ok(mut tools) = services.wasm_tools.lock() {
                 tools.refresh_skill_tool(&config);
             }

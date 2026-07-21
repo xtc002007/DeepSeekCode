@@ -2,6 +2,7 @@ pub mod credentials_store;
 pub mod database;
 pub mod event_store;
 pub mod migrations;
+pub mod paths;
 pub mod permission_store;
 pub mod plan_store;
 pub mod policy_store;
@@ -13,6 +14,9 @@ pub mod tool_output;
 pub use credentials_store::CredentialsStore;
 pub use database::Database;
 pub use event_store::{admit_prompt, EventStore};
+pub use paths::{
+    directory_paths_equal, normalize_directory_path, normalize_directory_path_for_lookup,
+};
 pub use permission_store::PermissionStore;
 pub use plan_store::PlanStore;
 pub use policy_store::PolicyStore;

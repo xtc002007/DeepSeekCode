@@ -27,7 +27,7 @@ use deepseekcode_schema::session::{
     CreateSessionRequest, PromptRequest, RevertStageRequest, RevertState, Session,
     UpdateSessionRequest,
 };
-use deepseekcode_storage::ProjectsStore;
+use deepseekcode_storage::{normalize_directory_path, ProjectsStore};
 use deepseekcode_types::{SessionId, DIAGNOSTICS_ARCHIVE_PREFIX};
 use futures::stream::Stream;
 use serde::Deserialize;
@@ -277,20 +277,10 @@ fn normalize_server_directory(path: &str) -> String {
     let path = path.trim();
     if path.is_empty() {
         return std::env::current_dir()
-            .map(|p| p.display().to_string())
+            .map(|p| normalize_directory_path(&p.to_string_lossy()))
             .unwrap_or_else(|_| ".".into());
     }
-    let pb = std::path::Path::new(path);
-    let canonical = std::fs::canonicalize(pb).unwrap_or_else(|_| pb.to_path_buf());
-    let s = canonical.display().to_string();
-    #[cfg(windows)]
-    {
-        s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
-    }
-    #[cfg(not(windows))]
-    {
-        s
-    }
+    normalize_directory_path(path)
 }
 
 fn normalize_path(path: &StdPath) -> PathBuf {

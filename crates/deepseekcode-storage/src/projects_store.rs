@@ -3,6 +3,8 @@ use deepseekcode_schema::project::Project;
 use deepseekcode_types::{DeepSeekCodeError, Result};
 use sqlx::SqlitePool;
 
+use crate::paths::normalize_directory_path;
+
 pub struct ProjectsStore {
     pool: SqlitePool,
 }
@@ -24,7 +26,7 @@ impl ProjectsStore {
     }
 
     pub async fn upsert(&self, path: &str) -> Result<Project> {
-        let path = normalize_stored_project_path(path);
+        let path = normalize_directory_path(path);
         let now = Utc::now();
         sqlx::query(
             r#"INSERT INTO projects (path, last_opened_at) VALUES (?, ?)
@@ -40,21 +42,6 @@ impl ProjectsStore {
             path: path.to_string(),
             last_opened_at: now,
         })
-    }
-}
-
-fn normalize_stored_project_path(path: &str) -> String {
-    let path = path.trim();
-    let pb = std::path::Path::new(path);
-    let canonical = std::fs::canonicalize(pb).unwrap_or_else(|_| pb.to_path_buf());
-    let s = canonical.display().to_string();
-    #[cfg(windows)]
-    {
-        s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
-    }
-    #[cfg(not(windows))]
-    {
-        s
     }
 }
 

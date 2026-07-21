@@ -1,6 +1,6 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use deepseekcode_config::{load_effective_config, DeepSeekCodeConfig};
-use deepseekcode_storage::Database;
+use deepseekcode_storage::{normalize_directory_path, Database};
 use deepseekcode_types::Result;
 use std::sync::Arc;
 
@@ -16,7 +16,7 @@ pub struct DeepSeekCodeEngine {
 
 impl DeepSeekCodeEngine {
     pub async fn open(project_dir: impl Into<String>, db_path: &str) -> Result<Self> {
-        let project_dir = project_dir.into();
+        let project_dir = normalize_directory_path(&project_dir.into());
         let config = Utf8Path::new(&project_dir)
             .canonicalize_utf8()
             .ok()

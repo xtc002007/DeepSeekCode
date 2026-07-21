@@ -69,7 +69,7 @@ async fn health_and_openapi_endpoints() {
     let dir = TempDir::new().expect("tempdir");
     std::fs::write(dir.path().join("AGENTS.md"), "# test").expect("write agents");
 
-    let server = test_app(&dir.path().to_string_lossy()).await;
+    let server = test_app(&normalized_project_path(dir.path())).await;
     let client = reqwest::Client::new();
 
     let health: serde_json::Value = client
@@ -168,7 +168,7 @@ async fn health_and_openapi_endpoints() {
 async fn projects_crud_roundtrip() {
     let dir = TempDir::new().expect("tempdir");
     std::fs::write(dir.path().join("AGENTS.md"), "# test").expect("write agents");
-    let project_path = dir.path().to_string_lossy().to_string();
+    let project_path = normalized_project_path(dir.path());
 
     let server = test_app(&project_path).await;
     let client = reqwest::Client::new();
@@ -201,7 +201,7 @@ async fn projects_crud_roundtrip() {
 async fn fs_tree_rejects_paths_outside_project_root() {
     let dir = TempDir::new().expect("tempdir");
     std::fs::write(dir.path().join("AGENTS.md"), "# test").expect("write agents");
-    let project_path = dir.path().to_string_lossy().to_string();
+    let project_path = normalized_project_path(dir.path());
 
     let server = test_app(&project_path).await;
     let client = reqwest::Client::new();
@@ -223,10 +223,10 @@ async fn fs_tree_rejects_paths_outside_project_root() {
 async fn session_prompt_mock_llm_flow() {
     let dir = TempDir::new().expect("tempdir");
     std::fs::write(dir.path().join("AGENTS.md"), "# Agent\nTest project.").expect("write agents");
-    let project_path = dir.path().to_string_lossy().to_string();
+    let project_path = normalized_project_path(dir.path());
     let moved_path = dir.path().join("moved");
     std::fs::create_dir_all(&moved_path).expect("moved dir");
-    let moved_path = moved_path.to_string_lossy().to_string();
+    let moved_path = normalized_project_path(&moved_path);
 
     let server = test_app(&project_path).await;
     let client = reqwest::Client::new();
@@ -384,7 +384,7 @@ async fn session_prompt_mock_llm_flow() {
 async fn compact_session_endpoint() {
     let dir = TempDir::new().expect("tempdir");
     std::fs::write(dir.path().join("AGENTS.md"), "# test").expect("write agents");
-    let project_path = dir.path().to_string_lossy().to_string();
+    let project_path = normalized_project_path(dir.path());
 
     let server = test_app(&project_path).await;
     let client = reqwest::Client::new();
@@ -797,7 +797,7 @@ async fn sse_event_stream_delivers_prompt_admitted() {
 
     let dir = TempDir::new().expect("tempdir");
     std::fs::write(dir.path().join("AGENTS.md"), "# test").expect("write agents");
-    let project_path = dir.path().to_string_lossy().to_string();
+    let project_path = normalized_project_path(dir.path());
 
     let server = test_app(&project_path).await;
     let client = reqwest::Client::new();
@@ -870,7 +870,6 @@ async fn sse_event_stream_delivers_prompt_admitted() {
 
 #[tokio::test]
 async fn prompt_resume_mock_llm_verifies_completion_events() {
-    use futures::StreamExt;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -892,7 +891,7 @@ async fn prompt_resume_mock_llm_verifies_completion_events() {
 
     let dir = TempDir::new().expect("tempdir");
     std::fs::write(dir.path().join("AGENTS.md"), "# Agent\nTest project.").expect("write agents");
-    let project_path = dir.path().to_string_lossy().to_string();
+    let project_path = normalized_project_path(dir.path());
 
     let server = test_app(&project_path).await;
     let client = reqwest::Client::new();
@@ -1044,7 +1043,7 @@ async fn prompt_resume_mock_llm_tool_call_pipeline() {
     let dir = TempDir::new().expect("tempdir");
     std::fs::write(dir.path().join("AGENTS.md"), "# Agent\nTest project.").expect("write agents");
     std::fs::write(dir.path().join("README.md"), "# readme").expect("write readme");
-    let project_path = dir.path().to_string_lossy().to_string();
+    let project_path = normalized_project_path(dir.path());
 
     let server = test_app(&project_path).await;
     let client = reqwest::Client::new();
@@ -1148,7 +1147,7 @@ async fn revert_stage_commit_restores_files_via_http() {
     std::fs::write(dir.path().join("AGENTS.md"), "# Agent").expect("agents");
     let demo = dir.path().join("demo.txt");
     std::fs::write(&demo, "original").expect("write demo");
-    let project_path = dir.path().to_string_lossy().to_string();
+    let project_path = normalized_project_path(dir.path());
 
     let server = test_app(&project_path).await;
     let client = reqwest::Client::new();
@@ -1261,7 +1260,7 @@ async fn revert_stage_commit_restores_files_via_http() {
 async fn session_activity_and_todo_endpoints() {
     let dir = TempDir::new().expect("tempdir");
     std::fs::write(dir.path().join("AGENTS.md"), "# test").expect("write agents");
-    let project_path = dir.path().to_string_lossy().to_string();
+    let project_path = normalized_project_path(dir.path());
 
     let server = test_app(&project_path).await;
     let client = reqwest::Client::new();
@@ -1478,8 +1477,8 @@ async fn session_cross_directory_access_returns_not_found() {
     let dir_b = TempDir::new().expect("tempdir b");
     std::fs::write(dir_a.path().join("AGENTS.md"), "# a").expect("agents a");
     std::fs::write(dir_b.path().join("AGENTS.md"), "# b").expect("agents b");
-    let path_a = dir_a.path().to_string_lossy().to_string();
-    let path_b = dir_b.path().to_string_lossy().to_string();
+    let path_a = normalized_project_path(dir_a.path());
+    let path_b = normalized_project_path(dir_b.path());
 
     let server = test_app(&path_a).await;
     let client = reqwest::Client::new();
