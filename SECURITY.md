@@ -20,11 +20,15 @@ If you discover a security issue, **do not** open a public GitHub issue with exp
 | Local reference trees | `third-party-code/` (dev-only upstream checkout) |
 | Runtime logs / diagnostics | `%LOCALAPPDATA%/deepseekcode/logs/` or `~/.local/share/deepseekcode/logs/` |
 
-Run the secret scan before every release:
+**Automatic (local):** run `cargo build` or `cargo test` once after clone — commits then scan staged files via `gitleaks protect`. First commit may download gitleaks to `.tools/` (one-time, needs network).
+
+Run a full-repository scan before every release:
 
 ```powershell
 .\scripts\release\scan-secrets.ps1
 ```
+
+Emergency bypass only: `DEEPSEEKCODE_SKIP_SECRET_SCAN=1 git commit ...`.
 
 ### Provider API keys
 

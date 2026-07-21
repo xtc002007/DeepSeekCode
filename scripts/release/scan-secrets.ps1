@@ -1,10 +1,6 @@
 # Scan the repository for leaked secrets (gitleaks).
-# Install: https://github.com/gitleaks/gitleaks#installing
-# Usage: .\scripts\release\scan-secrets.ps1 [-InstallIfMissing]
-
-param(
-    [switch]$InstallIfMissing
-)
+# Auto-installs gitleaks to .tools/ on first run if missing.
+# Usage: .\scripts\release\scan-secrets.ps1
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
@@ -19,20 +15,14 @@ function Find-Gitleaks {
 }
 
 $gitleaks = Find-Gitleaks
-if (-not $gitleaks -and $InstallIfMissing) {
-    $toolsDir = Join-Path $Root ".tools"
-    New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
-    $zip = Join-Path $env:TEMP "gitleaks.zip"
-    $url = "https://github.com/gitleaks/gitleaks/releases/download/v8.24.2/gitleaks_8.24.2_windows_x64.zip"
-    Write-Host "[*] Downloading gitleaks..." -ForegroundColor Cyan
-    Invoke-WebRequest -Uri $url -OutFile $zip
-    Expand-Archive -Path $zip -DestinationPath $toolsDir -Force
-    Remove-Item $zip -Force -ErrorAction SilentlyContinue
-    $gitleaks = Join-Path $toolsDir "gitleaks.exe"
+if (-not $gitleaks) {
+    & (Join-Path $Root "scripts/bootstrap-gitleaks.ps1")
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $gitleaks = Find-Gitleaks
 }
 
 if (-not $gitleaks) {
-    Write-Host "[!] gitleaks not found. Install from https://github.com/gitleaks/gitleaks or re-run with -InstallIfMissing" -ForegroundColor Yellow
+    Write-Host "[!] gitleaks not available after bootstrap." -ForegroundColor Red
     exit 2
 }
 

@@ -1,0 +1,65 @@
+#!/bin/sh
+# Scan staged changes for secrets before each commit (gitleaks protect).
+# Enabled via `git config core.hooksPath scripts/git-hooks` (auto on cargo build).
+
+set -e
+
+if [ "${DEEPSEEKCODE_SKIP_SECRET_SCAN:-}" = "1" ]; then
+  echo "[!] DEEPSEEKCODE_SKIP_SECRET_SCAN=1 — skipping pre-commit secret scan" >&2
+  exit 0
+fi
+
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT" || exit 1
+
+find_gitleaks() {
+  if command -v gitleaks >/dev/null 2>&1; then
+    command -v gitleaks
+    return 0
+  fi
+  if [ -x "$ROOT/.tools/gitleaks.exe" ]; then
+    echo "$ROOT/.tools/gitleaks.exe"
+    return 0
+  fi
+  if [ -x "$ROOT/.tools/gitleaks" ]; then
+    echo "$ROOT/.tools/gitleaks"
+    return 0
+  fi
+  return 1
+}
+
+bootstrap_gitleaks() {
+  if [ -f "$ROOT/scripts/bootstrap-gitleaks.sh" ]; then
+    sh "$ROOT/scripts/bootstrap-gitleaks.sh" --quiet && return 0
+  fi
+  if [ -f "$ROOT/scripts/bootstrap-gitleaks.ps1" ]; then
+    if command -v pwsh >/dev/null 2>&1; then
+      pwsh -NoProfile -File "$ROOT/scripts/bootstrap-gitleaks.ps1" -Quiet && return 0
+    elif command -v powershell >/dev/null 2>&1; then
+      powershell -NoProfile -File "$ROOT/scripts/bootstrap-gitleaks.ps1" -Quiet && return 0
+    fi
+  fi
+  return 1
+}
+
+GITLEAKS=""
+if GITLEAKS=$(find_gitleaks); then
+  :
+elif bootstrap_gitleaks && GITLEAKS=$(find_gitleaks); then
+  echo "[*] gitleaks ready (auto-installed to .tools/)" >&2
+else
+  echo "[!] gitleaks not available — pre-commit secret scan blocked." >&2
+  echo "    Needs network once, or install gitleaks manually." >&2
+  echo "    Emergency bypass: DEEPSEEKCODE_SKIP_SECRET_SCAN=1 git commit ..." >&2
+  exit 1
+fi
+
+CONFIG="$ROOT/.gitleaks.toml"
+if [ ! -f "$CONFIG" ]; then
+  echo "[!] Missing $CONFIG" >&2
+  exit 1
+fi
+
+echo "[*] gitleaks protect (staged)..." >&2
+"$GITLEAKS" protect --staged --config "$CONFIG" --verbose --redact
+exit $?

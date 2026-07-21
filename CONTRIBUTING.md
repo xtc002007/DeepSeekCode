@@ -4,6 +4,16 @@ Thank you for your interest in contributing. This project is a Rust workspace wi
 
 ## Development Setup
 
+Secret scanning is **automatic** — no manual hook install required for normal development:
+
+1. Run any build/test once (`cargo build`, `cargo test`, …) — this configures `git config core.hooksPath scripts/git-hooks` for this clone.
+2. Use the usual git flow: `git add` → `git commit` → `git push`.
+3. On the first commit, gitleaks is auto-downloaded to `.tools/` if missing (needs network once).
+
+Optional manual setup (same result): `.\scripts\install-git-hooks.ps1`
+
+Emergency bypass only: `DEEPSEEKCODE_SKIP_SECRET_SCAN=1 git commit ...`
+
 ```bash
 cargo test -p deepseekcode-core
 cargo run -p deepseekcode-cli -- serve --directory . --port 4096
@@ -50,4 +60,4 @@ Use clear, imperative subjects focused on **why**:
 
 ## License
 
-By contributing, you agree that your contributions are licensed under the [MIT License](LICENSE).
+By contributing, you agree that your contributions are licensed under the [Apache License, Version 2.0](LICENSE).

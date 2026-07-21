@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-DeepSeekCode is licensed under the [MIT License](LICENSE).
+DeepSeekCode is licensed under the [Apache License, Version 2.0](LICENSE). See also [NOTICE](NOTICE).
 
 This file lists major third-party components and their licenses. For a full dependency tree, run:
 

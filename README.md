@@ -57,11 +57,21 @@ See **[SECURITY.md](SECURITY.md)** for the full policy. Summary:
 | Release signing keys | `signing/*.key` (gitignored) or GitHub Actions secrets |
 | Local reference clones | `third-party-code/` (gitignored, never publish) |
 
-Before release, run:
+### Secret scan (automatic)
 
-```powershell
-.\scripts\release\scan-secrets.ps1
-```
+No manual hook install for normal development:
+
+1. **Once after clone** — run `cargo build` or `cargo test` (configures `git config core.hooksPath scripts/git-hooks` for this repo).
+2. **Daily workflow** — use git as usual: `git add` → `git commit` → `git push`. Each commit scans staged files with gitleaks.
+3. **First commit** — if gitleaks is missing, it is downloaded to `.tools/` automatically (network required once).
+4. **Before release** — full repository scan:
+
+   ```powershell
+   .\scripts\release\scan-secrets.ps1
+   ```
+
+Optional manual setup (same as step 1): `.\scripts\install-git-hooks.ps1`  
+Emergency bypass only: `DEEPSEEKCODE_SKIP_SECRET_SCAN=1 git commit ...`
 
 Session and diagnostic exports **redact secrets by default** (`sanitize=true`, diagnostic log scrubbing). Use `--no-sanitize` on CLI export only when you need full content locally.
 
@@ -71,7 +81,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Third-party upstream reference notes: [d
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Third-party components: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Third-party components: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Community vs Pro planning: [docs/open-core-plan.md](docs/open-core-plan.md).
 
 ## Release
 

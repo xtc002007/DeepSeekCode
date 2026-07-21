@@ -73,3 +73,6 @@ vibecodor-update-plan.md
 
 # Secret scan tooling (downloaded by scripts/release/scan-secrets.ps1)
 .tools/
+
+# Local upstream reference checkouts (never publish)
+third-party-code/

@@ -12,7 +12,7 @@ Rust-native AI programming environment. Core SDK with embedded Axum server; GPUI
 
 ## Session Runtime
 
-Follow `specs/session-runtime.md`.:
+Follow `specs/session-runtime.md`. Key semantics:
 - Prompt admission inbox → promotion at safe provider-turn boundary
 - Context epochs with AGENTS.md as context source
 - Location-scoped services per project directory
@@ -27,7 +27,7 @@ cargo run -p deepseekcode-desktop   # requires GPUI/Zed deps
 
 ## Config
 
-DeepSeekCode reads `deepseekcode.jsonc` or `.deepseekcode/deepseekcode.jsonc`; 
+DeepSeekCode reads `deepseekcode.jsonc` or `.deepseekcode/deepseekcode.jsonc`.
 
 ### Policy
 
@@ -35,12 +35,4 @@ Tool permissions use the `policy` ruleset (`permit` / `prompt` / `block`). See `
 
 ### Open Source / Security
 
-Before publishing or cutting a release, read [SECURITY.md](SECURITY.md) and run `scripts/release/scan-secrets.ps1`. Never commit `.env`, signing private keys, `third-party-code/`, or API keys in config files.
-
-### Open Source / Security
-
-Before publishing or cutting a release, read [SECURITY.md](SECURITY.md) and run `scripts/release/scan-secrets.ps1`. Never commit `.env`, signing private keys, `third-party-code/`, or API keys in config files.
-
-### Open Source / Security
-
-Before publishing or cutting a release, read [SECURITY.md](SECURITY.md) and run `scripts/release/scan-secrets.ps1`.
+Licensed under **Apache-2.0** (`LICENSE`, `NOTICE`). Git secret scan is automatic after `cargo build`/`cargo test` (sets `core.hooksPath`). Before publishing or cutting a release, read [SECURITY.md](SECURITY.md) and run `scripts/release/scan-secrets.ps1`. Never commit `.env`, signing private keys, `third-party-code/`, or API keys in config files.

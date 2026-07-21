@@ -11,6 +11,6 @@ Use upstream URLs in documentation and issues instead of local paths:
 
 ## License
 
-Respect upstream licenses when browsing local checkouts. Only MIT-licensed DeepSeekCode sources are published from this repository.
+Respect upstream licenses when browsing local checkouts. DeepSeekCode sources in this repository are published under [Apache-2.0](../LICENSE).
 
 See also [SECURITY.md](../SECURITY.md) and [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
