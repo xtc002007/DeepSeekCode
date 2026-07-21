@@ -47,4 +47,47 @@ function Get-SigningKeyPaths {
     }
 }
 
-Export-ModuleMember -Function Import-ReleaseDotEnv, Get-ReleaseEnvValue, Resolve-ReleasePath, Get-SigningKeyPaths
+function Resolve-MinisignExe {
+    $cmd = Get-Command minisign -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    $candidates = @(
+        (Join-Path $env:TEMP "minisign\minisign-win64\x86_64\minisign.exe")
+    )
+    if ($env:RUNNER_TEMP) {
+        $candidates = @((Join-Path $env:RUNNER_TEMP "minisign.exe")) + $candidates
+    }
+    foreach ($path in $candidates) {
+        if ($path -and (Test-Path $path)) { return $path }
+    }
+
+    throw "minisign not found. Install from https://github.com/jedisct1/minisign or run release workflow."
+}
+
+function Invoke-MinisignSign {
+    param(
+        [Parameter(Mandatory = $true)][string]$MinisignExe,
+        [Parameter(Mandatory = $true)][string]$ArtifactPath,
+        [Parameter(Mandatory = $true)][string]$SecretKeyPath,
+        [Parameter(Mandatory = $true)][string]$SigPath,
+        [string]$Password
+    )
+    if ($Password -and $Password.Length -gt 0) {
+        $pwFile = Join-Path $env:TEMP "deepseekcode-minisign-pw-$([Guid]::NewGuid().ToString('n')).txt"
+        try {
+            [System.IO.File]::WriteAllText($pwFile, $Password)
+            $cmdLine = "type `"$pwFile`" | `"$MinisignExe`" -Sm `"$ArtifactPath`" -s `"$SecretKeyPath`" -x `"$SigPath`""
+            cmd /c $cmdLine | Out-Null
+            return $LASTEXITCODE
+        }
+        finally {
+            Remove-Item $pwFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+    else {
+        & $MinisignExe -Sm $ArtifactPath -s $SecretKeyPath -x $SigPath
+    }
+    return $LASTEXITCODE
+}
+
+Export-ModuleMember -Function Import-ReleaseDotEnv, Get-ReleaseEnvValue, Resolve-ReleasePath, Get-SigningKeyPaths, Resolve-MinisignExe, Invoke-MinisignSign

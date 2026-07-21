@@ -21,8 +21,8 @@ if (-not $minisign) {
     if (-not $minisign) { throw "minisign is required. Install from https://github.com/jedisct1/minisign" }
 }
 
-Write-Host "[*] Generating ed25519 keypair (you will be prompted for a password; empty = no password)..." -ForegroundColor Cyan
-& minisign -G -p $publicKey -s $privateKey -W
+Write-Host "[*] Generating ed25519 keypair (password-protected)..." -ForegroundColor Cyan
+& minisign -G -f -p $publicKey -s $privateKey
 if ($LASTEXITCODE -ne 0) { throw "minisign key generation failed" }
 
 Write-Host "[+] Private key: $privateKey (DO NOT commit)" -ForegroundColor Green

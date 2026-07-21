@@ -33,12 +33,7 @@ if ($privateKeyInline) {
     return
 }
 
-$minisign = Get-Command minisign -ErrorAction SilentlyContinue
-if (-not $minisign) {
-    cargo install minisign --locked 2>$null
-    $minisign = Get-Command minisign -ErrorAction SilentlyContinue
-}
-if (-not $minisign) { throw "minisign not found" }
+$minisignExe = Resolve-MinisignExe
 
 $sigPath = "$ArtifactPath.minisig"
 if (Test-Path $sigPath) { Remove-Item $sigPath -Force }
@@ -47,18 +42,13 @@ $password = [Environment]::GetEnvironmentVariable("DEEPSEEKCODE_SIGNING_PRIVATE_
 if ($null -eq $password) { $password = $keys.Password }
 
 try {
-    $signArgs = @("-Sm", $ArtifactPath, "-s", $secretKeyPath, "-x", $sigPath)
-    if ($password -and $password.Length -gt 0) {
-        $signArgs += "-W"
-        $env:MINISIGN_PASSWORD = $password
-    }
     Write-Host "[*] Signing $ArtifactPath ..." -ForegroundColor Cyan
-    & minisign @signArgs
-    if ($LASTEXITCODE -ne 0) { throw "minisign sign failed with exit code $LASTEXITCODE" }
+    $exit = Invoke-MinisignSign -MinisignExe $minisignExe `
+        -ArtifactPath $ArtifactPath -SecretKeyPath $secretKeyPath -SigPath $sigPath -Password $password
+    if ($exit -ne 0) { throw "minisign sign failed with exit code $exit" }
     Write-Host "[+] Signature: $sigPath" -ForegroundColor Green
 }
 finally {
-    Remove-Item Env:MINISIGN_PASSWORD -ErrorAction SilentlyContinue
     if ($privateKeyInline -and (Test-Path $secretKeyPath)) {
         Remove-Item $secretKeyPath -Force -ErrorAction SilentlyContinue
     }
