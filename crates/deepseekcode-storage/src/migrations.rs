@@ -115,25 +115,22 @@ fn extract_add_columns(sql: &str) -> Vec<(String, String)> {
 }
 
 async fn table_exists(pool: &SqlitePool, table: &str) -> Result<bool> {
-    let exists: Option<i64> = sqlx::query_scalar(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
-    )
-    .bind(table)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+    let exists: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1")
+            .bind(table)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
     Ok(exists.is_some())
 }
 
 async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> Result<bool> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?",
-    )
-    .bind(table)
-    .bind(column)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?")
+        .bind(table)
+        .bind(column)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
     Ok(count > 0)
 }
 

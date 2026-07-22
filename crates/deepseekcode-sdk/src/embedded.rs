@@ -14,9 +14,8 @@ static USE_DEDICATED_ENGINE_RUNTIME: AtomicBool = AtomicBool::new(false);
 
 /// Desktop clients should call this once at startup so session/tool I/O never shares the UI tokio pool.
 pub fn install_dedicated_engine_runtime() {
-    let _ = DEDICATED_ENGINE_RUNTIME.get_or_init(|| {
-        Runtime::new().expect("deepseekcode dedicated engine runtime")
-    });
+    let _ = DEDICATED_ENGINE_RUNTIME
+        .get_or_init(|| Runtime::new().expect("deepseekcode dedicated engine runtime"));
     USE_DEDICATED_ENGINE_RUNTIME.store(true, Ordering::SeqCst);
 }
 

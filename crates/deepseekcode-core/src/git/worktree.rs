@@ -131,8 +131,8 @@ impl GitWorktreeManager {
         cmd.args(args).current_dir(&self.repo_root);
         crate::process::hide_console(&mut cmd);
         let output = cmd.output().map_err(|e| {
-                deepseekcode_types::DeepSeekCodeError::Other(format!("git command failed: {e}"))
-            })?;
+            deepseekcode_types::DeepSeekCodeError::Other(format!("git command failed: {e}"))
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
