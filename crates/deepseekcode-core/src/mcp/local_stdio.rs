@@ -51,7 +51,7 @@ impl LocalMcpClient {
         let params = serde_json::json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": { "name": PRODUCT_NAME, "version": "0.1.0" }
+            "clientInfo": { "name": PRODUCT_NAME, "version": env!("CARGO_PKG_VERSION") }
         });
         self.request("initialize", params)?;
 

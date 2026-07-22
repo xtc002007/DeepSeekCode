@@ -108,7 +108,7 @@ pub struct CreatePtyRequest {
 #[openapi(
     info(
         title = "DeepSeekCode API",
-        version = "0.1.0",
+        version = env!("CARGO_PKG_VERSION"),
         description = "HTTP API for DeepSeekCode sessions, filesystem, events, and PTY."
     ),
     paths(
