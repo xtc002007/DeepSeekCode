@@ -60,7 +60,9 @@ pub fn parse_windows_set_output(text: &str) -> HashMap<String, String> {
 
 fn probe_windows_cmd() -> Option<HashMap<String, String>> {
     let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
-    let output = std::process::Command::new(&comspec)
+    let mut cmd = std::process::Command::new(&comspec);
+    crate::process::hide_console(&mut cmd);
+    let output = cmd
         .args(["/C", "set"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -87,7 +89,9 @@ fn probe_shell(shell: &str, mode: &str) -> Option<HashMap<String, String>> {
         return None;
     }
 
-    let output = std::process::Command::new(shell)
+    let mut cmd = std::process::Command::new(shell);
+    crate::process::hide_console(&mut cmd);
+    let output = cmd
         .args([mode, "-c", "env -0"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

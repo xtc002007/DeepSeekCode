@@ -9,4 +9,4 @@ pub use deepseekcode_core::activity::{
     SESSION_EVENTS_CAP,
 };
 pub use deepseekcode_core::session_plans_from_events;
-pub use embedded::EmbeddedEngine;
+pub use embedded::{install_dedicated_engine_runtime, EmbeddedEngine};

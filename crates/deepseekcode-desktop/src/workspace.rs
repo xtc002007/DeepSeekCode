@@ -2370,9 +2370,14 @@ Describe this project so the AI assistant has context.\n\n\
                                             || kind == EventKind::ToolProgress
                                         {
                                             let now = std::time::Instant::now();
+                                            let throttle_ms = if kind == EventKind::ToolProgress {
+                                                100
+                                            } else {
+                                                16
+                                            };
                                             if let Some(last) = this.last_sse_notify_at {
                                                 if now.duration_since(last)
-                                                    < std::time::Duration::from_millis(16)
+                                                    < std::time::Duration::from_millis(throttle_ms)
                                                 {
                                                     return;
                                                 }
@@ -2818,7 +2823,7 @@ Describe this project so the AI assistant has context.\n\n\
                         self.refresh_child_session_projection(child_id, cx);
                     }
                 }
-                self.refresh_git_status_local();
+                self.refresh_git_status_async(cx);
                 self.set_session_busy(true, "Continuing analysis…");
             }
             EventKind::TodoUpdated => {
@@ -4110,9 +4115,9 @@ Describe this project so the AI assistant has context.\n\n\
                 let url = format!("{}/api/v1/openapi.json", client.base_url());
                 #[cfg(target_os = "windows")]
                 {
-                    let _ = std::process::Command::new("cmd")
-                        .args(["/C", "start", "", &url])
-                        .spawn();
+                    let mut cmd = std::process::Command::new("cmd");
+                    deepseekcode_core::process::hide_console(&mut cmd);
+                    let _ = cmd.args(["/C", "start", "", &url]).spawn();
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
@@ -5679,12 +5684,20 @@ impl WorkspaceView {
         let path = path.to_string();
         let project_dir = self.project_dir.clone();
         cx.spawn(async move |view, cx| {
-            let result = project_dir.map(|dir| {
+            let result = if let Some(dir) = project_dir {
                 let dir_str = dir.to_string_lossy().to_string();
-                let content = git_worktree_file_content(&dir_str, &path).unwrap_or_default();
-                let diff = git_unified_diff(&dir_str, &path);
-                (content, diff)
-            });
+                let path_for_git = path.clone();
+                tokio::task::spawn_blocking(move || {
+                    let content =
+                        git_worktree_file_content(&dir_str, &path_for_git).unwrap_or_default();
+                    let diff = git_unified_diff(&dir_str, &path_for_git);
+                    (content, diff)
+                })
+                .await
+                .ok()
+            } else {
+                None
+            };
             let _ = view.update(cx, |this, cx| {
                 if let Some((content, diff)) = result {
                     this.editor.path = Some(path.clone());
@@ -5713,14 +5726,6 @@ impl WorkspaceView {
             });
         })
         .detach();
-    }
-
-    pub(crate) fn refresh_git_status_local(&mut self) {
-        let Some(dir) = self.project_dir.clone() else {
-            self.clear_git_status();
-            return;
-        };
-        self.apply_git_status(collect_git_status(&dir));
     }
 
     pub(crate) fn refresh_git_status_async(&mut self, cx: &mut Context<Self>) {
@@ -5780,9 +5785,9 @@ impl WorkspaceView {
     pub(crate) fn open_external_url(&self, url: &str) {
         #[cfg(target_os = "windows")]
         {
-            let _ = std::process::Command::new("cmd")
-                .args(["/C", "start", "", url])
-                .spawn();
+            let mut cmd = std::process::Command::new("cmd");
+            deepseekcode_core::process::hide_console(&mut cmd);
+            let _ = cmd.args(["/C", "start", "", url]).spawn();
         }
         #[cfg(target_os = "macos")]
         {
@@ -6002,7 +6007,9 @@ struct GitStatusSnapshot {
 
 fn collect_git_status(dir: &std::path::Path) -> GitStatusSnapshot {
     let dir_str = dir.to_string_lossy().to_string();
-    let is_repo = std::process::Command::new("git")
+    let mut is_repo_cmd = std::process::Command::new("git");
+    deepseekcode_core::process::hide_console(&mut is_repo_cmd);
+    let is_repo = is_repo_cmd
         .args(["-C", &dir_str, "rev-parse", "--is-inside-work-tree"])
         .output()
         .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
@@ -6013,7 +6020,9 @@ fn collect_git_status(dir: &std::path::Path) -> GitStatusSnapshot {
             ..GitStatusSnapshot::default()
         };
     }
-    let output = std::process::Command::new("git")
+    let mut status_cmd = std::process::Command::new("git");
+    deepseekcode_core::process::hide_console(&mut status_cmd);
+    let output = status_cmd
         .args(["-C", &dir_str, "status", "--porcelain"])
         .output();
     let lines: Vec<String> = match &output {
@@ -6040,14 +6049,18 @@ fn collect_git_status(dir: &std::path::Path) -> GitStatusSnapshot {
         }
     };
     let (staged, unstaged, untracked) = classify_git_porcelain(&lines);
-    let diff_summary = std::process::Command::new("git")
+    let mut diff_cmd = std::process::Command::new("git");
+    deepseekcode_core::process::hide_console(&mut diff_cmd);
+    let diff_summary = diff_cmd
         .args(["-C", &dir_str, "diff", "--shortstat"])
         .output()
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty());
-    let log = std::process::Command::new("git")
+    let mut log_cmd = std::process::Command::new("git");
+    deepseekcode_core::process::hide_console(&mut log_cmd);
+    let log = log_cmd
         .args(["-C", &dir_str, "log", "--oneline", "--decorate", "-n", "20"])
         .output()
         .ok()

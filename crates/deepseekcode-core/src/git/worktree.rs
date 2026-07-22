@@ -28,7 +28,9 @@ pub fn is_git_repository(path: &Path) -> bool {
 
 pub fn worktree_info(path: &Path) -> Option<WorktreeInfo> {
     let root = discover_git_root(path)?;
-    let branch = Command::new("git")
+    let mut cmd = Command::new("git");
+    crate::process::hide_console(&mut cmd);
+    let branch = cmd
         .args([
             "-C",
             &root.to_string_lossy(),
@@ -125,11 +127,10 @@ impl GitWorktreeManager {
     }
 
     fn git(&self, args: &[&str]) -> Result<String, deepseekcode_types::DeepSeekCodeError> {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(&self.repo_root)
-            .output()
-            .map_err(|e| {
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(&self.repo_root);
+        crate::process::hide_console(&mut cmd);
+        let output = cmd.output().map_err(|e| {
                 deepseekcode_types::DeepSeekCodeError::Other(format!("git command failed: {e}"))
             })?;
 

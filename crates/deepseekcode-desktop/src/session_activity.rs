@@ -123,7 +123,9 @@ impl SessionActivityStore {
         }
         let mut rebuild_activity = false;
         let mut timeline_bumped = false;
-        push_session_event(&mut self.session_events, event.clone());
+        if event.kind != EventKind::ToolProgress {
+            push_session_event(&mut self.session_events, event.clone());
+        }
 
         if event.kind == EventKind::ToolProgress {
             if let (Some(id), Some(chunk)) = (

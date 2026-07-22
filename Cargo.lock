@@ -1839,6 +1839,7 @@ dependencies = [
  "camino",
  "chrono",
  "deepseekcode-config",
+ "deepseekcode-core",
  "deepseekcode-schema",
  "deepseekcode-sdk",
  "deepseekcode-telemetry",

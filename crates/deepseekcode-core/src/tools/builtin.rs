@@ -487,6 +487,7 @@ impl Tool for BashTool {
         };
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        crate::process::hide_console_async(&mut cmd);
 
         let output = timeout(
             Duration::from_millis(timeout_ms),
@@ -507,6 +508,7 @@ async fn run_command_streaming(
     mut cmd: Command,
     ctx: &ToolContext,
 ) -> std::result::Result<Value, ToolFailure> {
+    crate::process::hide_console_async(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| ToolFailure {
         message: e.to_string(),
         retryable: true,
@@ -892,6 +894,7 @@ impl Tool for LspTool {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         shell_env::apply_to_command(&mut child, &self.env);
+        crate::process::hide_console_async(&mut child);
 
         let mut child = child.spawn().map_err(|e| ToolFailure {
             message: e.to_string(),

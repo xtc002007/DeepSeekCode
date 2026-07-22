@@ -649,7 +649,9 @@ fn git_status_label(code: char, staged: bool) -> String {
 
 /// Unified diff for a changed file (staged + unstaged) relative to HEAD.
 pub fn git_unified_diff(project_dir: &str, path: &str) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let mut cmd = std::process::Command::new("git");
+    deepseekcode_core::process::hide_console(&mut cmd);
+    let output = cmd
         .args(["-C", project_dir, "diff", "HEAD", "--", path])
         .output()
         .ok()?;
@@ -658,7 +660,9 @@ pub fn git_unified_diff(project_dir: &str, path: &str) -> Option<String> {
     }
     let diff = String::from_utf8_lossy(&output.stdout).to_string();
     if diff.is_empty() {
-        let unstaged = std::process::Command::new("git")
+        let mut unstaged_cmd = std::process::Command::new("git");
+        deepseekcode_core::process::hide_console(&mut unstaged_cmd);
+        let unstaged = unstaged_cmd
             .args(["-C", project_dir, "diff", "--", path])
             .output()
             .ok()?;

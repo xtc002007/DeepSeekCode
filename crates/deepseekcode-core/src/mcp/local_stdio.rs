@@ -20,7 +20,9 @@ pub struct LocalMcpClient {
 
 impl LocalMcpClient {
     pub fn spawn(command: &str, args: &[String]) -> Result<Self> {
-        let mut child = Command::new(command)
+        let mut cmd = Command::new(command);
+        crate::process::hide_console(&mut cmd);
+        let mut child = cmd
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

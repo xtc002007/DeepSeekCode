@@ -5,7 +5,9 @@ pub fn prefers_dark() -> bool {
     #[cfg(windows)]
     {
         use std::process::Command;
-        let output = Command::new("reg")
+        let mut cmd = Command::new("reg");
+        deepseekcode_core::process::hide_console(&mut cmd);
+        let output = cmd
             .args([
                 "query",
                 r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",

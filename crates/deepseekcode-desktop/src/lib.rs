@@ -45,6 +45,7 @@ use app::DeepSeekCodeApp;
 use deepseekcode_config::LoggingConfig;
 
 pub fn start() {
+    deepseekcode_sdk::install_dedicated_engine_runtime();
     let logging = load_logging_config();
     let run_ctx = deepseekcode_telemetry::init("desktop", &logging);
     tracing::info!(

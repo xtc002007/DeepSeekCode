@@ -68,13 +68,23 @@ impl ToolRegistry {
         config: &deepseekcode_config::DeepSeekCodeConfig,
         services: ToolServices,
     ) -> Self {
+        let shell_env = crate::shell_env::capture_shell_env(config.shell.as_deref());
+        Self::with_services_and_shell_env(working_directory, config, services, shell_env)
+    }
+
+    pub fn with_services_and_shell_env(
+        working_directory: String,
+        config: &deepseekcode_config::DeepSeekCodeConfig,
+        services: ToolServices,
+        shell_env: std::collections::HashMap<String, String>,
+    ) -> Self {
         let mut registry = Self {
             tools: HashMap::new(),
             working_directory,
             snapshot_store: None,
             services,
         };
-        registry.register_builtin(config);
+        registry.register_builtin(config, shell_env);
         registry
     }
 
@@ -87,14 +97,17 @@ impl ToolRegistry {
         self
     }
 
-    fn register_builtin(&mut self, config: &deepseekcode_config::DeepSeekCodeConfig) {
+    fn register_builtin(
+        &mut self,
+        config: &deepseekcode_config::DeepSeekCodeConfig,
+        shell_env: std::collections::HashMap<String, String>,
+    ) {
         use super::builtin::*;
         use super::list::ListTool;
         use super::plan_complete::PlanCompleteTool;
         use super::question::QuestionTool;
         use super::task::TaskTool;
         use super::websearch::WebsearchTool;
-        let shell_env = crate::shell_env::capture_shell_env(config.shell.as_deref());
         self.register(Box::new(ReadTool));
         self.register(Box::new(WriteTool));
         self.register(Box::new(EditTool));

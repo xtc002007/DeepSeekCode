@@ -3,9 +3,30 @@ use deepseekcode_core::DeepSeekCodeEngine;
 use deepseekcode_server::{build_router, pty::PtyManager, state::AppState};
 use deepseekcode_types::Result;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+use tokio::runtime::{Handle, Runtime};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
+
+static DEDICATED_ENGINE_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+static USE_DEDICATED_ENGINE_RUNTIME: AtomicBool = AtomicBool::new(false);
+
+/// Desktop clients should call this once at startup so session/tool I/O never shares the UI tokio pool.
+pub fn install_dedicated_engine_runtime() {
+    let _ = DEDICATED_ENGINE_RUNTIME.get_or_init(|| {
+        Runtime::new().expect("deepseekcode dedicated engine runtime")
+    });
+    USE_DEDICATED_ENGINE_RUNTIME.store(true, Ordering::SeqCst);
+}
+
+fn dedicated_engine_handle() -> Handle {
+    DEDICATED_ENGINE_RUNTIME
+        .get()
+        .expect("dedicated engine runtime not installed")
+        .handle()
+        .clone()
+}
 
 pub struct EmbeddedEngine {
     pub addr: SocketAddr,
@@ -18,6 +39,17 @@ pub struct EmbeddedEngine {
 impl EmbeddedEngine {
     pub async fn start(project_dir: impl Into<String>) -> Result<Self> {
         let project_dir = project_dir.into();
+        if USE_DEDICATED_ENGINE_RUNTIME.load(Ordering::SeqCst) {
+            let handle = dedicated_engine_handle();
+            return handle
+                .spawn(async move { Self::start_inner(project_dir).await })
+                .await
+                .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        }
+        Self::start_inner(project_dir).await
+    }
+
+    async fn start_inner(project_dir: String) -> Result<Self> {
         let db_path = std::env::var("DEEPSEEKCODE_DB_PATH").unwrap_or_else(|_| {
             dirs::data_dir()
                 .map(|p| p.join("deepseekcode").join("deepseekcode.db"))

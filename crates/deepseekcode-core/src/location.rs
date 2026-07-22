@@ -9,6 +9,7 @@ use crate::mcp::McpConnectionPool;
 use crate::permission::PermissionService;
 use crate::provider::ProviderCatalog;
 use crate::session::SessionService;
+use crate::tools::ToolServices;
 
 pub struct LocationServices {
     pub project_dir: String,
@@ -72,6 +73,13 @@ impl LocationMap {
         );
         let _ = permissions.load_from_db().await;
 
+        let configured_shell = config.shell.clone();
+        let shell_env = tokio::task::spawn_blocking(move || {
+            crate::shell_env::capture_shell_env(configured_shell.as_deref())
+        })
+        .await
+        .unwrap_or_default();
+
         let providers = Arc::new(ProviderCatalog::with_store(self.credentials.clone()));
         providers.load_from_config(&config.providers).await;
         let _ = providers.load_from_store().await.map_err(|e| {
@@ -104,10 +112,14 @@ impl LocationMap {
         let plugin_host = Arc::new(RwLock::new(plugin_host));
         let hooks = Arc::new(hooks);
 
-        let wasm_tools = Arc::new(std::sync::Mutex::new(crate::tools::ToolRegistry::new(
-            project_dir.clone(),
-            &config,
-        )));
+        let wasm_tools = Arc::new(std::sync::Mutex::new(
+            crate::tools::ToolRegistry::with_services_and_shell_env(
+                project_dir.clone(),
+                &config,
+                ToolServices::default(),
+                shell_env,
+            ),
+        ));
         let active_session_id = Arc::new(std::sync::RwLock::new(None));
         let proxy_tools = wasm_tools.clone();
         let proxy_active = active_session_id.clone();

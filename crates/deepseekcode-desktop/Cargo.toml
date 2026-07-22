@@ -26,6 +26,7 @@ deepseekcode-schema = { workspace = true }
 deepseekcode-config = { workspace = true }
 deepseekcode-telemetry = { workspace = true }
 deepseekcode-sdk = { workspace = true }
+deepseekcode-core = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
