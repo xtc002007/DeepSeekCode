@@ -93,7 +93,7 @@ async fn mcp_tool_invoked_in_mock_llm_session() {
 
     let mock = MockServer::start().await;
     let tool_sse = concat!(
-        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_mcp\",\"function\":{\"name\":\"echo_echo\",\"arguments\":\"{\\\"message\\\"\"}}]},\"index\":0}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_mcp\",\"function\":{\"name\":\"mcp_echo_echo\",\"arguments\":\"{\\\"message\\\"\"}}]},\"index\":0}]}\n\n",
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":\\\"from-mcp\\\"}\"}}]},\"index\":0}]}\n\n",
         "data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"index\":0}]}\n\n",
         "data: [DONE]\n\n",
@@ -208,7 +208,7 @@ async fn mcp_tool_invoked_in_mock_llm_session() {
                 && e.payload
                     .get("tool_name")
                     .and_then(|v| v.as_str())
-                    .is_some_and(|n| n == "echo_echo")
+                    .is_some_and(|n| n == "mcp_echo_echo")
         });
         saw_idle |= tail
             .iter()
@@ -220,7 +220,7 @@ async fn mcp_tool_invoked_in_mock_llm_session() {
 
     assert!(
         saw_mcp_tool,
-        "expected echo_echo tool.completed from MCP bridge"
+        "expected mcp_echo_echo tool.completed from MCP bridge"
     );
     assert!(saw_idle, "expected session.idle after MCP tool settlement");
 }

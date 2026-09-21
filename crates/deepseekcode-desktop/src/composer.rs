@@ -8,7 +8,10 @@ use deepseekcode_schema::provider::ProviderInfo;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::ops::Range;
+use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
+
+pub const COMPOSER_PLACEHOLDER: &str = "Ask anything, @ to mention, / for actions";
 
 actions!(
     prompt_input,
@@ -50,6 +53,7 @@ pub struct PromptInput {
     blink_generation: u64,
     masked: bool,
     compact: bool,
+    small_text: bool,
     multiline: bool,
     key_context_name: String,
 }
@@ -59,7 +63,7 @@ impl PromptInput {
         Self {
             focus_handle: cx.focus_handle(),
             content: SharedString::default(),
-            placeholder: "Type a prompt…".into(),
+            placeholder: COMPOSER_PLACEHOLDER.into(),
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -70,6 +74,7 @@ impl PromptInput {
             blink_generation: 0,
             masked: false,
             compact: false,
+            small_text: false,
             multiline: false,
             key_context_name: "PromptInput".to_string(),
         }
@@ -87,6 +92,13 @@ impl PromptInput {
 
     pub fn set_compact(&mut self, compact: bool, cx: &mut Context<Self>) {
         self.compact = compact;
+        cx.notify();
+    }
+
+    /// Render with `text_sm` instead of `text_base` (composer input matches
+    /// surrounding UI density without affecting dialog inputs).
+    pub fn set_small_text(&mut self, small: bool, cx: &mut Context<Self>) {
+        self.small_text = small;
         cx.notify();
     }
 
@@ -148,6 +160,10 @@ impl PromptInput {
             }
         })
         .detach();
+    }
+
+    pub fn focus_handle_clone(&self) -> FocusHandle {
+        self.focus_handle.clone()
     }
 
     pub fn text(&self) -> String {
@@ -762,12 +778,12 @@ impl Render for PromptInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .line_height(if self.compact {
+            .line_height(if self.compact || self.small_text {
                 crate::theme::leading_sm(&theme)
             } else {
                 crate::theme::leading_base(&theme)
             })
-            .text_size(if self.compact {
+            .text_size(if self.compact || self.small_text {
                 theme.typography.text_sm
             } else {
                 theme.typography.text_base
@@ -775,7 +791,7 @@ impl Render for PromptInput {
             .child(
                 div()
                     .w_full()
-                    .min_h(if self.compact {
+                    .min_h(if self.compact || self.small_text {
                         theme.typography.leading_sm
                     } else {
                         theme.typography.leading_base
@@ -797,6 +813,78 @@ pub struct PromptAttachment {
     pub label: String,
 }
 
+impl PromptAttachment {
+    pub fn file_name(&self) -> String {
+        std::path::Path::new(&self.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| self.path.clone())
+    }
+
+    pub fn is_image(&self) -> bool {
+        is_image_path(&self.path)
+    }
+}
+
+pub fn is_image_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "ico"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn image_format_for_path(path: &str) -> ImageFormat {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "jpg" | "jpeg" => ImageFormat::Jpeg,
+        "gif" => ImageFormat::Gif,
+        "webp" => ImageFormat::Webp,
+        "bmp" => ImageFormat::Bmp,
+        "tiff" => ImageFormat::Tiff,
+        "ico" => ImageFormat::Ico,
+        _ => ImageFormat::Png,
+    }
+}
+
+/// Load an attachment image from disk (thumbnails + preview share this).
+/// Returns `None` when the file is missing, too large, or undecodable.
+/// The cap admits uncompressed BMP screenshots up to ~4K.
+pub fn load_attachment_image(path: &str) -> Option<Arc<Image>> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.is_empty() || bytes.len() > 32 * 1024 * 1024 {
+        return None;
+    }
+    let format = image_format_for_path(path);
+    Some(Arc::new(Image::from_bytes(format, bytes)))
+}
+
+/// Normalize pasted clipboard bytes to BMP so pastes always land as
+/// `paste-<timestamp>.bmp`, no matter which clipboard format (PNG/JPG/DIB…)
+/// the OS enumerated first. Returns `None` for undecodable bytes
+/// (e.g. SVG, which the raster decoder cannot handle).
+pub fn encode_clipboard_image_as_bmp(bytes: &[u8]) -> Option<Vec<u8>> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let rgb = img.to_rgb8();
+    let mut bmp = Vec::new();
+    image::DynamicImage::ImageRgb8(rgb)
+        .write_to(&mut std::io::Cursor::new(&mut bmp), image::ImageFormat::Bmp)
+        .ok()?;
+    if bmp.is_empty() {
+        return None;
+    }
+    Some(bmp)
+}
+
 impl ComposerView {
     pub fn render(
         cx: &mut Context<crate::workspace::WorkspaceView>,
@@ -816,14 +904,19 @@ impl ComposerView {
         let send_icon = if session_busy {
             crate::ui::icon::IconName::Square
         } else {
-            crate::ui::icon::IconName::Send
+            crate::ui::icon::IconName::ArrowRight
         };
         let send_bg = if session_busy {
             theme.error
         } else if input_blocked {
             theme.text_disabled
         } else {
-            theme.accent_rgba()
+            Rgba {
+                r: 0x1a as f32 / 255.0,
+                g: 0x73 as f32 / 255.0,
+                b: 0xe8 as f32 / 255.0,
+                a: 1.0,
+            }
         };
 
         let send_button = div()
@@ -832,15 +925,20 @@ impl ComposerView {
             .flex()
             .items_center()
             .justify_center()
-            .size(px(32.))
-            .rounded_md()
+            .size(px(28.))
+            .rounded_full()
             .bg(send_bg)
             .when(!input_blocked, |el| {
                 el.cursor_pointer().hover(|s| {
                     s.bg(if session_busy {
                         theme.error
                     } else {
-                        theme.accent_hover_rgba()
+                        Rgba {
+                            r: 0x17 as f32 / 255.0,
+                            g: 0x65 as f32 / 255.0,
+                            b: 0xcc as f32 / 255.0,
+                            a: 1.0,
+                        }
                     })
                 })
             })
@@ -860,7 +958,7 @@ impl ComposerView {
             )
             .child(crate::ui::icon::render_icon_rgba(
                 send_icon,
-                px(16.),
+                px(14.),
                 theme.text_on_accent,
             ));
 
@@ -917,79 +1015,224 @@ impl ComposerView {
             })
             .child(
                 div()
+                    .w_full()
+                    .rounded_lg()
+                    .bg(theme.bg_elevated)
+                    .border_1()
+                    .border_color(theme.border_subtle)
                     .flex()
-                    .flex_row()
-                    .gap(px(6.))
-                    .items_center()
-                    .child(
-                        icon_button_shell(
-                            "attach-file",
-                            IconName::Paperclip,
-                            &theme,
-                            px(32.),
-                            false,
-                            false,
-                            false,
-                        )
-                        .rounded_md()
-                        .bg(theme.bg_elevated)
-                        .border_1()
-                        .border_color(theme.border_subtle)
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.attach_file(cx);
-                            }),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h(px(36.))
-                            .max_h(px(72.))
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .border_1()
-                            .border_color(theme.border_subtle)
-                            .rounded_md()
-                            .bg(theme.bg_elevated)
-                            .children(attachments.iter().enumerate().map(|(idx, att)| {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .px_2()
-                                    .py_0p5()
-                                    .mx_1()
-                                    .mt_1()
-                                    .rounded_md()
-                                    .bg(theme.bg_active)
-                                    .text_xs()
-                                    .text_color(theme.text_secondary)
-                                    .child(att.label.clone())
-                                    .child(
+                    .flex_col()
+                    .overflow_hidden()
+                    // ——— attachment strip: image thumbnails (click = preview) + file chips ———
+                    .when(!attachments.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap(px(6.))
+                                .px_2()
+                                .pt_1()
+                                .children(attachments.iter().enumerate().map(|(idx, att)| {
+                                    if att.is_image() {
+                                        let thumb: AnyElement =
+                                            match load_attachment_image(&att.path) {
+                                                Some(image) => div()
+                                                    .w_full()
+                                                    .h_full()
+                                                    .overflow_hidden()
+                                                    .rounded_md()
+                                                    .child(
+                                                        img(image).w_full().h_full().rounded_md(),
+                                                    )
+                                                    .into_any_element(),
+                                                None => div()
+                                                    .w_full()
+                                                    .h_full()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .rounded_md()
+                                                    .bg(theme.bg_active)
+                                                    .child(render_icon_rgba(
+                                                        IconName::File,
+                                                        px(16.),
+                                                        theme.text_muted,
+                                                    ))
+                                                    .into_any_element(),
+                                            };
+                                        div()
+                                            .id(ElementId::Name(SharedString::from(format!(
+                                                "att-thumb-{idx}"
+                                            ))))
+                                            .relative()
+                                            .w(px(40.))
+                                            .h(px(40.))
+                                            .rounded_md()
+                                            .overflow_hidden()
+                                            .border_1()
+                                            .border_color(theme.border_subtle)
+                                            .bg(theme.bg_surface)
+                                            .cursor_pointer()
+                                            .hover(|s| s.border_color(theme.border_focus))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _, _, cx| {
+                                                    this.open_image_preview(idx, cx);
+                                                }),
+                                            )
+                                            .child(thumb)
+                                            .child(
+                                                div()
+                                                    .absolute()
+                                                    .top(px(2.))
+                                                    .right(px(2.))
+                                                    .size(px(14.))
+                                                    .rounded_full()
+                                                    .bg(rgba(0x000000cc))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .cursor_pointer()
+                                                    .on_mouse_down(MouseButton::Left, {
+                                                        cx.listener(move |this, _, _, cx| {
+                                                            this.remove_attachment(idx, cx);
+                                                        })
+                                                    })
+                                                    .child(render_icon_rgba(
+                                                        IconName::X,
+                                                        px(10.),
+                                                        Rgba {
+                                                            r: 1.0,
+                                                            g: 1.0,
+                                                            b: 1.0,
+                                                            a: 1.0,
+                                                        },
+                                                    )),
+                                            )
+                                            .into_any_element()
+                                    } else {
                                         div()
                                             .flex()
                                             .items_center()
-                                            .cursor_pointer()
-                                            .on_mouse_down(MouseButton::Left, {
-                                                cx.listener(move |this, _, _, cx| {
-                                                    this.remove_attachment(idx, cx);
-                                                })
-                                            })
-                                            .child(crate::ui::icon::render_icon_rgba(
-                                                crate::ui::icon::IconName::X,
-                                                px(12.),
-                                                theme.error,
-                                            )),
-                                    )
-                                    .into_any_element()
-                            }))
+                                            .justify_between()
+                                            .gap(px(6.))
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_md()
+                                            .bg(theme.bg_active)
+                                            .border_1()
+                                            .border_color(theme.border_subtle)
+                                            .text_xs()
+                                            .text_color(theme.text_secondary)
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .child(render_icon_rgba(
+                                                        IconName::File,
+                                                        px(12.),
+                                                        theme.text_muted,
+                                                    ))
+                                                    .child(att.file_name()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .cursor_pointer()
+                                                    .on_mouse_down(MouseButton::Left, {
+                                                        cx.listener(move |this, _, _, cx| {
+                                                            this.remove_attachment(idx, cx);
+                                                        })
+                                                    })
+                                                    .child(render_icon_rgba(
+                                                        IconName::X,
+                                                        px(12.),
+                                                        theme.error,
+                                                    )),
+                                            )
+                                            .into_any_element()
+                                    }
+                                })),
+                        )
+                    })
+                    // ——— text input ———
+                    .child(
+                        div()
+                            .w_full()
+                            .min_h(px(34.))
+                            .px_2()
+                            .pt_1()
+                            .pb_1()
                             .when(input_blocked, |el| el.opacity(0.5))
                             .child(prompt_input.clone()),
                     )
-                    .child(send_button),
+                    // ——— divider ———
+                    .child(div().w_full().h(px(1.)).mx_2().bg(theme.border_subtle))
+                    // ——— bottom toolbar: [+] [model ^] … [mic] [send] ———
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(6.))
+                            .px_2()
+                            .py_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .child(
+                                        icon_button_shell(
+                                            "composer-add",
+                                            IconName::Plus,
+                                            &theme,
+                                            px(24.),
+                                            false,
+                                            false,
+                                            false,
+                                        )
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                this.attach_file(cx);
+                                            }),
+                                        ),
+                                    )
+                                    .child(model_picker_pill(cx, model_label, model_open, &theme)),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .child(
+                                        icon_button_shell(
+                                            "composer-mic",
+                                            IconName::Mic,
+                                            &theme,
+                                            px(24.),
+                                            false,
+                                            false,
+                                            false,
+                                        )
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, window, cx| {
+                                                this.focus_prompt_input(window, cx);
+                                            }),
+                                        ),
+                                    )
+                                    .child(send_button),
+                            ),
+                    ),
             )
             .child(
                 div()
@@ -998,29 +1241,9 @@ impl ComposerView {
                     .justify_between()
                     .gap(px(6.))
                     .flex_wrap()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .flex_wrap()
-                            .child(badge_dropdown(
-                                cx,
-                                "agent",
-                                agent_label,
-                                agent_open,
-                                &theme,
-                                IconName::Bot,
-                            ))
-                            .child(badge_dropdown(
-                                cx,
-                                "model",
-                                model_label,
-                                model_open,
-                                &theme,
-                                IconName::Sparkles,
-                            )),
-                    )
+                    .child(div().flex().items_center().gap(px(6.)).flex_wrap().child(
+                        badge_dropdown(cx, "agent", agent_label, agent_open, &theme, IconName::Bot),
+                    ))
                     .children(if has_session {
                         vec![div()
                             .relative()
@@ -1101,6 +1324,51 @@ impl ComposerView {
                     }),
             )
     }
+}
+
+/// Screenshot-style model pill: `<model label> ^`, opens the model dropdown.
+fn model_picker_pill(
+    cx: &mut Context<crate::workspace::WorkspaceView>,
+    label: &str,
+    open: bool,
+    theme: &ThemeTokens,
+) -> impl IntoElement {
+    div()
+        .id("composer-model-pill")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.))
+        .px_2()
+        .py_0p5()
+        .rounded_md()
+        .text_sm()
+        .text_color(theme.text_secondary)
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.bg_hover))
+        .when(open, |s| s.bg(theme.bg_active))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                this.toggle_composer_dropdown("model", event.position, cx);
+            }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(label.to_string()),
+        )
+        .child(render_icon_rgba(
+            if open {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronUp
+            },
+            px(12.),
+            theme.text_muted,
+        ))
 }
 
 fn badge_dropdown(

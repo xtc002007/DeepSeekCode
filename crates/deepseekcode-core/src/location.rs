@@ -19,7 +19,8 @@ pub struct LocationServices {
     pub mcp: Arc<McpConnectionPool>,
     pub hooks: Arc<HookRegistry>,
     pub plugin_host: Arc<RwLock<PluginHost>>,
-    pub active_session_id: Arc<std::sync::RwLock<Option<deepseekcode_types::SessionId>>>,
+    pub active_session_ids:
+        Arc<std::sync::RwLock<std::collections::HashSet<deepseekcode_types::SessionId>>>,
     wasm_tools: Arc<std::sync::Mutex<crate::tools::ToolRegistry>>,
 }
 
@@ -120,9 +121,8 @@ impl LocationMap {
                 shell_env,
             ),
         ));
-        let active_session_id = Arc::new(std::sync::RwLock::new(None));
+        let active_session_ids = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
         let proxy_tools = wasm_tools.clone();
-        let proxy_active = active_session_id.clone();
         deepseekcode_plugin::set_wasm_tool_proxy(Arc::new(move |tool, args| {
             let args_value: serde_json::Value =
                 serde_json::from_str(args).map_err(|e| format!("invalid tool args json: {e}"))?;
@@ -131,15 +131,12 @@ impl LocationMap {
                 .map_err(|_| "tool registry lock poisoned".to_string())?;
             let rt = tokio::runtime::Handle::try_current()
                 .map_err(|_| "no tokio runtime for wasm tool proxy".to_string())?;
-            let session_id = proxy_active
-                .read()
-                .ok()
-                .and_then(|g| *g)
+            let session_id = crate::tools::services::current_session_id()
                 .unwrap_or_else(deepseekcode_types::SessionId::new);
             let message_id = deepseekcode_types::MessageId::new();
             let call_id = deepseekcode_types::ToolCallId::new();
             let result = rt.block_on(registry.execute(
-                tool, args_value, session_id, message_id, call_id, "build", None,
+                tool, args_value, session_id, message_id, call_id, "build", None, None,
             ));
             match result {
                 Ok(value) => serde_json::to_string(&value.to_stored()).map_err(|e| e.to_string()),
@@ -158,14 +155,14 @@ impl LocationMap {
                 events,
                 mcp.clone(),
                 hooks.clone(),
-                Some(active_session_id.clone()),
+                Some(active_session_ids.clone()),
             ),
             providers,
             permissions,
             mcp,
             hooks,
             plugin_host,
-            active_session_id,
+            active_session_ids,
             wasm_tools,
         });
         locations.insert(project_dir, services.clone());

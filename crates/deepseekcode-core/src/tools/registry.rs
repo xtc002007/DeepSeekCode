@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use deepseekcode_schema::tool::{ToolContext, ToolDefinition, ToolFailure, ToolResultEnvelope};
 use deepseekcode_types::{MessageId, Result, SessionId, ToolCallId};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::display::{build_tool_result, preview_metadata_from_input, preview_title_from_input};
-use super::services::{with_services_async, ToolServices};
+use super::services::{with_services_async, with_session_id_async, ToolServices};
 use crate::mcp::McpConnectionPool;
 use crate::skills::{SkillCatalog, SkillTool};
 use crate::snapshot::FileSnapshotStore;
@@ -240,6 +240,7 @@ impl ToolRegistry {
         tool_call_id: ToolCallId,
         agent: &str,
         hooks: Option<&deepseekcode_plugin::HookRegistry>,
+        cancel: Option<Arc<crate::tools::services::CancelToken>>,
     ) -> Result<ToolResultEnvelope> {
         let tool = self.tools.get(name).ok_or_else(|| {
             deepseekcode_types::DeepSeekCodeError::NotFound(format!("tool {name}"))
@@ -261,9 +262,17 @@ impl ToolRegistry {
 
         if let Some(store) = &self.snapshot_store {
             if store.is_enabled() && FileSnapshotStore::is_write_tool(name) {
-                for path in
-                    FileSnapshotStore::paths_from_tool_input(name, &input, &self.working_directory)
-                {
+                let paths =
+                    FileSnapshotStore::paths_from_tool_input(name, &input, &self.working_directory);
+                if matches!(name, "bash" | "powershell") && paths.is_empty() {
+                    tracing::info!(
+                        target: deepseekcode_telemetry::TOOL,
+                        session_id = %session_id,
+                        tool = name,
+                        "shell command has no capturable file paths; file-level revert unavailable"
+                    );
+                }
+                for path in paths {
                     if !crate::project_context::path_within_project(&self.working_directory, &path)
                     {
                         return Err(deepseekcode_types::DeepSeekCodeError::ToolFailure(format!(
@@ -299,21 +308,54 @@ impl ToolRegistry {
         }
 
         let start = std::time::Instant::now();
-        let services = self.services.clone();
-        let result = with_services_async(services, async {
-            tool.execute(hook_input.clone(), &ctx).await
-        })
-        .await;
+        let services = if let Some(cancel) = cancel.clone() {
+            self.services.clone().with_cancel(cancel)
+        } else {
+            self.services.clone()
+        };
+        let cancel_flag = cancel.clone();
+        let execute_fut = with_services_async(services, async {
+            with_session_id_async(session_id, async {
+                tool.execute(hook_input.clone(), &ctx).await
+            })
+            .await
+        });
+        let result = if let Some(cancel) = cancel_flag {
+            tokio::select! {
+                result = execute_fut => result,
+                _ = cancel.cancelled() => {
+                    Err(ToolFailure {
+                        message: "tool execution interrupted".into(),
+                        retryable: false,
+                    })
+                }
+            }
+        } else {
+            execute_fut.await
+        };
         let duration_ms = start.elapsed().as_millis() as u64;
         match result {
             Ok(mut value) => {
                 let mut hook_title = None;
                 let mut hook_metadata = Value::Object(Default::default());
+                if matches!(name, "bash" | "powershell")
+                    && FileSnapshotStore::paths_from_tool_input(
+                        name,
+                        &input,
+                        &self.working_directory,
+                    )
+                    .is_empty()
+                {
+                    hook_metadata = json!({
+                        "non_revertable": true,
+                        "revert_warning": "Shell command has no capturable file paths; timeline revert will not restore workspace files."
+                    });
+                }
                 if let Some(hooks) = hooks {
                     let mut after_out = deepseekcode_plugin::ToolExecuteAfterOutput {
                         title: preview_title_from_input(name, &hook_input),
                         output: value.clone(),
-                        metadata: Value::Object(Default::default()),
+                        metadata: hook_metadata.clone(),
                     };
                     hooks
                         .run_tool_execute_after(
@@ -328,7 +370,14 @@ impl ToolRegistry {
                         .await?;
                     value = after_out.output;
                     hook_title = Some(after_out.title);
-                    hook_metadata = after_out.metadata;
+                    if let (Some(base), Some(overlay)) = (
+                        hook_metadata.as_object_mut(),
+                        after_out.metadata.as_object(),
+                    ) {
+                        for (key, val) in overlay {
+                            base.insert(key.clone(), val.clone());
+                        }
+                    }
                 }
                 let envelope =
                     build_tool_result(name, &input, value, duration_ms, hook_title, hook_metadata);

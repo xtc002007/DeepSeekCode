@@ -13,6 +13,14 @@ impl Auth for BearerAuth {
     }
 }
 
+pub struct ApiKeyAuth;
+
+impl Auth for ApiKeyAuth {
+    fn apply(&self, builder: RequestBuilder, api_key: &str) -> RequestBuilder {
+        builder.header("x-api-key", api_key)
+    }
+}
+
 /// Stub for future AWS Bedrock SigV4 signing.
 pub struct SigV4Auth;
 

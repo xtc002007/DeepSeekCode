@@ -44,7 +44,7 @@ impl SessionRunner {
                         baseline_len = generation.baseline.len(),
                         "context baseline replaced"
                     );
-                    let baseline_seq = self.events.latest_seq(self.session_id).await?;
+                    let baseline_seq = self.sessions.latest_message_seq(self.session_id).await?;
                     self.context_epochs
                         .replace_baseline(self.session_id, &generation, baseline_seq)
                         .await?;
@@ -128,16 +128,11 @@ impl SessionRunner {
                         .get(self.session_id)
                         .await?
                         .ok_or_else(|| DeepSeekCodeError::ContextUnavailable("no epoch".into()))?;
-                    let baseline = self
-                        .context_registry
-                        .render_baseline()
-                        .map(|g| g.baseline)
-                        .unwrap_or(epoch.baseline);
-                    return Ok((baseline, epoch.baseline_seq));
+                    return Ok((epoch.baseline, epoch.baseline_seq));
                 }
                 crate::system_context::ReconcileResult::ReplacementReady { generation } => {
                     let baseline = generation.baseline.clone();
-                    let baseline_seq = self.events.latest_seq(self.session_id).await?;
+                    let baseline_seq = self.sessions.latest_message_seq(self.session_id).await?;
                     self.context_epochs
                         .replace_baseline(self.session_id, &generation, baseline_seq)
                         .await?;

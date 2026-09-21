@@ -36,6 +36,7 @@ use std::path::{Component, Path as StdPath, PathBuf};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::time::Duration;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
 
@@ -190,6 +191,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/pty", post(create_pty))
         .route("/api/v1/pty/{id}/ticket", get(pty_ticket))
         .route("/api/v1/pty/{id}/resize", post(resize_pty))
+        .route("/api/v1/pty/{id}", delete(destroy_pty))
         .route("/api/v1/pty/{id}/connect", get(pty_connect))
         .with_state(state)
 }
@@ -297,21 +299,45 @@ fn normalize_path(path: &StdPath) -> PathBuf {
     out
 }
 
+fn strip_extended_path_prefix(path: &StdPath) -> PathBuf {
+    let rendered = path.to_string_lossy();
+    if let Some(stripped) = rendered.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 fn resolve_within_project(project_root: &str, requested: &str) -> Result<PathBuf, StatusCode> {
-    let root = std::fs::canonicalize(project_root).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let root = strip_extended_path_prefix(
+        &std::fs::canonicalize(project_root).map_err(|_| StatusCode::BAD_REQUEST)?,
+    );
     let target = if requested.is_empty() {
         root.clone()
     } else {
-        let path = StdPath::new(requested);
-        if path.is_absolute() {
-            path.to_path_buf()
+        let requested_path = strip_extended_path_prefix(StdPath::new(requested));
+        if requested_path.is_absolute() {
+            requested_path
         } else {
-            root.join(path)
+            root.join(requested_path)
         }
     };
     let resolved = target
         .canonicalize()
-        .unwrap_or_else(|_| normalize_path(&target));
+        .map(|p| strip_extended_path_prefix(&p))
+        .unwrap_or_else(|_| {
+            if let Some(parent) = target.parent() {
+                if let Ok(canonical_parent) = parent.canonicalize() {
+                    let parent = strip_extended_path_prefix(&canonical_parent);
+                    if let Some(file_name) = target.file_name() {
+                        return parent.join(file_name);
+                    }
+                    return parent;
+                }
+            }
+            normalize_path(&target)
+        });
+    let resolved = strip_extended_path_prefix(&resolved);
     if !resolved.starts_with(&root) {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -934,7 +960,11 @@ pub(crate) async fn connect_provider(
                 .into_response(),
         }
     } else {
-        Json(serde_json::json!({ "ok": true })).into_response()
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": "api_key is required" })),
+        )
+            .into_response()
     }
 }
 
@@ -1325,19 +1355,27 @@ pub(crate) async fn event_stream(
                     }),
             );
             let live_handoff = handoff_seq;
-            let live = BroadcastStream::new(live_rx)
-                .filter_map(|r| r.ok())
-                .filter(move |e| {
-                    e.seq > live_handoff
+            let live = BroadcastStream::new(live_rx).filter_map(move |result| match result {
+                Ok(e) => {
+                    if e.seq > live_handoff
                         && filter_session
                             .map(|sid| e.session_id == Some(sid))
                             .unwrap_or(true)
-                })
-                .map(|e| {
-                    Ok(Event::default()
-                        .json_data(e)
-                        .unwrap_or_else(|_| Event::default()))
-                });
+                    {
+                        Some(Ok(Event::default()
+                            .json_data(e)
+                            .unwrap_or_else(|_| Event::default())))
+                    } else {
+                        None
+                    }
+                }
+                Err(BroadcastStreamRecvError::Lagged(_)) => Some(Ok(Event::default()
+                    .json_data(serde_json::json!({
+                        "error": "gap",
+                        "head": live_handoff,
+                    }))
+                    .unwrap_or_else(|_| Event::default()))),
+            });
             Box::pin(history_stream.chain(live))
         };
 
@@ -1675,6 +1713,25 @@ pub(crate) async fn resize_pty(
             Json(serde_json::json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/pty/{id}",
+    tag = "pty",
+    params(("id" = String, Path, description = "PTY session id")),
+    responses((status = 200, description = "PTY destroyed"))
+)]
+pub(crate) async fn destroy_pty(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let dir = project_dir(&headers);
+    match state.pty.destroy(&id, &dir) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => service_error_response(e).into_response(),
     }
 }
 

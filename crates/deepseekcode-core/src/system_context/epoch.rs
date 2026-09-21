@@ -82,6 +82,50 @@ impl ContextEpochStore {
             .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
         Ok(())
     }
+
+    pub async fn update_baseline_seq(
+        &self,
+        session_id: SessionId,
+        baseline_seq: i64,
+    ) -> Result<()> {
+        sqlx::query(r#"UPDATE context_epochs SET baseline_seq = ? WHERE session_id = ?"#)
+            .bind(baseline_seq)
+            .bind(session_id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn copy_epoch(
+        &self,
+        from_session: SessionId,
+        to_session: SessionId,
+        baseline_seq: i64,
+    ) -> Result<()> {
+        let row = sqlx::query_as::<_, EpochRow>(
+            r#"SELECT baseline, snapshot, baseline_seq FROM context_epochs WHERE session_id = ?"#,
+        )
+        .bind(from_session.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        let Some(row) = row else {
+            return Ok(());
+        };
+        sqlx::query(
+            r#"INSERT OR REPLACE INTO context_epochs (session_id, baseline, snapshot, baseline_seq, created_at) VALUES (?, ?, ?, ?, ?)"#,
+        )
+        .bind(to_session.to_string())
+        .bind(row.baseline)
+        .bind(row.snapshot)
+        .bind(baseline_seq)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        Ok(())
+    }
 }
 
 #[derive(sqlx::FromRow)]

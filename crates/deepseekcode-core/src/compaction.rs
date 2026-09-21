@@ -214,16 +214,23 @@ async fn compact_overflow(
         return Ok(false);
     }
 
-    let compaction_seq = ctx
+    let generation = ctx.registry.render_baseline().ok_or_else(|| {
+        DeepSeekCodeError::Other("compaction failed: baseline render unavailable".into())
+    })?;
+    let snapshot_json = serde_json::to_string(&generation.snapshot).map_err(|e| {
+        DeepSeekCodeError::Other(format!("compaction failed: snapshot encode error: {e}"))
+    })?;
+    let _compaction_seq = ctx
         .sessions
-        .insert_compaction(ctx.session_id, message_id, &summary, &selected.recent)
+        .commit_compaction_with_epoch(
+            ctx.session_id,
+            message_id,
+            &summary,
+            &selected.recent,
+            Some(&generation.baseline),
+            Some(&snapshot_json),
+        )
         .await?;
-
-    if let Some(generation) = ctx.registry.render_baseline() {
-        ctx.epochs
-            .replace_baseline(ctx.session_id, &generation, compaction_seq)
-            .await?;
-    }
 
     ctx.events
         .append(
@@ -341,6 +348,7 @@ fn select_history(history: &[Message], keep_tokens: u32) -> Option<SelectedHisto
     let mut split = conversation.len();
     let mut split_prefix = String::new();
     let mut split_suffix = String::new();
+    let mut overflow_whole_index: Option<usize> = None;
 
     for (index, entry) in conversation.iter().enumerate().rev() {
         let next = total + estimate_str(entry);
@@ -351,7 +359,9 @@ fn select_history(history: &[Message], keep_tokens: u32) -> Option<SelectedHisto
                 let take = remaining.min(chars.len());
                 split_prefix = chars[..chars.len().saturating_sub(take)].iter().collect();
                 split_suffix = chars[chars.len().saturating_sub(take)..].iter().collect();
-                split = index + 1;
+                split = index;
+            } else {
+                overflow_whole_index = Some(index);
             }
             break;
         }
@@ -359,15 +369,30 @@ fn select_history(history: &[Message], keep_tokens: u32) -> Option<SelectedHisto
         split = index;
     }
 
-    let head: Vec<String> = conversation[..split]
-        .iter()
-        .cloned()
-        .chain(std::iter::once(split_prefix).filter(|s| !s.is_empty()))
-        .collect();
-    let recent: Vec<String> = std::iter::once(split_suffix)
-        .filter(|s| !s.is_empty())
-        .chain(conversation[split..].iter().cloned())
-        .collect();
+    let has_split_suffix = !split_suffix.is_empty();
+    let head: Vec<String> = if let Some(overflow_index) = overflow_whole_index {
+        conversation[..=overflow_index].iter().cloned().collect()
+    } else if has_split_suffix {
+        conversation[..split]
+            .iter()
+            .cloned()
+            .chain(std::iter::once(split_prefix).filter(|s| !s.is_empty()))
+            .collect()
+    } else {
+        conversation[..split].iter().cloned().collect()
+    };
+    let recent: Vec<String> = if let Some(overflow_index) = overflow_whole_index {
+        conversation[overflow_index.saturating_add(1)..]
+            .iter()
+            .cloned()
+            .collect()
+    } else if has_split_suffix {
+        std::iter::once(split_suffix)
+            .chain(conversation[split.saturating_add(1)..].iter().cloned())
+            .collect()
+    } else {
+        conversation[split..].iter().cloned().collect()
+    };
 
     Some(SelectedHistory {
         head: head.join("\n\n"),
@@ -545,4 +570,62 @@ pub fn parse_compaction_message(msg: &Message) -> Option<(String, String)> {
         return None;
     }
     parse_compaction_payload(msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_history_keeps_all_messages_when_within_budget() {
+        let history = sample_history(3);
+        let selected = select_history(&history, 10_000).expect("history selected");
+        assert!(selected.head.is_empty());
+        assert!(selected.recent.contains("[User]: message-0"));
+        assert!(selected.recent.contains("[User]: message-2"));
+    }
+
+    #[test]
+    fn select_history_does_not_duplicate_split_message() {
+        let history = sample_history(5);
+        let selected = select_history(&history, 9).expect("history selected");
+        assert!(
+            !selected.recent.contains("[User]: message-2"),
+            "split overflow message must not be duplicated as a full entry in recent context"
+        );
+        assert!(selected.recent.contains("[User]: message-3"));
+        assert!(
+            !selected.recent.contains("message-2\n\n[User]: message-2"),
+            "split message must not appear twice in recent context"
+        );
+    }
+
+    #[test]
+    fn select_history_keeps_whole_overflow_in_head_when_no_suffix() {
+        let history = sample_history(5);
+        let selected = select_history(&history, 8).expect("history selected");
+        assert!(selected.head.contains("[User]: message-2"));
+        assert!(!selected.recent.contains("[User]: message-2"));
+        assert!(selected.recent.contains("[User]: message-4"));
+    }
+
+    fn sample_history(count: usize) -> Vec<Message> {
+        (0..count)
+            .map(|i| Message {
+                id: MessageId::new(),
+                session_id: SessionId::new(),
+                role: MessageRole::User,
+                seq: i as i64,
+                created_at: chrono::Utc::now(),
+                parts: vec![deepseekcode_schema::message::MessagePart {
+                    kind: PartKind::Text,
+                    text: Some(format!("message-{i}")),
+                    tool_name: None,
+                    tool_input: None,
+                    tool_output: None,
+                    tool_call_id: None,
+                }],
+            })
+            .collect()
+    }
 }

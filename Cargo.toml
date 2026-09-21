@@ -131,7 +131,11 @@ lto = "thin"
 codegen-units = 1
 
 [profile.dev]
+debug = 1
 opt-level = 1
+
+[profile.dev.package."*"]
+debug = 0
 
 [workspace.metadata.dist]
 # Channel A (CLI) — see dist-workspace.toml and packaging/channels.toml

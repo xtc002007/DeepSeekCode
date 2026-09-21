@@ -10,6 +10,7 @@ pub fn tool_scope(tool_name: &str) -> String {
         "write" | "edit" | "apply_patch" => "edit".into(),
         "read" => "read".into(),
         "bash" => "bash".into(),
+        "powershell" => "bash".into(),
         "grep" => "grep".into(),
         "glob" => "glob".into(),
         "list" => "list".into(),

@@ -1,7 +1,7 @@
 use deepseekcode_types::Result;
 use std::cell::RefCell;
 use std::path::Path;
-use wasmtime::*;
+use wasmtime::{Caller, Engine, Instance, Linker, Module, Store, Val};
 
 pub struct WasmPluginRuntime;
 
@@ -9,9 +9,14 @@ pub struct WasmPluginRuntime;
 pub struct WasmHostState {
     pub plugin_id: String,
     pub transformed_config: RefCell<Option<String>>,
+    pub transform_output: RefCell<Option<String>>,
 }
 
-fn read_guest_bytes(caller: &mut Caller<'_, WasmHostState>, ptr: i32, len: i32) -> Option<Vec<u8>> {
+pub(crate) fn read_guest_bytes(
+    caller: &mut Caller<'_, WasmHostState>,
+    ptr: i32,
+    len: i32,
+) -> Option<Vec<u8>> {
     if ptr < 0 || len < 0 {
         return None;
     }
@@ -22,9 +27,153 @@ fn read_guest_bytes(caller: &mut Caller<'_, WasmHostState>, ptr: i32, len: i32) 
     data.get(start..end).map(|slice| slice.to_vec())
 }
 
+fn read_guest_i32(caller: &mut Caller<'_, WasmHostState>, ptr: i32) -> Option<i32> {
+    let bytes = read_guest_bytes(caller, ptr, 4)?;
+    let arr: [u8; 4] = bytes.try_into().ok()?;
+    Some(i32::from_le_bytes(arr))
+}
+
+fn write_guest_bytes(caller: &mut Caller<'_, WasmHostState>, ptr: i32, data: &[u8]) -> bool {
+    if ptr < 0 {
+        return false;
+    }
+    let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+        Some(memory) => memory,
+        None => return false,
+    };
+    let start = ptr as usize;
+    let end = match start.checked_add(data.len()) {
+        Some(end) => end,
+        None => return false,
+    };
+    let slice = match memory.data_mut(caller).get_mut(start..end) {
+        Some(slice) => slice,
+        None => return false,
+    };
+    slice.copy_from_slice(data);
+    true
+}
+
+fn write_guest_i32(caller: &mut Caller<'_, WasmHostState>, ptr: i32, value: i32) -> bool {
+    write_guest_bytes(caller, ptr, &value.to_le_bytes())
+}
+
 fn read_guest_utf8(caller: &mut Caller<'_, WasmHostState>, ptr: i32, len: i32) -> Option<String> {
     let bytes = read_guest_bytes(caller, ptr, len)?;
     std::str::from_utf8(&bytes).ok().map(str::to_string)
+}
+
+fn call_guest_alloc(
+    instance: &Instance,
+    store: &mut Store<WasmHostState>,
+    size: i32,
+) -> Result<i32> {
+    let alloc = instance
+        .get_func(&mut *store, "hook_alloc")
+        .ok_or_else(|| {
+            deepseekcode_types::DeepSeekCodeError::Other("wasm export not found: hook_alloc".into())
+        })?;
+    let mut results = vec![Val::I32(0)];
+    alloc
+        .call(&mut *store, &[Val::I32(size)], &mut results)
+        .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+    results
+        .first()
+        .and_then(|v| v.i32())
+        .ok_or_else(|| deepseekcode_types::DeepSeekCodeError::Other("hook_alloc failed".into()))
+}
+
+fn write_guest_bytes_store(
+    instance: &Instance,
+    store: &mut Store<WasmHostState>,
+    ptr: i32,
+    data: &[u8],
+) -> bool {
+    if ptr < 0 {
+        return false;
+    }
+    let memory = match instance
+        .get_export(&mut *store, "memory")
+        .and_then(|e| e.into_memory())
+    {
+        Some(memory) => memory,
+        None => return false,
+    };
+    let start = ptr as usize;
+    let end = match start.checked_add(data.len()) {
+        Some(end) => end,
+        None => return false,
+    };
+    let slice = match memory.data_mut(&mut *store).get_mut(start..end) {
+        Some(slice) => slice,
+        None => return false,
+    };
+    slice.copy_from_slice(data);
+    true
+}
+
+fn read_guest_cstring_store(
+    instance: &Instance,
+    store: &mut Store<WasmHostState>,
+    ptr: i32,
+    max_len: i32,
+) -> Option<String> {
+    if ptr < 0 || max_len <= 0 {
+        return None;
+    }
+    let memory = instance.get_export(&mut *store, "memory")?.into_memory()?;
+    let data = memory.data(&mut *store);
+    let start = ptr as usize;
+    let end = start.checked_add(max_len as usize)?;
+    let slice = data.get(start..end)?;
+    let nul = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+    std::str::from_utf8(&slice[..nul]).ok().map(str::to_string)
+}
+
+enum BufferHookCall {
+    Success { out_ptr: i32, out_max: i32 },
+    BufferTooSmall,
+    Failed(i32),
+}
+
+fn invoke_buffer_hook_inner(
+    instance: &Instance,
+    store: &mut Store<WasmHostState>,
+    export: &str,
+    input: &str,
+    out_max: i32,
+) -> Result<BufferHookCall> {
+    let hook = instance.get_func(&mut *store, export).ok_or_else(|| {
+        deepseekcode_types::DeepSeekCodeError::Other(format!("wasm export not found: {export}"))
+    })?;
+    let input_bytes = input.as_bytes();
+    let in_ptr = call_guest_alloc(instance, store, input_bytes.len() as i32)?;
+    if !write_guest_bytes_store(instance, store, in_ptr, input_bytes) {
+        return Err(deepseekcode_types::DeepSeekCodeError::Other(
+            "failed to write wasm hook input".into(),
+        ));
+    }
+    let out_ptr = call_guest_alloc(instance, store, out_max)?;
+    let mut results = vec![Val::I32(0)];
+    hook.call(
+        &mut *store,
+        &[
+            Val::I32(in_ptr),
+            Val::I32(input_bytes.len() as i32),
+            Val::I32(out_ptr),
+            Val::I32(out_max),
+        ],
+        &mut results,
+    )
+    .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+    let status = results.first().and_then(|v| v.i32()).ok_or_else(|| {
+        deepseekcode_types::DeepSeekCodeError::Other("wasm hook returned no status".into())
+    })?;
+    match status {
+        0 => Ok(BufferHookCall::Success { out_ptr, out_max }),
+        -2 => Ok(BufferHookCall::BufferTooSmall),
+        other => Ok(BufferHookCall::Failed(other)),
+    }
 }
 
 impl WasmPluginRuntime {
@@ -46,13 +195,36 @@ impl WasmPluginRuntime {
                  tool_ptr: i32,
                  tool_len: i32,
                  args_ptr: i32,
-                 args_len: i32|
+                 args_len: i32,
+                 out_ptr: i32,
+                 out_len_ptr: i32|
                  -> i32 {
                     let plugin_id = caller.data().plugin_id.clone();
                     let tool = read_guest_utf8(&mut caller, tool_ptr, tool_len).unwrap_or_default();
                     let args = read_guest_utf8(&mut caller, args_ptr, args_len).unwrap_or_default();
                     match crate::proxy::wasm_tool_execute(&tool, &args) {
                         Ok(result) => {
+                            if out_ptr > 0 && out_len_ptr > 0 {
+                                let capacity =
+                                    read_guest_i32(&mut caller, out_len_ptr).unwrap_or(0);
+                                if capacity < result.len() as i32 {
+                                    tracing::warn!(
+                                        target: deepseekcode_telemetry::APP,
+                                        plugin_id = %plugin_id,
+                                        tool = %tool,
+                                        capacity,
+                                        needed = result.len(),
+                                        "wasm host: tool_execute output buffer too small"
+                                    );
+                                    return -2;
+                                }
+                                if !write_guest_bytes(&mut caller, out_ptr, result.as_bytes()) {
+                                    return -1;
+                                }
+                                if !write_guest_i32(&mut caller, out_len_ptr, result.len() as i32) {
+                                    return -1;
+                                }
+                            }
                             tracing::debug!(
                                 target: deepseekcode_telemetry::APP,
                                 plugin_id = %plugin_id,
@@ -125,6 +297,41 @@ impl WasmPluginRuntime {
             )
             .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
 
+        linker
+            .func_wrap(
+                "deepseekcode",
+                "system_transform_output",
+                |mut caller: Caller<'_, WasmHostState>, ptr: i32, len: i32| -> i32 {
+                    let text = read_guest_utf8(&mut caller, ptr, len).unwrap_or_default();
+                    *caller.data().transform_output.borrow_mut() = Some(text);
+                    0
+                },
+            )
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+
+        linker
+            .func_wrap(
+                "deepseekcode",
+                "system_transform_input",
+                |mut caller: Caller<'_, WasmHostState>, ptr: i32, len_ptr: i32| -> i32 {
+                    let Some(input) = caller.data().transformed_config.borrow().clone() else {
+                        return -1;
+                    };
+                    let capacity = read_guest_i32(&mut caller, len_ptr).unwrap_or(0);
+                    if capacity < input.len() as i32 {
+                        return -2;
+                    }
+                    if !write_guest_bytes(&mut caller, ptr, input.as_bytes()) {
+                        return -1;
+                    }
+                    if !write_guest_i32(&mut caller, len_ptr, input.len() as i32) {
+                        return -1;
+                    }
+                    0
+                },
+            )
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+
         Ok(())
     }
 
@@ -142,6 +349,7 @@ impl WasmPluginRuntime {
             WasmHostState {
                 plugin_id: plugin_id.to_string(),
                 transformed_config: RefCell::new(None),
+                transform_output: RefCell::new(None),
             },
         );
         let instance = linker
@@ -153,5 +361,156 @@ impl WasmPluginRuntime {
         func.call(&mut store, &[], &mut [])
             .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
         Ok(())
+    }
+
+    pub fn transform_system_prompt(
+        module: &Module,
+        plugin_id: &str,
+        system: &[String],
+        model: &str,
+    ) -> Result<Option<Vec<String>>> {
+        let input = serde_json::json!({ "system": system, "model": model }).to_string();
+        if let Some(output) =
+            Self::invoke_buffer_hook(module, plugin_id, "chat_system_transform", &input)?
+        {
+            return Self::parse_system_transform_output(&output);
+        }
+
+        let engine = Self::create_engine();
+        let mut linker = Linker::new(&engine);
+        Self::link_host_functions(&mut linker)?;
+        let input = serde_json::json!({ "system": system, "model": model }).to_string();
+        let mut store = Store::new(
+            &engine,
+            WasmHostState {
+                plugin_id: plugin_id.to_string(),
+                transformed_config: RefCell::new(Some(input)),
+                transform_output: RefCell::new(None),
+            },
+        );
+        let instance = linker
+            .instantiate(&mut store, module)
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        let Some(func) = instance.get_func(&mut store, "chat_system_transform") else {
+            return Ok(None);
+        };
+        func.call(&mut store, &[], &mut [])
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        let Some(output) = store.data().transform_output.borrow().clone() else {
+            return Ok(None);
+        };
+        Self::parse_system_transform_output(&output)
+    }
+
+    fn parse_system_transform_output(output: &str) -> Result<Option<Vec<String>>> {
+        let value: serde_json::Value = serde_json::from_str(output).unwrap_or(serde_json::json!({
+            "system": output
+        }));
+        if let Some(lines) = value.get("system").and_then(|v| v.as_array()) {
+            return Ok(Some(
+                lines
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect(),
+            ));
+        }
+        if let Some(text) = value.as_str() {
+            return Ok(Some(vec![text.to_string()]));
+        }
+        Ok(None)
+    }
+
+    fn invoke_buffer_hook(
+        module: &Module,
+        plugin_id: &str,
+        export: &str,
+        input: &str,
+    ) -> Result<Option<String>> {
+        let engine = Self::create_engine();
+        let mut linker = Linker::new(&engine);
+        Self::link_host_functions(&mut linker)?;
+        let mut store = Store::new(
+            &engine,
+            WasmHostState {
+                plugin_id: plugin_id.to_string(),
+                transformed_config: RefCell::new(None),
+                transform_output: RefCell::new(None),
+            },
+        );
+        let instance = linker
+            .instantiate(&mut store, module)
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        if instance.get_func(&mut store, "hook_alloc").is_none()
+            || instance.get_func(&mut store, export).is_none()
+        {
+            return Ok(None);
+        }
+
+        let mut out_max = 64 * 1024;
+        for _ in 0..4 {
+            match invoke_buffer_hook_inner(&instance, &mut store, export, input, out_max)? {
+                BufferHookCall::Success { out_ptr, out_max } => {
+                    let text = read_guest_cstring_store(&instance, &mut store, out_ptr, out_max)
+                        .ok_or_else(|| {
+                            deepseekcode_types::DeepSeekCodeError::Other(
+                                "wasm hook output unreadable".into(),
+                            )
+                        })?;
+                    return Ok(Some(text));
+                }
+                BufferHookCall::BufferTooSmall => {
+                    out_max = out_max.saturating_mul(2);
+                }
+                BufferHookCall::Failed(status) => {
+                    return Err(deepseekcode_types::DeepSeekCodeError::Other(format!(
+                        "wasm hook {export} failed with status {status}"
+                    )));
+                }
+            }
+        }
+        Err(deepseekcode_types::DeepSeekCodeError::Other(format!(
+            "wasm hook {export} output buffer too small"
+        )))
+    }
+
+    /// Invoke a WASM export using the buffer ABI (`hook_alloc` + `(in_ptr, in_len, out_ptr, out_max) -> i32`).
+    pub fn invoke_json_hook(
+        module: &Module,
+        plugin_id: &str,
+        export: &str,
+        input: &serde_json::Value,
+    ) -> Result<Option<serde_json::Value>> {
+        let input_str = input.to_string();
+        if let Some(output) = Self::invoke_buffer_hook(module, plugin_id, export, &input_str)? {
+            let value =
+                serde_json::from_str(&output).unwrap_or(serde_json::json!({ "raw": output }));
+            return Ok(Some(value));
+        }
+
+        let engine = Self::create_engine();
+        let mut linker = Linker::new(&engine);
+        Self::link_host_functions(&mut linker)?;
+        let input_str = input.to_string();
+        let mut store = Store::new(
+            &engine,
+            WasmHostState {
+                plugin_id: plugin_id.to_string(),
+                transformed_config: RefCell::new(Some(input_str)),
+                transform_output: RefCell::new(None),
+            },
+        );
+        let instance = linker
+            .instantiate(&mut store, module)
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        let Some(func) = instance.get_func(&mut store, export) else {
+            return Ok(None);
+        };
+        func.call(&mut store, &[], &mut [])
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        let Some(output) = store.data().transform_output.borrow().clone() else {
+            return Ok(None);
+        };
+        let value = serde_json::from_str(&output).unwrap_or(serde_json::json!({ "raw": output }));
+        Ok(Some(value))
     }
 }

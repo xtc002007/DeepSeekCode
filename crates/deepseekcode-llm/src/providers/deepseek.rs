@@ -41,6 +41,8 @@ pub async fn generate(
     let response = http
         .post(openai::chat_endpoint(Some(resolve_base_url(base_url))))
         .bearer_auth(api_key)
+        // Non-streaming requests have no natural end; cap them outright.
+        .timeout(std::time::Duration::from_secs(300))
         .json(&body)
         .send()
         .await

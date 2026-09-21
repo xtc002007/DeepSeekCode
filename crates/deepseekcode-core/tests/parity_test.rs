@@ -328,7 +328,7 @@ async fn run_fixture(path: &PathBuf) -> Result<(), String> {
             let registry = SystemContextRegistry::new(dir.path().to_string_lossy());
             let epochs = deepseekcode_core::system_context::ContextEpochStore::new(pool.clone());
             registry
-                .ensure_epoch(&epochs, &events, session_id)
+                .ensure_epoch(&epochs, &sessions, session_id)
                 .await
                 .map_err(|e| e.to_string())?;
             let epoch = epochs.get(session_id).await.map_err(|e| e.to_string())?;
@@ -601,7 +601,7 @@ async fn run_fixture(path: &PathBuf) -> Result<(), String> {
             use deepseekcode_core::mcp::bridged_tool_name;
             assert_eq!(
                 bridged_tool_name("myserver", "read"),
-                "myserver_read",
+                "mcp_myserver_read",
                 "{}: bridged tool name mismatch",
                 fixture.name
             );

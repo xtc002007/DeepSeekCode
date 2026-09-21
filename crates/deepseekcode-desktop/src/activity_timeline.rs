@@ -227,7 +227,6 @@ impl ActivityTimelineView {
         highlighted_todo_leaf: Option<&str>,
         scroll_handle: &gpui::ScrollHandle,
         session_loading: bool,
-        has_activity_history: bool,
     ) -> impl gpui::IntoElement {
         use crate::ui::scrollbar::render_flex_scroll_viewport;
         use gpui::*;
@@ -258,7 +257,11 @@ impl ActivityTimelineView {
             .p_2();
 
         if tree.roots.is_empty() {
-            if session_loading || has_activity_history {
+            // NOTE: the spinner shows ONLY while the session is actually loading.
+            // A loaded-but-empty tree (e.g. a new session whose only event is
+            // `session.created`, which projects to no rows) must show the empty
+            // hint — never a spinner that can never resolve.
+            if session_loading {
                 content = content.child(
                     div()
                         .flex_1()
@@ -279,13 +282,12 @@ impl ActivityTimelineView {
                                 .border_1()
                                 .border_color(theme.border_faint)
                                 .child(crate::ui::loader::render_loader(&theme, px(28.)))
-                                .child(div().text_sm().text_color(theme.text_secondary).child(
-                                    if session_loading {
-                                        "正在加载会话…"
-                                    } else {
-                                        "正在更新会话记录…"
-                                    },
-                                )),
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme.text_secondary)
+                                        .child("正在加载会话…"),
+                                ),
                         ),
                 );
             } else {

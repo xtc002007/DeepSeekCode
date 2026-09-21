@@ -217,6 +217,10 @@ pub fn mutating_tool_paths(
 
     match tool_name {
         "write" | "edit" => input["path"].as_str().map(resolve).into_iter().collect(),
+        "bash" | "powershell" => {
+            let command = input["command"].as_str().unwrap_or("");
+            crate::project_context::shell_command_target_paths(command, working_directory)
+        }
         "apply_patch" => {
             let patch = input["patch"].as_str().unwrap_or("");
             let mut paths = Vec::new();
@@ -232,7 +236,10 @@ pub fn mutating_tool_paths(
 }
 
 pub fn is_mutating_tool(name: &str) -> bool {
-    matches!(name, "write" | "edit" | "apply_patch")
+    matches!(
+        name,
+        "write" | "edit" | "apply_patch" | "bash" | "powershell"
+    )
 }
 
 #[derive(sqlx::FromRow)]
@@ -282,6 +289,16 @@ mod tests {
         let patch = "--- a/foo.rs\n+++ b/foo.rs\n--- a/bar.rs\n+++ b/bar.rs\n";
         let paths = mutating_tool_paths("apply_patch", &json!({"patch": patch}), "/proj");
         assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn mutating_tool_paths_extracts_bash_redirect() {
+        let paths = mutating_tool_paths(
+            "bash",
+            &json!({"command": "echo hello > src/out.txt"}),
+            "/proj",
+        );
+        assert_eq!(paths, vec![PathBuf::from("/proj/src/out.txt")]);
     }
 
     #[tokio::test]

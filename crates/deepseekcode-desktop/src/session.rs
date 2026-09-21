@@ -23,7 +23,6 @@ pub fn render_activity_timeline(
     highlighted_todo_leaf: Option<&str>,
     scroll_handle: &ScrollHandle,
     session_loading: bool,
-    has_activity_history: bool,
 ) -> impl IntoElement {
     crate::activity_timeline::ActivityTimelineView::render(
         cx,
@@ -34,6 +33,5 @@ pub fn render_activity_timeline(
         highlighted_todo_leaf,
         scroll_handle,
         session_loading,
-        has_activity_history,
     )
 }

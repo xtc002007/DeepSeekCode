@@ -13,7 +13,9 @@ use crate::shell_env;
 
 use super::display::compute_text_diff_stats;
 use super::registry::Tool;
-use super::services::{current_services, emit_todo_updated};
+use super::services::{
+    current_services, emit_todo_updated, ensure_not_cancelled, run_blocking_if_cancelled,
+};
 
 macro_rules! simple_tool {
     ($name:ident, $tool_name:expr, $desc:expr, $schema:expr) => {
@@ -136,25 +138,31 @@ impl Tool for WriteTool {
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
         let path = resolve_path(ctx, input["path"].as_str().unwrap_or(""))?;
-        let content = input["content"].as_str().unwrap_or("");
-        let old = std::fs::read_to_string(&path).unwrap_or_default();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| ToolFailure {
+        let content = input["content"].as_str().unwrap_or("").to_string();
+        let path_display = path.clone();
+        run_blocking_if_cancelled(move || {
+            ensure_not_cancelled()?;
+            let old = std::fs::read_to_string(&path).unwrap_or_default();
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| ToolFailure {
+                    message: e.to_string(),
+                    retryable: false,
+                })?;
+            }
+            ensure_not_cancelled()?;
+            std::fs::write(&path, &content).map_err(|e| ToolFailure {
                 message: e.to_string(),
                 retryable: false,
             })?;
-        }
-        std::fs::write(&path, content).map_err(|e| ToolFailure {
-            message: e.to_string(),
-            retryable: false,
-        })?;
-        let diff_stats = compute_text_diff_stats(&old, content);
-        Ok(json!({
-            "path": path.display().to_string(),
-            "written": path.display().to_string(),
-            "bytes": content.len(),
-            "diff_stats": diff_stats,
-        }))
+            let diff_stats = compute_text_diff_stats(&old, &content);
+            Ok(json!({
+                "path": path_display.display().to_string(),
+                "written": path_display.display().to_string(),
+                "bytes": content.len(),
+                "diff_stats": diff_stats,
+            }))
+        })
+        .await
     }
 }
 
@@ -198,30 +206,36 @@ impl Tool for EditTool {
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
         let path = resolve_path(ctx, input["path"].as_str().unwrap_or(""))?;
-        let old = input["old_string"].as_str().unwrap_or("");
-        let new = input["new_string"].as_str().unwrap_or("");
-        let content = std::fs::read_to_string(&path).map_err(|e| ToolFailure {
-            message: e.to_string(),
-            retryable: false,
-        })?;
-        let count = content.matches(old).count();
-        if count != 1 {
-            return Err(ToolFailure {
-                message: format!("expected 1 match, found {count}"),
-                retryable: true,
-            });
-        }
-        let updated = content.replacen(old, new, 1);
-        std::fs::write(&path, &updated).map_err(|e| ToolFailure {
-            message: e.to_string(),
-            retryable: false,
-        })?;
-        let diff_stats = compute_text_diff_stats(&content, &updated);
-        Ok(json!({
-            "path": path.display().to_string(),
-            "replaced": true,
-            "diff_stats": diff_stats,
-        }))
+        let old_string = input["old_string"].as_str().unwrap_or("").to_string();
+        let new_string = input["new_string"].as_str().unwrap_or("").to_string();
+        let path_display = path.clone();
+        run_blocking_if_cancelled(move || {
+            ensure_not_cancelled()?;
+            let content = std::fs::read_to_string(&path).map_err(|e| ToolFailure {
+                message: e.to_string(),
+                retryable: false,
+            })?;
+            let count = content.matches(old_string.as_str()).count();
+            if count != 1 {
+                return Err(ToolFailure {
+                    message: format!("expected 1 match, found {count}"),
+                    retryable: true,
+                });
+            }
+            let updated = content.replacen(old_string.as_str(), new_string.as_str(), 1);
+            ensure_not_cancelled()?;
+            std::fs::write(&path, &updated).map_err(|e| ToolFailure {
+                message: e.to_string(),
+                retryable: false,
+            })?;
+            let diff_stats = compute_text_diff_stats(&content, &updated);
+            Ok(json!({
+                "path": path_display.display().to_string(),
+                "replaced": true,
+                "diff_stats": diff_stats,
+            }))
+        })
+        .await
     }
 }
 
@@ -463,7 +477,11 @@ impl Tool for BashTool {
 
         let mut cmd = if let Some(shell) = &self.shell {
             let mut c = Command::new(shell);
-            if cfg!(windows) {
+            if is_powershell(shell) {
+                c.args(["-NoProfile", "-NonInteractive", "-Command", &command]);
+            } else if is_posix_style_shell(shell) {
+                c.args(["-lc", &command]);
+            } else if cfg!(windows) {
                 c.args(["/C", &command]);
             } else {
                 c.args(["-lc", &command]);
@@ -487,17 +505,23 @@ impl Tool for BashTool {
         };
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        cmd.kill_on_drop(true);
         crate::process::hide_console_async(&mut cmd);
 
-        let output = timeout(
+        let output = match timeout(
             Duration::from_millis(timeout_ms),
             run_command_streaming(cmd, ctx),
         )
         .await
-        .map_err(|_| ToolFailure {
-            message: format!("command timed out after {timeout_ms}ms"),
-            retryable: true,
-        })??;
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(ToolFailure {
+                    message: format!("command timed out after {timeout_ms}ms"),
+                    retryable: true,
+                });
+            }
+        };
 
         let _ = crate::project_context::ensure_agents_md(&ctx.working_directory);
         Ok(output)
@@ -508,45 +532,88 @@ async fn run_command_streaming(
     mut cmd: Command,
     ctx: &ToolContext,
 ) -> std::result::Result<Value, ToolFailure> {
-    crate::process::hide_console_async(&mut cmd);
+    cmd.kill_on_drop(true);
+    crate::process::prepare_tracked_command_async(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| ToolFailure {
         message: e.to_string(),
         retryable: true,
     })?;
+    // RAII: unregisters on every exit path — including future cancellation by
+    // the timeout wrapper, which would otherwise leave a stale PID behind.
+    let _pid_guard = child
+        .id()
+        .map(|pid| crate::process::SessionChildPidGuard::register(ctx.session_id, pid));
     let services = current_services();
+    let cancel_token = services.as_ref().and_then(|s| s.cancel.clone());
+
     let mut stdout = String::new();
     let mut stderr = String::new();
+    // Read stdout and stderr CONCURRENTLY: draining them sequentially can
+    // deadlock when the child fills the stderr pipe while we are still
+    // waiting for stdout EOF.
+    let mut out_lines = child.stdout.take().map(|out| BufReader::new(out).lines());
+    let mut err_lines = child.stderr.take().map(|err| BufReader::new(err).lines());
+    let mut killed = false;
 
-    if let Some(out) = child.stdout.take() {
-        let mut lines = BufReader::new(out).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if !stdout.is_empty() {
-                stdout.push('\n');
+    loop {
+        tokio::select! {
+            biased;
+            _ = async {
+                    match &cancel_token {
+                        Some(token) => token.cancelled().await,
+                        None => std::future::pending::<()>().await,
+                    }
+                }, if !killed && cancel_token.is_some() => {
+                let _ = child.kill().await;
+                killed = true;
             }
-            stdout.push_str(&line);
-            if let Some(services) = &services {
-                if let Some(sink) = services.progress.as_ref() {
-                    let _ = sink
-                        .progress(ctx.session_id, &ctx.tool_call_id, "bash", &line, "stdout")
-                        .await;
+            line = async {
+                match out_lines.as_mut() {
+                    Some(lines) => lines.next_line().await,
+                    None => Ok(None),
+                }
+            }, if out_lines.is_some() => {
+                match line {
+                    Ok(Some(line)) => {
+                        if !stdout.is_empty() {
+                            stdout.push('\n');
+                        }
+                        stdout.push_str(&line);
+                        if let Some(services) = &services {
+                            if let Some(sink) = services.progress.as_ref() {
+                                let _ = sink
+                                    .progress(ctx.session_id, &ctx.tool_call_id, "bash", &line, "stdout")
+                                    .await;
+                            }
+                        }
+                    }
+                    _ => out_lines = None,
                 }
             }
-        }
-    }
-    if let Some(err) = child.stderr.take() {
-        let mut lines = BufReader::new(err).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if !stderr.is_empty() {
-                stderr.push('\n');
-            }
-            stderr.push_str(&line);
-            if let Some(services) = &services {
-                if let Some(sink) = services.progress.as_ref() {
-                    let _ = sink
-                        .progress(ctx.session_id, &ctx.tool_call_id, "bash", &line, "stderr")
-                        .await;
+            line = async {
+                match err_lines.as_mut() {
+                    Some(lines) => lines.next_line().await,
+                    None => Ok(None),
+                }
+            }, if err_lines.is_some() => {
+                match line {
+                    Ok(Some(line)) => {
+                        if !stderr.is_empty() {
+                            stderr.push('\n');
+                        }
+                        stderr.push_str(&line);
+                        if let Some(services) = &services {
+                            if let Some(sink) = services.progress.as_ref() {
+                                let _ = sink
+                                    .progress(ctx.session_id, &ctx.tool_call_id, "bash", &line, "stderr")
+                                    .await;
+                            }
+                        }
+                    }
+                    _ => err_lines = None,
                 }
             }
+            else => break,
         }
     }
 
@@ -554,6 +621,7 @@ async fn run_command_streaming(
         message: e.to_string(),
         retryable: true,
     })?;
+    drop(_pid_guard);
     Ok(json!({
         "exit_code": status.code(),
         "stdout": stdout,
@@ -585,68 +653,52 @@ impl Tool for ApplyPatchTool {
         input: Value,
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
-        let patch = input["patch"].as_str().unwrap_or("");
-        let mut applied = Vec::new();
-        let mut current_file: Option<PathBuf> = None;
-        let mut file_content = String::new();
-        let mut old_contents: HashMap<String, String> = HashMap::new();
-        let mut total_added = 0u32;
-        let mut total_removed = 0u32;
+        ensure_not_cancelled()?;
+        let patch = input["patch"].as_str().unwrap_or("").to_string();
+        let working_directory = ctx.working_directory.clone();
+        run_blocking_if_cancelled(move || {
+            let file_patches = parse_unified_patch(&patch)?;
+            let mut applied = Vec::new();
+            let mut total_added = 0u32;
+            let mut total_removed = 0u32;
 
-        for line in patch.lines() {
-            if line.starts_with("+++ ") || line.starts_with("--- ") {
-                if let Some(path) = current_file.take() {
-                    let old = old_contents
-                        .get(&path.display().to_string())
-                        .cloned()
-                        .unwrap_or_default();
-                    let stats = compute_text_diff_stats(&old, &file_content);
-                    total_added += stats.added;
-                    total_removed += stats.removed;
-                    std::fs::write(&path, &file_content).map_err(|e| ToolFailure {
+            for (rel_path, hunks) in file_patches {
+                ensure_not_cancelled()?;
+                let path = {
+                    let base = PathBuf::from(&working_directory);
+                    let p = PathBuf::from(&rel_path);
+                    if p.is_absolute() {
+                        p
+                    } else {
+                        base.join(p)
+                    }
+                };
+                let old = std::fs::read_to_string(&path).unwrap_or_default();
+                let updated = apply_hunks_to_content(&old, &hunks)?;
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| ToolFailure {
                         message: e.to_string(),
                         retryable: false,
                     })?;
-                    applied.push(path.display().to_string());
                 }
-                if line.starts_with("+++ b/") {
-                    let rel = line.trim_start_matches("+++ b/");
-                    current_file = Some(resolve_path(ctx, rel)?);
-                    if let Some(path) = &current_file {
-                        let old = std::fs::read_to_string(path).unwrap_or_default();
-                        old_contents.insert(path.display().to_string(), old.clone());
-                        file_content = old;
-                    }
-                }
-            } else if line.starts_with('+') && !line.starts_with("+++") {
-                file_content.push_str(line.trim_start_matches('+'));
-                file_content.push('\n');
-            } else if line.starts_with('-') && !line.starts_with("---") {
-                // skip removed lines in simplified apply
-            } else if line.starts_with(' ') {
-                file_content.push_str(line.trim_start_matches(' '));
-                file_content.push('\n');
+                ensure_not_cancelled()?;
+                std::fs::write(&path, &updated).map_err(|e| ToolFailure {
+                    message: e.to_string(),
+                    retryable: false,
+                })?;
+                let stats = compute_text_diff_stats(&old, &updated);
+                total_added += stats.added;
+                total_removed += stats.removed;
+                applied.push(path.display().to_string());
             }
-        }
-        if let Some(path) = current_file {
-            let old = old_contents
-                .get(&path.display().to_string())
-                .cloned()
-                .unwrap_or_default();
-            let stats = compute_text_diff_stats(&old, &file_content);
-            total_added += stats.added;
-            total_removed += stats.removed;
-            std::fs::write(&path, &file_content).map_err(|e| ToolFailure {
-                message: e.to_string(),
-                retryable: false,
-            })?;
-            applied.push(path.display().to_string());
-        }
-        Ok(json!({
-            "applied": !applied.is_empty(),
-            "files": applied,
-            "diff_stats": { "added": total_added, "removed": total_removed },
-        }))
+
+            Ok(json!({
+                "applied": !applied.is_empty(),
+                "files": applied,
+                "diff_stats": { "added": total_added, "removed": total_removed },
+            }))
+        })
+        .await
     }
 }
 
@@ -996,6 +1048,228 @@ pub(crate) fn resolve_path(
     crate::project_context::validate_project_path(&ctx.working_directory, resolved)
 }
 
+fn shell_base_name(shell: &str) -> String {
+    let lower = shell.to_lowercase();
+    lower
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&lower)
+        .to_string()
+}
+
+fn is_powershell(shell: &str) -> bool {
+    let name = shell_base_name(shell);
+    name.contains("powershell") || name == "pwsh" || name == "pwsh.exe"
+}
+
+/// Shells that accept `-lc` (login + command) argument style.
+fn is_posix_style_shell(shell: &str) -> bool {
+    matches!(
+        shell_base_name(shell).as_str(),
+        "bash" | "sh" | "zsh" | "dash" | "ksh"
+    )
+}
+
+#[derive(Debug, Clone)]
+struct PatchHunk {
+    old_start: usize,
+    lines: Vec<(char, String)>,
+}
+
+fn parse_unified_patch(
+    patch: &str,
+) -> std::result::Result<Vec<(String, Vec<PatchHunk>)>, ToolFailure> {
+    let mut files: Vec<(String, Vec<PatchHunk>)> = Vec::new();
+    let mut current_file: Option<String> = None;
+    let mut current_hunks: Vec<PatchHunk> = Vec::new();
+    let mut current_hunk: Option<PatchHunk> = None;
+
+    let flush_file =
+        |file: Option<String>, hunks: Vec<PatchHunk>, files: &mut Vec<(String, Vec<PatchHunk>)>| {
+            if let Some(file) = file {
+                if !hunks.is_empty() {
+                    files.push((file, hunks));
+                }
+            }
+        };
+
+    for line in patch.lines() {
+        if line.starts_with("+++ ") {
+            // The in-progress hunk still belongs to the previous file; flush it
+            // together with the file, otherwise it would be misattributed to the
+            // next file (or silently dropped).
+            if let Some(hunk) = current_hunk.take() {
+                current_hunks.push(hunk);
+            }
+            flush_file(
+                current_file.take(),
+                std::mem::take(&mut current_hunks),
+                &mut files,
+            );
+            let rel = line
+                .trim_start_matches("+++ ")
+                .trim_start_matches("b/")
+                .trim_start_matches("a/")
+                .to_string();
+            current_file = Some(rel);
+            continue;
+        }
+        if line.starts_with("--- ") || line.starts_with("diff ") || line.starts_with("index ") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("@@ ") {
+            if let Some(hunk) = current_hunk.take() {
+                current_hunks.push(hunk);
+            }
+            let header = rest.split(" @@").next().unwrap_or(rest);
+            let old_start = header
+                .split_whitespace()
+                .next()
+                .and_then(|part| part.strip_prefix('-'))
+                .and_then(|range| range.split(',').next())
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(1);
+            current_hunk = Some(PatchHunk {
+                old_start,
+                lines: Vec::new(),
+            });
+            continue;
+        }
+        if let Some(hunk) = current_hunk.as_mut() {
+            if let Some(first) = line.chars().next() {
+                if matches!(first, ' ' | '-' | '+') {
+                    hunk.lines.push((first, line[1..].to_string()));
+                }
+            }
+        }
+    }
+
+    if let Some(hunk) = current_hunk.take() {
+        current_hunks.push(hunk);
+    }
+    flush_file(current_file.take(), current_hunks, &mut files);
+
+    if files.is_empty() {
+        return Err(ToolFailure {
+            message: "patch contained no applicable hunks".into(),
+            retryable: true,
+        });
+    }
+    Ok(files)
+}
+
+fn apply_hunks_to_content(
+    content: &str,
+    hunks: &[PatchHunk],
+) -> std::result::Result<String, ToolFailure> {
+    let mut lines: Vec<String> = if content.is_empty() {
+        Vec::new()
+    } else {
+        content.lines().map(String::from).collect()
+    };
+    let had_trailing_newline = content.ends_with('\n');
+
+    for hunk in hunks {
+        let pos = find_hunk_position(&lines, hunk)?;
+        let mut offset = pos;
+        for (kind, text) in &hunk.lines {
+            match kind {
+                ' ' => {
+                    if lines.get(offset).map(String::as_str) != Some(text.as_str()) {
+                        return Err(ToolFailure {
+                            message: format!("patch context mismatch at line {}", offset + 1),
+                            retryable: true,
+                        });
+                    }
+                    offset += 1;
+                }
+                '-' => {
+                    if lines.get(offset).map(String::as_str) != Some(text.as_str()) {
+                        return Err(ToolFailure {
+                            message: format!("patch remove mismatch at line {}", offset + 1),
+                            retryable: true,
+                        });
+                    }
+                    lines.remove(offset);
+                }
+                '+' => {
+                    lines.insert(offset, text.clone());
+                    offset += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = lines.join("\n");
+    if had_trailing_newline || out.is_empty() {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn find_hunk_position(
+    lines: &[String],
+    hunk: &PatchHunk,
+) -> std::result::Result<usize, ToolFailure> {
+    let context: Vec<&str> = hunk
+        .lines
+        .iter()
+        .filter_map(|(kind, text)| {
+            if *kind == ' ' {
+                Some(text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if context.is_empty() {
+        return Ok(hunk.old_start.saturating_sub(1));
+    }
+
+    let start = hunk.old_start.saturating_sub(1);
+    let max_start = lines.len();
+    for delta in 0..=max_start {
+        for sign in [0isize, -1, 1] {
+            let candidate = if sign == 0 {
+                start + delta
+            } else if sign < 0 {
+                start.saturating_sub(delta)
+            } else {
+                start + delta
+            };
+            if candidate > lines.len() {
+                continue;
+            }
+            if hunk_matches_at(lines, hunk, candidate) {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    Err(ToolFailure {
+        message: format!("unable to locate patch hunk near line {}", hunk.old_start),
+        retryable: true,
+    })
+}
+
+fn hunk_matches_at(lines: &[String], hunk: &PatchHunk, pos: usize) -> bool {
+    let mut offset = pos;
+    for (kind, text) in &hunk.lines {
+        match kind {
+            ' ' | '-' => {
+                if lines.get(offset).map(String::as_str) != Some(text.as_str()) {
+                    return false;
+                }
+                offset += 1;
+            }
+            '+' => {}
+            _ => {}
+        }
+    }
+    true
+}
+
 /// On Windows, dev-server commands block the bash tool until timeout. Run them detached.
 fn prepare_background_bash_command(command: &str) -> String {
     if !cfg!(windows) {
@@ -1015,5 +1289,62 @@ fn prepare_background_bash_command(command: &str) -> String {
         format!("start /B {command}")
     } else {
         command.to_string()
+    }
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+
+    #[test]
+    fn parse_unified_patch_keeps_last_hunk_of_each_file() {
+        let patch = "\
+--- a/one.txt
++++ b/one.txt
+@@ -1,1 +1,1 @@
+-old one
++new one
+--- a/two.txt
++++ b/two.txt
+@@ -1,1 +1,1 @@
+-old two
++new two
+";
+        let files = parse_unified_patch(patch).expect("patch parsed");
+        assert_eq!(files.len(), 2, "both files must be present: {files:?}");
+        assert_eq!(files[0].0, "one.txt");
+        assert_eq!(
+            files[0].1.len(),
+            1,
+            "first file must keep its hunk: {:?}",
+            files[0].1
+        );
+        assert_eq!(files[1].0, "two.txt");
+        assert_eq!(files[1].1.len(), 1);
+        assert_eq!(
+            files[1].1[0].lines,
+            vec![('-', "old two".to_string()), ('+', "new two".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_unified_patch_applies_multi_file_content() {
+        let patch = "\
+--- a/one.txt
++++ b/one.txt
+@@ -1,1 +1,1 @@
+-old one
++new one
+--- a/two.txt
++++ b/two.txt
+@@ -1,1 +1,1 @@
+-old two
++new two
+";
+        let files = parse_unified_patch(patch).expect("patch parsed");
+        let one = apply_hunks_to_content("old one\n", &files[0].1).unwrap();
+        assert_eq!(one, "new one\n");
+        let two = apply_hunks_to_content("old two\n", &files[1].1).unwrap();
+        assert_eq!(two, "new two\n");
     }
 }

@@ -26,7 +26,6 @@ pub struct SessionService {
     pub(crate) sessions: SessionStore,
     pub(crate) events: Arc<EventStore>,
     execution: Arc<SessionExecution>,
-    active: Arc<RwLock<HashSet<SessionId>>>,
     config: DeepSeekCodeConfig,
     project_dir: String,
     providers: Arc<ProviderCatalog>,
@@ -43,24 +42,31 @@ impl SessionService {
         events: Arc<EventStore>,
         mcp: Arc<McpConnectionPool>,
         hooks: Arc<HookRegistry>,
-        active_session_id: Option<Arc<std::sync::RwLock<Option<deepseekcode_types::SessionId>>>>,
+        active_session_ids: Option<
+            Arc<std::sync::RwLock<std::collections::HashSet<deepseekcode_types::SessionId>>>,
+        >,
     ) -> Self {
         let pool = db.pool().clone();
+        let active = Arc::new(RwLock::new(HashSet::new()));
+        let needs_rerun = Arc::new(RwLock::new(HashSet::new()));
+        let execution = Arc::new(SessionExecution::new(
+            db.clone(),
+            config.clone(),
+            project_dir.clone(),
+            permissions,
+            providers.clone(),
+            events.clone(),
+            mcp,
+            hooks,
+            active_session_ids,
+            SessionStore::new(pool.clone()),
+            active.clone(),
+            needs_rerun.clone(),
+        ));
         Self {
             sessions: SessionStore::new(pool.clone()),
             events: events.clone(),
-            execution: Arc::new(SessionExecution::new(
-                db.clone(),
-                config.clone(),
-                project_dir.clone(),
-                permissions,
-                providers.clone(),
-                events,
-                mcp,
-                hooks,
-                active_session_id,
-            )),
-            active: Arc::new(RwLock::new(HashSet::new())),
+            execution,
             db,
             config,
             project_dir,
@@ -202,7 +208,11 @@ impl SessionService {
     pub async fn interrupt(&self, session_id: SessionId) -> Result<()> {
         self.ensure_session_in_location(session_id).await?;
         self.execution.drop_runner(session_id).await;
-        self.active.write().await.remove(&session_id);
+        self.execution
+            .drain_needs_rerun
+            .write()
+            .await
+            .remove(&session_id);
         self.events
             .append(EventKind::SessionInterrupted, Some(session_id), json!({}))
             .await?;
@@ -217,12 +227,23 @@ impl SessionService {
     pub async fn delete(&self, session_id: SessionId) -> Result<()> {
         self.ensure_session_in_location(session_id).await?;
         self.execution.drop_runner(session_id).await;
-        self.active.write().await.remove(&session_id);
+        self.execution
+            .drain_needs_rerun
+            .write()
+            .await
+            .remove(&session_id);
         self.sessions.delete(session_id).await
     }
 
     pub async fn active(&self) -> Result<Vec<SessionId>> {
-        Ok(self.active.read().await.iter().copied().collect())
+        Ok(self
+            .execution
+            .drain_active
+            .read()
+            .await
+            .iter()
+            .copied()
+            .collect())
     }
 
     pub async fn list(&self) -> Result<Vec<Session>> {
@@ -300,6 +321,10 @@ impl SessionService {
                     .await?;
             }
         }
+
+        let epochs = crate::system_context::ContextEpochStore::new(self.db.pool().clone());
+        let baseline_seq = self.sessions.latest_message_seq(new_id).await?;
+        epochs.copy_epoch(session_id, new_id, baseline_seq).await?;
 
         self.events
             .append(
@@ -480,7 +505,13 @@ impl SessionService {
         message_id: MessageId,
     ) -> Result<super::revert::StagedRevert> {
         self.ensure_session_in_location(session_id).await?;
-        if self.active.read().await.contains(&session_id) {
+        if self
+            .execution
+            .drain_active
+            .read()
+            .await
+            .contains(&session_id)
+        {
             return Err(deepseekcode_types::DeepSeekCodeError::Other(
                 "session is busy".into(),
             ));
@@ -498,7 +529,13 @@ impl SessionService {
         session_id: SessionId,
     ) -> Result<super::revert::StagedRevert> {
         self.ensure_session_in_location(session_id).await?;
-        if self.active.read().await.contains(&session_id) {
+        if self
+            .execution
+            .drain_active
+            .read()
+            .await
+            .contains(&session_id)
+        {
             return Err(deepseekcode_types::DeepSeekCodeError::Other(
                 "session is busy".into(),
             ));
@@ -533,7 +570,7 @@ impl SessionService {
 
         let registry = SystemContextRegistry::with_config(&new_directory, &self.config);
         registry
-            .ensure_epoch(&epochs, self.events.as_ref(), session_id)
+            .ensure_epoch(&epochs, &self.sessions, session_id)
             .await?;
 
         self.events
@@ -553,10 +590,36 @@ impl SessionService {
         model_id: String,
         provider_id: String,
     ) -> Result<()> {
-        self.ensure_session_in_location(session_id).await?;
+        let session = self.ensure_session_in_location(session_id).await?;
+        let changed = session.agent != agent
+            || session.model_id.as_deref() != Some(model_id.as_str())
+            || session.provider_id.as_deref() != Some(provider_id.as_str());
+        if !changed {
+            return Ok(());
+        }
         self.execution.drop_runner(session_id).await;
         self.sessions
             .update_session_model(session_id, agent, &model_id, &provider_id)
+            .await
+    }
+
+    pub async fn update_agent_only(
+        &self,
+        session_id: SessionId,
+        agent: deepseekcode_schema::agent::AgentKind,
+    ) -> Result<()> {
+        let session = self.ensure_session_in_location(session_id).await?;
+        let model_id = session
+            .model_id
+            .clone()
+            .or_else(|| self.config.model.as_ref().and_then(|m| m.id.clone()))
+            .unwrap_or_else(|| "gpt-4o-mini".into());
+        let provider_id = session
+            .provider_id
+            .clone()
+            .or_else(|| self.config.model.as_ref().and_then(|m| m.provider.clone()))
+            .unwrap_or_else(|| "openai".into());
+        self.update_model(session_id, agent, model_id, provider_id)
             .await
     }
 
@@ -597,62 +660,7 @@ impl SessionService {
     }
 
     async fn wake(&self, session_id: SessionId) -> Result<()> {
-        {
-            let mut active = self.active.write().await;
-            if !active.insert(session_id) {
-                tracing::debug!(
-                    target: deepseekcode_telemetry::SESSION,
-                    session_id = %session_id,
-                    "session already draining"
-                );
-                return Ok(());
-            }
-        }
-        let execution = self.execution.clone();
-        let active = self.active.clone();
-        let events = self.events.clone();
-        tokio::spawn(async move {
-            let result = execution.run(session_id).await;
-            if let Err(e) = result {
-                // User interrupt already emits SessionInterrupted in `interrupt()`.
-                if matches!(e, deepseekcode_types::DeepSeekCodeError::SessionInterrupted) {
-                    tracing::debug!(
-                        target: deepseekcode_telemetry::SESSION,
-                        session_id = %session_id,
-                        "session drain interrupted"
-                    );
-                } else {
-                    tracing::error!(
-                        target: deepseekcode_telemetry::SESSION,
-                        session_id = %session_id,
-                        error = %e,
-                        "session drain error"
-                    );
-                    let _ = events
-                        .append(
-                            EventKind::SessionInterrupted,
-                            Some(session_id),
-                            json!({ "error": e.to_string() }),
-                        )
-                        .await;
-                }
-            } else {
-                let _ = events
-                    .append(EventKind::SessionIdle, Some(session_id), json!({}))
-                    .await;
-                if let Ok(seq) = events.latest_seq(session_id).await {
-                    let _ = events
-                        .append(
-                            EventKind::ActivityUpdated,
-                            Some(session_id),
-                            json!({ "since_seq": seq }),
-                        )
-                        .await;
-                }
-            }
-            active.write().await.remove(&session_id);
-        });
-        Ok(())
+        self.execution.wake(session_id).await
     }
 }
 

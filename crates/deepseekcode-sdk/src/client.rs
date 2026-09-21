@@ -571,7 +571,21 @@ impl DeepSeekCodeClient {
 
     pub async fn pty_ticket(&self, pty_id: &str) -> Result<(String, u64)> {
         let path = format!("/api/v1/pty/{pty_id}/ticket");
-        let resp: serde_json::Value = self.get(&path).await?;
+        let mut req = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("x-deepseekcode-directory", &self.directory);
+        if self.auth.is_some() {
+            req = req.header("x-deepseekcode-ticket", "1");
+        }
+        if let Some((user, pass)) = &self.auth {
+            req = req.basic_auth(user, Some(pass));
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        let resp = self.handle_response::<serde_json::Value>(resp).await?;
         let ticket = resp["ticket"]
             .as_str()
             .ok_or_else(|| {
@@ -631,7 +645,7 @@ impl DeepSeekCodeClient {
         })
     }
 
-    pub async fn fs_write(&self, path: &str, content: &str) -> Result<()> {
+    pub async fn fs_write(&self, session_id: SessionId, path: &str, content: &str) -> Result<()> {
         let body = serde_json::json!({
             "path": path,
             "content": content,
@@ -640,6 +654,7 @@ impl DeepSeekCodeClient {
             .http
             .put(format!("{}{}", self.base_url, "/api/v1/fs/file"))
             .header("x-deepseekcode-directory", &self.directory)
+            .header("x-deepseekcode-session-id", session_id.to_string())
             .json(&body);
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
@@ -714,6 +729,32 @@ impl DeepSeekCodeClient {
         Ok(())
     }
 
+    pub async fn destroy_pty(&self, pty_id: &str) -> Result<()> {
+        let path = format!("/api/v1/pty/{pty_id}");
+        let mut req = self
+            .http
+            .delete(format!("{}{}", self.base_url, path))
+            .header("x-deepseekcode-directory", &self.directory);
+        if let Some((user, pass)) = &self.auth {
+            req = req.basic_auth(user, Some(pass));
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(deepseekcode_types::DeepSeekCodeError::Other(
+                if text.is_empty() {
+                    "destroy_pty failed".into()
+                } else {
+                    text
+                },
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn compact_session(&self, session_id: SessionId) -> Result<()> {
         let path = format!("/api/v1/session/{session_id}/compact");
         let _: serde_json::Value = self.post_empty(&path).await?;
@@ -768,13 +809,16 @@ impl DeepSeekCodeClient {
                         return None;
                     }
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
-                        if value.get("error").and_then(|v| v.as_str()) == Some("gap_too_large") {
-                            let head = value
-                                .get("head")
-                                .and_then(|v| v.as_i64())
-                                .unwrap_or(since_seq);
-                            let limit = value.get("limit").and_then(|v| v.as_i64()).unwrap_or(0);
-                            return Some(EventStreamItem::Gap { head, limit });
+                        if let Some(error) = value.get("error").and_then(|v| v.as_str()) {
+                            if matches!(error, "gap_too_large" | "gap") {
+                                let head = value
+                                    .get("head")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(since_seq);
+                                let limit =
+                                    value.get("limit").and_then(|v| v.as_i64()).unwrap_or(0);
+                                return Some(EventStreamItem::Gap { head, limit });
+                            }
                         }
                     }
                     serde_json::from_str::<EventEnvelope>(&data)

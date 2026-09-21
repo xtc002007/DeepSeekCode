@@ -8,6 +8,8 @@ pub struct RevertDockState {
     pub open: bool,
     pub staged_message_id: Option<String>,
     pub diff_preview: String,
+    pub warning: Option<String>,
+    pub error: Option<String>,
 }
 
 pub struct RevertDock;
@@ -23,8 +25,15 @@ impl RevertDock {
         }
 
         let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
-        let stage_enabled = selected_message_id.is_some();
-        let status_line = if let Some(staged) = &state.staged_message_id {
+        let has_staged = state.staged_message_id.is_some();
+        let stage_enabled = selected_message_id.is_some() && !has_staged;
+        let commit_enabled = has_staged;
+        let clear_enabled = has_staged;
+        let status_line = if let Some(error) = &state.error {
+            error.clone()
+        } else if let Some(warning) = &state.warning {
+            warning.clone()
+        } else if let Some(staged) = &state.staged_message_id {
             format!("Staged at {staged} — review diff then commit or clear.")
         } else if let Some(id) = selected_message_id {
             format!("Selected {id} — click Stage to preview file changes.")
@@ -57,7 +66,11 @@ impl RevertDock {
             .child(
                 div()
                     .text_xs()
-                    .text_color(if stage_enabled {
+                    .text_color(if state.error.is_some() {
+                        theme.error
+                    } else if state.warning.is_some() {
+                        theme.warning
+                    } else if stage_enabled || has_staged {
                         theme.text_secondary
                     } else {
                         theme.warning
@@ -92,14 +105,14 @@ impl RevertDock {
                         cx,
                         "Clear",
                         RevertAction::Clear,
-                        true,
+                        clear_enabled,
                         &theme,
                     ))
                     .child(revert_button(
                         cx,
                         "Commit",
                         RevertAction::Commit,
-                        true,
+                        commit_enabled,
                         &theme,
                     ))
                     .child(

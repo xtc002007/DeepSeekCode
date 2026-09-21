@@ -112,4 +112,6 @@ pub struct RevertState {
     pub staged_message_id: MessageId,
     pub staged_at: DateTime<Utc>,
     pub files: Vec<RevertFileEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }

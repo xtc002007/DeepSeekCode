@@ -51,9 +51,7 @@ use crate::plan_session_strip::PlanSessionStrip;
 use crate::preferences::{load_preferences, save_preferences, AppPreferences, ThemeId};
 use crate::revert::{RevertAction, RevertDock, RevertDockState};
 use crate::right_panel::RightPanelView;
-use crate::session_activity::{
-    push_session_event, truncate_session_events_on_compaction, SessionActivityStore,
-};
+use crate::session_activity::{push_session_event, truncate_session_events_on_compaction};
 use crate::session_header::SessionHeaderView;
 use crate::settings::{
     PolicyRuleRow, SettingsCatalog, SettingsSection, SettingsView, POLICY_SCOPES,
@@ -160,6 +158,9 @@ pub struct WorkspaceView {
     pub(crate) editor: EditorState,
     editor_tabs: Vec<String>,
     active_editor_tab: usize,
+    editor_buffers: HashMap<String, String>,
+    editor_dirty: HashSet<String>,
+    open_generation: u64,
     editor_read_only: bool,
     file_editor_input: Entity<crate::file_editor_input::FileEditorInput>,
     session_title_input: Entity<PromptInput>,
@@ -214,6 +215,7 @@ pub struct WorkspaceView {
     server_url: Option<String>,
     server_password: Option<String>,
     attachments: Vec<PromptAttachment>,
+    image_preview: Option<PromptAttachment>,
     event_stream_generation: Arc<AtomicU64>,
     bootstrap_generation: Arc<AtomicU64>,
     hydrate_generation: Arc<AtomicU64>,
@@ -241,6 +243,9 @@ impl WorkspaceView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         let prompt_input = cx.new(PromptInput::new);
+        prompt_input.update(cx, |input, cx| {
+            input.set_small_text(true, cx);
+        });
         cx.subscribe(&prompt_input, |this, _, event, cx| {
             if let PromptInputEvent::PasteImage { bytes, format } = event {
                 this.attach_clipboard_image(bytes.clone(), *format, cx);
@@ -275,6 +280,20 @@ impl WorkspaceView {
             input
         });
         let file_editor_input = cx.new(crate::file_editor_input::FileEditorInput::new);
+        cx.subscribe(&file_editor_input, |this, _, event, cx| {
+            if matches!(
+                event,
+                crate::file_editor_input::FileEditorInputEvent::Edited
+            ) {
+                if let Some(path) = this.editor.path.clone() {
+                    let content = this.file_editor_input.read(cx).text();
+                    this.editor_buffers.insert(path.clone(), content);
+                    this.editor_dirty.insert(path);
+                }
+                cx.notify();
+            }
+        })
+        .detach();
         let session_title_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
             input.set_placeholder("Session title", cx);
@@ -314,10 +333,7 @@ impl WorkspaceView {
             engine: shared_engine(),
             client: Arc::new(Mutex::new(None)),
             session_id: None,
-            activity: crate::session_activity::SessionActivityStore {
-                ignore_stale_run_events: true,
-                ..Default::default()
-            },
+            activity: crate::session_activity::SessionActivityStore::default(),
             providers: Vec::new(),
             pending_policies: VecDeque::new(),
             policy_reject_expanded: false,
@@ -344,6 +360,9 @@ impl WorkspaceView {
             editor: EditorState::default(),
             editor_tabs: Vec::new(),
             active_editor_tab: 0,
+            editor_buffers: HashMap::new(),
+            editor_dirty: HashSet::new(),
+            open_generation: 0,
             editor_read_only: true,
             file_editor_input,
             session_title_input,
@@ -397,6 +416,7 @@ impl WorkspaceView {
             server_url: prefs.server_url,
             server_password: prefs.server_password,
             attachments: Vec::new(),
+            image_preview: None,
             event_stream_generation: Arc::new(AtomicU64::new(0)),
             bootstrap_generation: Arc::new(AtomicU64::new(0)),
             hydrate_generation: Arc::new(AtomicU64::new(0)),
@@ -503,7 +523,12 @@ impl WorkspaceView {
         self.context_usage = ContextUsageState::default();
         self.active_session_ids.clear();
         self.activity.session_events_enabled = false;
-        self.activity.ignore_stale_run_events = true;
+        self.activity.ignore_stale_run_events = false;
+        self.activity.stale_run_cutoff_seq = None;
+        self.backup_dirty_editor_buffers();
+        self.editor_buffers.clear();
+        self.editor_dirty.clear();
+        self.open_generation = self.open_generation.wrapping_add(1);
         self.pending_new_session = false;
         self.pending_switch_session = None;
         self.set_session_busy(false, "Ready");
@@ -530,6 +555,7 @@ impl WorkspaceView {
     fn apply_revert_state(&mut self, state: &deepseekcode_schema::session::RevertState) {
         self.revert_dock.staged_message_id = Some(state.staged_message_id.to_string());
         self.revert_staged_files = state.files.clone();
+        self.revert_dock.warning = state.warning.clone();
         let paths: Vec<String> = state.files.iter().map(|f| f.path.clone()).collect();
         self.file_tree.changed_paths = paths.iter().cloned().collect();
         self.revert_dock.diff_preview = revert_files_preview(&paths);
@@ -552,6 +578,8 @@ impl WorkspaceView {
                 } else {
                     this.revert_dock.staged_message_id = None;
                     this.revert_dock.diff_preview.clear();
+                    this.revert_dock.warning = None;
+                    this.revert_staged_files.clear();
                 }
                 cx.notify();
             });
@@ -596,9 +624,18 @@ impl WorkspaceView {
             match result {
                 Ok(Some(state)) => {
                     let _ = view.update(cx, |this, cx| {
-                        this.apply_revert_state(&state);
-                        this.revert_dock.open = true;
                         if action == RevertAction::Commit {
+                            this.revert_dock.staged_message_id = None;
+                            this.revert_dock.diff_preview.clear();
+                            this.revert_dock.warning = None;
+                            this.revert_staged_files.clear();
+                            this.file_tree.changed_paths.clear();
+                            this.revert_dock.error = None;
+                            this.revert_dock.open = true;
+                        } else {
+                            this.apply_revert_state(&state);
+                            this.revert_dock.error = None;
+                            this.revert_dock.open = true;
                         }
                         cx.notify();
                     });
@@ -612,12 +649,21 @@ impl WorkspaceView {
                     let _ = view.update(cx, |this, cx| {
                         this.revert_dock.staged_message_id = None;
                         this.revert_dock.diff_preview.clear();
+                        this.revert_staged_files.clear();
+                        this.file_tree.changed_paths.clear();
+                        this.revert_dock.error = None;
                         this.revert_dock.open = true;
                         cx.notify();
                     });
                 }
                 Err(e) => {
                     tracing::error!(target: deepseekcode_telemetry::DESKTOP, error = %e, "revert action failed");
+                    let message = e.to_string();
+                    let _ = view.update(cx, |this, cx| {
+                        this.revert_dock.error = Some(message);
+                        this.revert_dock.open = true;
+                        cx.notify();
+                    });
                 }
             }
         })
@@ -786,6 +832,10 @@ impl WorkspaceView {
         self.session_todos.clear();
         self.composer_todo_expanded = false;
         self.selected_detail_key = None;
+        self.pending_question = None;
+        self.question_input.update(cx, |input, cx| input.clear(cx));
+        self.pending_policies.clear();
+        self.policy_reject_expanded = false;
         self.activity.since_seq = 0;
         self.selected_message_id = None;
         self.context_usage = ContextUsageState::default();
@@ -1371,6 +1421,8 @@ impl WorkspaceView {
         let Some(session_id) = self.session_id else {
             return;
         };
+        self.event_stream_generation.fetch_add(1, Ordering::SeqCst);
+        self.activity.session_events_enabled = false;
         let generation = self
             .hydrate_generation
             .fetch_add(1, Ordering::SeqCst)
@@ -1401,14 +1453,30 @@ impl WorkspaceView {
             let latest_event_seq = client.latest_event_seq(session_id).await.unwrap_or(0);
             let resume_seq = latest_event_seq;
 
-            let activity = client
-                .list_activity(session_id, 0)
-                .await
-                .unwrap_or_default();
+            let activity = match client.list_activity(session_id, 0).await {
+                Ok(tree) => tree,
+                Err(e) => {
+                    tracing::warn!(
+                        target: deepseekcode_telemetry::DESKTOP,
+                        session_id = %session_id,
+                        error = %e,
+                        "list_activity failed; falling back to local projection from events"
+                    );
+                    ActivityTree::default()
+                }
+            };
             let session_events = client
                 .list_session_events(session_id, 0)
                 .await
                 .unwrap_or_default();
+            if activity.roots.is_empty() && !session_events.is_empty() {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::DESKTOP,
+                    session_id = %session_id,
+                    event_count = session_events.len(),
+                    "server returned empty activity tree for non-empty history; rebuilding locally"
+                );
+            }
             let todos = client.session_todo(session_id).await.unwrap_or_default();
 
             tracing::info!(
@@ -1455,9 +1523,7 @@ impl WorkspaceView {
                 if let Some(status) = git_status {
                     this.apply_git_status(status);
                 }
-                this.active_session_ids.remove(&session_id);
                 this.sync_context_usage_from_events();
-                this.set_session_busy(false, "Ready");
                 this.pending_scroll_to_tail = true;
                 cx.notify();
                 true
@@ -1465,6 +1531,49 @@ impl WorkspaceView {
             if !applied.unwrap_or(false) {
                 return;
             }
+
+            let gap_events = client
+                .list_session_events(session_id, resume_seq)
+                .await
+                .unwrap_or_default();
+            let gap_head = gap_events
+                .last()
+                .map(|event| event.seq)
+                .unwrap_or(resume_seq);
+            let active_ids = client.list_active_sessions().await.unwrap_or_default();
+            let is_active = active_ids.contains(&session_id);
+            let _ = view.update(cx, |this, cx| {
+                if hydrate_generation.load(Ordering::SeqCst) != generation {
+                    return;
+                }
+                this.activity.apply_hydrate_gap_events(&gap_events);
+                this.activity.enable_session_events(gap_head);
+                if !is_active {
+                    this.activity.set_idle_stale_cutoff(gap_head);
+                }
+                cx.notify();
+            });
+
+            let _ = view.update(cx, |this, cx| {
+                if hydrate_generation.load(Ordering::SeqCst) != generation {
+                    return;
+                }
+                if is_active {
+                    this.active_session_ids.insert(session_id);
+                    this.set_session_busy(true, "Running…");
+                } else {
+                    this.active_session_ids.remove(&session_id);
+                    this.set_session_busy(false, "Ready");
+                }
+                // Replay live events queued during the hydration window that
+                // the REST gap backfill does not already cover.
+                let replay = this.activity.take_pending_events_after(gap_head);
+                for event in replay {
+                    this.apply_event(event, cx);
+                }
+                this.restore_pending_question_from_events(cx);
+                cx.notify();
+            });
             for child_id in child_ids {
                 let _ = view.update(cx, |this, cx| {
                     this.refresh_child_session_projection(child_id, cx);
@@ -1926,15 +2035,56 @@ Describe this project so the AI assistant has context.\n\n\
         .detach();
     }
 
+    fn sync_editor_buffer_from_input(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.editor.path.clone() {
+            let content = self.file_editor_input.read(cx).text();
+            self.editor_buffers.insert(path, content);
+        }
+    }
+
+    fn load_editor_buffer(&mut self, path: &str, content: String, cx: &mut Context<Self>) {
+        self.editor.path = Some(path.to_string());
+        self.editor.set_content(content.clone());
+        let file_input = self.file_editor_input.clone();
+        let editor_text = content;
+        cx.defer(move |cx| {
+            file_input.update(cx, |input, cx| {
+                input.set_text(editor_text, cx);
+            });
+        });
+        self.editor_read_only = false;
+        self.layout.right_panel_tab = RightPanelTab::Editor;
+        if !self.editor_tabs.iter().any(|p| p == path) {
+            self.editor_tabs.push(path.to_string());
+        }
+        self.active_editor_tab = self.editor_tabs.iter().position(|p| p == path).unwrap_or(0);
+    }
+
+    fn rollback_optimistic_prompt(&mut self, optimistic: &EventEnvelope) {
+        self.activity
+            .session_events
+            .retain(|event| event.seq != optimistic.seq || event.kind != EventKind::PromptAdmitted);
+        self.rebuild_activity_tree("submit_prompt_rollback");
+    }
+
     pub(crate) fn open_file(&mut self, path: &str, cx: &mut Context<Self>) {
         self.editor.scroll_to_line = None;
         self.editor.diff_stats = None;
         let path = path.to_string();
+        if self.editor_dirty.contains(&path) {
+            if let Some(content) = self.editor_buffers.get(&path).cloned() {
+                self.load_editor_buffer(&path, content, cx);
+                cx.notify();
+                return;
+            }
+        }
         let snapshot_id = self
             .revert_staged_files
             .iter()
             .find(|f| f.path == path)
             .map(|f| f.snapshot_id.clone());
+        self.open_generation = self.open_generation.wrapping_add(1);
+        let generation = self.open_generation;
         let client_slot = Arc::clone(&self.client);
         cx.spawn(async move |view, cx| {
             let result = if let Some(client) = lock_sdk_client(&client_slot).await {
@@ -1950,6 +2100,9 @@ Describe this project so the AI assistant has context.\n\n\
                 None
             };
             let _ = view.update(cx, |this, cx| {
+                if generation != this.open_generation {
+                    return;
+                }
                 if let Some((content, diff)) = result {
                     if content.is_none() {
                         tracing::warn!(
@@ -1962,6 +2115,7 @@ Describe this project so the AI assistant has context.\n\n\
                     this.editor.path = Some(path.clone());
                     this.editor.set_content(text.clone());
                     this.editor.diff_hunks = diff;
+                    this.editor_buffers.insert(path.clone(), text.clone());
                     let file_input = this.file_editor_input.clone();
                     let editor_text = text.clone();
                     cx.defer(move |cx| {
@@ -2002,7 +2156,51 @@ Describe this project so the AI assistant has context.\n\n\
         self.refresh_git_status_async(cx);
         self.prepare_project_context(&path, cx);
         self.editor = EditorState::default();
+        self.backup_dirty_editor_buffers();
+        self.editor_buffers.clear();
+        self.editor_dirty.clear();
         self.bootstrap_project(path, cx);
+    }
+
+    /// Persist unsaved editor buffers before they are discarded by a project
+    /// or session switch, so user edits are never silently lost.
+    fn backup_dirty_editor_buffers(&self) {
+        if self.editor_dirty.is_empty() {
+            return;
+        }
+        let backup_root = std::env::temp_dir().join("deepseekcode-editor-backups");
+        for path in &self.editor_dirty {
+            let Some(content) = self.editor_buffers.get(path) else {
+                continue;
+            };
+            let sanitized: String = path
+                .chars()
+                .map(|c| {
+                    if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            let dest = backup_root.join(format!("{sanitized}.bak"));
+            let result =
+                std::fs::create_dir_all(&backup_root).and_then(|_| std::fs::write(&dest, content));
+            match result {
+                Ok(()) => tracing::warn!(
+                    target: deepseekcode_telemetry::DESKTOP,
+                    path = %path,
+                    backup = %dest.display(),
+                    "unsaved editor buffer backed up before workspace reset"
+                ),
+                Err(e) => tracing::error!(
+                    target: deepseekcode_telemetry::DESKTOP,
+                    path = %path,
+                    error = %e,
+                    "failed to back up unsaved editor buffer"
+                ),
+            }
+        }
     }
 
     pub(crate) fn show_more_project_sessions(&mut self, path: String, cx: &mut Context<Self>) {
@@ -2346,7 +2544,7 @@ Describe this project so the AI assistant has context.\n\n\
                                             client.list_session_events(session_id, since_seq).await
                                         {
                                             for event in events {
-                                                since_seq = event.seq;
+                                                since_seq = since_seq.max(event.seq);
                                                 let _ = view.update(cx, |this, cx| {
                                                     this.apply_event(event, cx);
                                                     cx.notify();
@@ -2356,9 +2554,13 @@ Describe this project so the AI assistant has context.\n\n\
                                                 this.rebuild_activity_tree("sse_gap_backfill");
                                                 cx.notify();
                                             });
+                                            // Advance only — never move backwards.
+                                            // The server's `head` can lag behind what
+                                            // this client already applied (e.g. after
+                                            // a broadcast-lag gap).
+                                            since_seq = since_seq.max(head);
                                         }
                                     }
-                                    since_seq = head;
                                     break;
                                 }
                                 EventStreamItem::Event(event) => {
@@ -2603,25 +2805,31 @@ Describe this project so the AI assistant has context.\n\n\
             }
         }
         if !self.activity.session_events_enabled {
-            tracing::info!(
-                target: deepseekcode_telemetry::DESKTOP,
-                kind = %event.kind.as_str(),
-                seq = event.seq,
-                "apply_event deferred (hydrate in progress)"
-            );
-            self.activity.since_seq = event.seq;
-            return;
-        }
-        if self.activity.ignore_stale_run_events && Self::is_stale_run_event(event.kind) {
+            // Queue instead of dropping: once hydration completes these events
+            // are replayed, so nothing arriving mid-hydration is lost.
+            self.activity.defer_event_during_hydration(event.clone());
             tracing::debug!(
                 target: deepseekcode_telemetry::DESKTOP,
                 kind = %event.kind.as_str(),
                 seq = event.seq,
-                busy = self.session_busy,
-                "apply_event ignored stale run event"
+                "apply_event deferred during hydration (queued for replay)"
             );
-            self.activity.since_seq = event.seq;
             return;
+        }
+        if self.activity.ignore_stale_run_events && Self::is_stale_run_event(event.kind) {
+            if let Some(cutoff) = self.activity.stale_run_cutoff_seq {
+                if event.seq <= cutoff {
+                    tracing::debug!(
+                        target: deepseekcode_telemetry::DESKTOP,
+                        kind = %event.kind.as_str(),
+                        seq = event.seq,
+                        cutoff,
+                        busy = self.session_busy,
+                        "apply_event ignored stale run event"
+                    );
+                    return;
+                }
+            }
         }
         if event.kind == EventKind::ActivityUpdated {
             self.activity.since_seq = event.seq;
@@ -2812,7 +3020,6 @@ Describe this project so the AI assistant has context.\n\n\
                     );
                     if name == "bash" {
                         self.refresh_bash_terminal_output(id, cx);
-                        self.close_bash_terminal_for_detail(id, cx);
                     }
                 }
                 if let Some(path) = extract_tool_path(&name, &event.payload) {
@@ -2873,6 +3080,8 @@ Describe this project so the AI assistant has context.\n\n\
                 let turn = event.payload["turn"].as_u64().unwrap_or(0);
                 let max_turns = event.payload["max_turns"].as_u64().unwrap_or(0);
                 let message_count = event.payload["message_count"].as_u64().unwrap_or(0);
+                self.activity.ignore_stale_run_events = false;
+                self.activity.stale_run_cutoff_seq = None;
                 if let Some(session_id) = event.session_id {
                     self.active_session_ids.insert(session_id);
                 }
@@ -2921,10 +3130,11 @@ Describe this project so the AI assistant has context.\n\n\
                 let error = event.payload["error"].as_str().unwrap_or("").to_string();
                 self.pending_policies.clear();
                 self.policy_reject_expanded = false;
-                self.activity.ignore_stale_run_events = true;
                 if let Some(session_id) = event.session_id {
                     self.active_session_ids.remove(&session_id);
                 }
+                self.activity.stale_run_cutoff_seq = Some(event.seq);
+                self.activity.ignore_stale_run_events = true;
                 if error.is_empty() {
                     self.set_session_busy(false, "Interrupted");
                 } else {
@@ -2942,10 +3152,11 @@ Describe this project so the AI assistant has context.\n\n\
             }
             EventKind::SessionIdle => {
                 self.set_session_busy(false, "Ready");
-                self.activity.ignore_stale_run_events = true;
                 if let Some(session_id) = event.session_id {
                     self.active_session_ids.remove(&session_id);
                 }
+                self.activity.stale_run_cutoff_seq = Some(event.seq);
+                self.activity.ignore_stale_run_events = true;
             }
             EventKind::McpStatusChanged => {
                 let name = event.payload["name"].as_str().unwrap_or("mcp");
@@ -2964,32 +3175,7 @@ Describe this project so the AI assistant has context.\n\n\
                 }
             }
             EventKind::QuestionRequested => {
-                let question = event.payload["question"].as_str().unwrap_or("").to_string();
-                let options: Vec<String> = event.payload["options"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let allow_custom = event.payload["allow_custom"].as_bool().unwrap_or(true);
-                let has_option_list = !options.is_empty();
-                self.pending_question = Some(QuestionPromptState {
-                    question,
-                    options,
-                    allow_custom,
-                    custom_mode: false,
-                });
-                let placeholder = if has_option_list && allow_custom {
-                    "输入不在上述选项中的答案"
-                } else {
-                    "Your answer…"
-                };
-                self.question_input.update(cx, |input, cx| {
-                    input.set_placeholder(placeholder, cx);
-                    input.clear(cx);
-                });
+                self.apply_question_event(&event, cx);
             }
             EventKind::PlanCompleted => {
                 self.ingest_plan_completed_event(&event, cx);
@@ -3012,12 +3198,70 @@ Describe this project so the AI assistant has context.\n\n\
         }
     }
 
+    fn restore_pending_question_from_events(&mut self, cx: &mut Context<Self>) {
+        let Some(last) = self
+            .activity
+            .session_events
+            .iter()
+            .rev()
+            .find(|e| e.kind == EventKind::QuestionRequested)
+            .cloned()
+        else {
+            return;
+        };
+        let answered = self.activity.session_events.iter().any(|e| {
+            e.seq > last.seq
+                && matches!(
+                    e.kind,
+                    EventKind::SessionIdle
+                        | EventKind::SessionInterrupted
+                        | EventKind::ToolCompleted
+                )
+        });
+        if answered {
+            return;
+        }
+        self.apply_question_event(&last, cx);
+    }
+
+    fn apply_question_event(&mut self, event: &EventEnvelope, cx: &mut Context<Self>) {
+        let question = event.payload["question"].as_str().unwrap_or("").to_string();
+        let options: Vec<String> = event.payload["options"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let allow_custom = event.payload["allow_custom"].as_bool().unwrap_or(true);
+        let has_option_list = !options.is_empty();
+        self.pending_question = Some(QuestionPromptState {
+            question,
+            options,
+            allow_custom,
+            custom_mode: false,
+        });
+        let placeholder = if has_option_list && allow_custom {
+            "输入不在上述选项中的答案"
+        } else {
+            "Your answer…"
+        };
+        self.question_input.update(cx, |input, cx| {
+            input.set_placeholder(placeholder, cx);
+            input.clear(cx);
+        });
+    }
+
     pub(crate) fn submit_prompt(&mut self, cx: &mut Context<Self>) {
         if self.composer_blocked() {
             return;
         }
         let mut text = self.prompt_input.read(cx).text();
-        if text.is_empty() || text == "Type a prompt…" {
+        if text.trim().is_empty()
+            || text == "Type a prompt…"
+            || text == crate::composer::COMPOSER_PLACEHOLDER
+        {
             return;
         }
         let (_, provider_id) = self.resolve_selected_model();
@@ -3048,6 +3292,7 @@ Describe this project so the AI assistant has context.\n\n\
             "submit_prompt invoked"
         );
         self.activity.ignore_stale_run_events = false;
+        self.activity.stale_run_cutoff_seq = None;
         // Cancel any in-flight timeline hydration so it cannot wipe the optimistic user row.
         self.hydrate_generation.fetch_add(1, Ordering::SeqCst);
         self.start_event_listener(cx);
@@ -3087,7 +3332,7 @@ Describe this project so the AI assistant has context.\n\n\
             }),
             created_at: chrono::Utc::now(),
         };
-        push_session_event(&mut self.activity.session_events, optimistic);
+        push_session_event(&mut self.activity.session_events, optimistic.clone());
         self.rebuild_activity_tree("submit_prompt");
         self.attachments.clear();
         self.session_follow_tail = true;
@@ -3117,6 +3362,10 @@ Describe this project so the AI assistant has context.\n\n\
                     );
                     let _ = view.update(cx, |this, cx| {
                         this.set_session_busy(false, "Error");
+                        cx.notify();
+                    });
+                    let _ = view.update(cx, |this, cx| {
+                        this.rollback_optimistic_prompt(&optimistic);
                         cx.notify();
                     });
                     return;
@@ -3161,6 +3410,7 @@ Describe this project so the AI assistant has context.\n\n\
                         let _ = view.update(cx, |this, cx| {
                             this.set_session_busy(false, "Error");
                             this.composer_error = Some(e.to_string());
+                            this.rollback_optimistic_prompt(&optimistic);
                             cx.notify();
                         });
                     }
@@ -3357,6 +3607,19 @@ Describe this project so the AI assistant has context.\n\n\
         format: gpui::ImageFormat,
         cx: &mut Context<Self>,
     ) {
+        let dir = std::env::temp_dir().join("deepseekcode-paste");
+        let _ = std::fs::create_dir_all(&dir);
+        let stamp = chrono::Utc::now().timestamp_millis();
+        // Pastes are normalized to BMP so the on-disk format is deterministic
+        // (screenshots arrive as DIB/BMP natively; clipboard enumeration order
+        // otherwise decides between PNG/JPG copies of the same image).
+        if let Some(bmp) = crate::composer::encode_clipboard_image_as_bmp(&bytes) {
+            let path = dir.join(format!("paste-{stamp}.bmp"));
+            if std::fs::write(&path, bmp).is_ok() {
+                self.attach_path(path, cx);
+            }
+            return;
+        }
         let ext = match format {
             gpui::ImageFormat::Png => "png",
             gpui::ImageFormat::Jpeg => "jpg",
@@ -3365,12 +3628,10 @@ Describe this project so the AI assistant has context.\n\n\
             gpui::ImageFormat::Bmp => "bmp",
             gpui::ImageFormat::Tiff => "tiff",
             gpui::ImageFormat::Ico => "ico",
+            gpui::ImageFormat::Svg => "svg",
             _ => "png",
         };
-        let dir = std::env::temp_dir().join("deepseekcode-paste");
-        let _ = std::fs::create_dir_all(&dir);
-        let file_name = format!("paste-{}.{}", chrono::Utc::now().timestamp_millis(), ext);
-        let path = dir.join(file_name);
+        let path = dir.join(format!("paste-{stamp}.{ext}"));
         if std::fs::write(&path, bytes).is_ok() {
             self.attach_path(path, cx);
         }
@@ -3852,9 +4113,36 @@ Describe this project so the AI assistant has context.\n\n\
 
     pub(crate) fn remove_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.attachments.len() {
-            self.attachments.remove(index);
+            let removed = self.attachments.remove(index);
+            if self
+                .image_preview
+                .as_ref()
+                .is_some_and(|p| p.path == removed.path)
+            {
+                self.image_preview = None;
+            }
             cx.notify();
         }
+    }
+
+    pub(crate) fn open_image_preview(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(att) = self.attachments.get(index).cloned() {
+            if att.is_image() {
+                self.image_preview = Some(att);
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn close_image_preview(&mut self, cx: &mut Context<Self>) {
+        self.image_preview = None;
+        cx.notify();
+    }
+
+    pub(crate) fn focus_prompt_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = self.prompt_input.read(cx).focus_handle_clone();
+        window.focus(&handle, cx);
+        cx.notify();
     }
 
     fn load_settings_catalog(&mut self, cx: &mut Context<Self>) {
@@ -4199,11 +4487,20 @@ Describe this project so the AI assistant has context.\n\n\
     }
 
     pub(crate) fn switch_editor_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.editor_tabs.len() {
-            self.active_editor_tab = index;
-            if let Some(path) = self.editor_tabs.get(index).cloned() {
-                self.open_file(&path, cx);
+        if index >= self.editor_tabs.len() {
+            return;
+        }
+        self.sync_editor_buffer_from_input(cx);
+        self.active_editor_tab = index;
+        if let Some(path) = self.editor_tabs.get(index).cloned() {
+            if self.editor_dirty.contains(&path) {
+                if let Some(content) = self.editor_buffers.get(&path).cloned() {
+                    self.load_editor_buffer(&path, content, cx);
+                    cx.notify();
+                    return;
+                }
             }
+            self.open_file(&path, cx);
         }
     }
 
@@ -4211,14 +4508,22 @@ Describe this project so the AI assistant has context.\n\n\
         if index >= self.editor_tabs.len() {
             return;
         }
-        self.editor_tabs.remove(index);
+        let removed = self.editor_tabs.remove(index);
+        self.editor_buffers.remove(&removed);
+        self.editor_dirty.remove(&removed);
         if self.editor_tabs.is_empty() {
             self.editor = EditorState::default();
             self.active_editor_tab = 0;
         } else {
             self.active_editor_tab = self.active_editor_tab.min(self.editor_tabs.len() - 1);
             if let Some(path) = self.editor_tabs.get(self.active_editor_tab).cloned() {
-                self.open_file(&path, cx);
+                if self.editor_dirty.contains(&path) {
+                    if let Some(content) = self.editor_buffers.get(&path).cloned() {
+                        self.load_editor_buffer(&path, content, cx);
+                    }
+                } else {
+                    self.open_file(&path, cx);
+                }
             }
         }
         cx.notify();
@@ -4228,16 +4533,28 @@ Describe this project so the AI assistant has context.\n\n\
         let Some(path) = self.editor.path.clone() else {
             return;
         };
+        let Some(session_id) = self.session_id else {
+            tracing::warn!(
+                target: deepseekcode_telemetry::DESKTOP,
+                "save file skipped: no active session"
+            );
+            return;
+        };
         let content = self.file_editor_input.read(cx).text();
         self.editor.set_content(content.clone());
         let client_slot = Arc::clone(&self.client);
         cx.spawn(async move |view, cx| {
             let client = lock_sdk_client(&client_slot).await;
             if let Some(client) = client {
-                match client.fs_write(&path, &content).await {
+                match client.fs_write(session_id, &path, &content).await {
                     Ok(()) => {
+                        let path_for_clear = path.clone();
+                        let content_for_buffer = content.clone();
                         let _ = view.update(cx, |this, cx| {
                             this.editor_read_only = false;
+                            this.editor_buffers
+                                .insert(path_for_clear, content_for_buffer);
+                            this.editor_dirty.remove(&path);
                             cx.notify();
                         });
                     }
@@ -4262,11 +4579,24 @@ Describe this project so the AI assistant has context.\n\n\
         if index >= self.terminals.len() {
             return;
         }
+        let pty_id = self
+            .terminals
+            .get(index)
+            .and_then(|tab| tab.state.pty_id.clone());
         self.terminals.remove(index);
         if self.terminals.is_empty() {
             self.active_terminal = 0;
         } else {
             self.active_terminal = self.active_terminal.min(self.terminals.len() - 1);
+        }
+        if let Some(pty_id) = pty_id {
+            let client_slot = Arc::clone(&self.client);
+            cx.spawn(async move |_view, _cx| {
+                if let Some(client) = lock_sdk_client(&client_slot).await {
+                    let _ = client.destroy_pty(&pty_id).await;
+                }
+            })
+            .detach();
         }
         cx.notify();
     }
@@ -4973,6 +5303,7 @@ impl Render for WorkspaceView {
                 self.selected_message_id,
             ))
             .child(self.render_popover_overlay(cx))
+            .child(self.render_image_preview_overlay(cx))
     }
 }
 
@@ -5138,7 +5469,6 @@ impl WorkspaceView {
                             self.highlighted_todo_leaf_id.as_deref(),
                             &self.session_scroll,
                             self.session_status.as_ref() == "Loading session…",
-                            !self.activity.session_events.is_empty(),
                         )
                     }),
             )
@@ -5303,6 +5633,117 @@ impl WorkspaceView {
         }
 
         layer
+    }
+
+    fn render_image_preview_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(att) = self.image_preview.clone() else {
+            return div().into_any_element();
+        };
+        let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
+        let file_name = att.file_name();
+        let image_el: AnyElement = match crate::composer::load_attachment_image(&att.path) {
+            Some(image) => img(image)
+                .max_w(px(720.))
+                .max_h(px(520.))
+                .rounded_md()
+                .into_any_element(),
+            None => div()
+                .px_6()
+                .py_8()
+                .text_sm()
+                .text_color(theme.text_muted)
+                .child(format!("无法预览图片：{file_name}"))
+                .into_any_element(),
+        };
+        div()
+            .id("image-preview-overlay")
+            .absolute()
+            .inset_0()
+            .bg(rgba(0x00000099))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.close_image_preview(cx);
+                }),
+            )
+            .child(
+                div()
+                    .id("image-preview-panel")
+                    .relative()
+                    .max_w(px(760.))
+                    .rounded_lg()
+                    .bg(theme.bg_surface)
+                    .border_1()
+                    .border_color(theme.border_default)
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.text_primary)
+                                    .overflow_hidden()
+                                    .child(file_name),
+                            )
+                            .child(
+                                div()
+                                    .id("image-preview-close")
+                                    .flex_shrink_0()
+                                    .size(px(28.))
+                                    .rounded_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme.bg_hover))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.close_image_preview(cx);
+                                        }),
+                                    )
+                                    .child(crate::ui::icon::render_icon_rgba(
+                                        crate::ui::icon::IconName::X,
+                                        px(14.),
+                                        theme.text_secondary,
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .bg(theme.bg_elevated)
+                            .border_1()
+                            .border_color(theme.border_subtle)
+                            .p_3()
+                            .child(image_el),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.text_muted)
+                            .child(att.path.clone()),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_question_overlay(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -5598,11 +6039,23 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let path = path.to_string();
+        if self.editor_dirty.contains(&path) {
+            if let Some(content) = self.editor_buffers.get(&path).cloned() {
+                self.editor.scroll_to_line = line;
+                self.editor.diff_stats = diff_stats;
+                self.load_editor_buffer(&path, content, cx);
+                self.layout.show_right_panel = true;
+                cx.notify();
+                return;
+            }
+        }
         let snapshot_id = self
             .revert_staged_files
             .iter()
             .find(|f| f.path == path)
             .map(|f| f.snapshot_id.clone());
+        self.open_generation = self.open_generation.wrapping_add(1);
+        let generation = self.open_generation;
         let client_slot = Arc::clone(&self.client);
         let line = line;
         let diff_stats = diff_stats;
@@ -5620,6 +6073,9 @@ impl WorkspaceView {
                 None
             };
             let _ = view.update(cx, |this, cx| {
+                if generation != this.open_generation {
+                    return;
+                }
                 if let Some((content, diff)) = result {
                     let text = content.unwrap_or_default();
                     this.editor.path = Some(path.clone());
@@ -5627,7 +6083,7 @@ impl WorkspaceView {
                     this.editor.diff_hunks = diff;
                     this.editor.diff_stats = diff_stats;
                     this.editor.scroll_to_line = line;
-                    this.editor_read_only = line.is_some();
+                    this.editor_buffers.insert(path.clone(), text.clone());
                     let file_input = this.file_editor_input.clone();
                     let editor_text = text.clone();
                     cx.defer(move |cx| {
@@ -5645,6 +6101,7 @@ impl WorkspaceView {
                         .unwrap_or(0);
                     this.layout.right_panel_tab = RightPanelTab::Editor;
                     this.layout.show_right_panel = true;
+                    this.editor_read_only = false;
                 }
                 cx.notify();
             });
@@ -6099,6 +6556,15 @@ fn last_provider_turn_group_id(
 }
 
 fn keystroke_to_bytes(keystroke: &Keystroke) -> Vec<u8> {
+    if keystroke.modifiers.control || keystroke.modifiers.platform {
+        match keystroke.key.as_str() {
+            "c" => return vec![0x03],
+            "d" => return vec![0x04],
+            "z" => return vec![0x1a],
+            "l" => return vec![0x0c],
+            _ => {}
+        }
+    }
     if let Some(key_char) = &keystroke.key_char {
         return key_char.as_bytes().to_vec();
     }

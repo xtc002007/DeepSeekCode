@@ -285,12 +285,6 @@ impl WorkspaceView {
         } else {
             display
         };
-        if self.terminals.is_empty() {
-            let id = self.next_terminal_id;
-            self.next_terminal_id += 1;
-            self.terminals
-                .push(crate::terminal::TerminalTab::new(id, "Shell 1"));
-        }
         let tab_idx = self
             .terminals
             .iter()

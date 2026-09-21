@@ -42,8 +42,17 @@ pub struct SessionActivityStore {
     pub timeline_render_generation: u64,
     pub session_events_enabled: bool,
     pub ignore_stale_run_events: bool,
+    pub stale_run_cutoff_seq: Option<i64>,
+    /// Live SSE events that arrived while hydration was in progress. They are
+    /// queued here and replayed once hydration completes, so no event is lost
+    /// to the hydration window.
+    pub pending_hydration_events: Vec<EventEnvelope>,
     pub since_seq: i64,
 }
+
+/// Upper bound for events queued during a hydration window; the oldest are
+/// dropped first if a pathological backlog builds up.
+const PENDING_HYDRATION_EVENTS_CAP: usize = 1000;
 
 impl Default for SessionActivityStore {
     fn default() -> Self {
@@ -59,6 +68,8 @@ impl Default for SessionActivityStore {
             timeline_render_generation: 0,
             session_events_enabled: false,
             ignore_stale_run_events: false,
+            stale_run_cutoff_seq: None,
+            pending_hydration_events: Vec::new(),
             since_seq: 0,
         }
     }
@@ -213,8 +224,6 @@ impl SessionActivityStore {
         resume_seq: i64,
     ) {
         self.since_seq = resume_seq;
-        self.session_events_enabled = true;
-        self.ignore_stale_run_events = true;
         if !session_events.is_empty() {
             self.session_events = session_events;
         }
@@ -223,7 +232,13 @@ impl SessionActivityStore {
         }
         self.detail_store = detail_store;
 
-        if activity_tree.roots.is_empty() && !self.activity_tree.roots.is_empty() {
+        // The server tree is advisory: when it comes back empty while events
+        // exist (request failed client-side, or a projection edge case), rebuild
+        // locally from the same events instead of stranding the UI on a spinner.
+        // With no events at all, keep the current tree untouched.
+        // `rebuild_activity_tree` itself keeps the previous tree when a rebuild
+        // yields nothing new.
+        if activity_tree.roots.is_empty() {
             if !self.session_events.is_empty() {
                 self.rebuild_activity_tree("hydrate_from_api_fallback");
             }
@@ -231,6 +246,62 @@ impl SessionActivityStore {
         }
 
         self.activity_tree = activity_tree;
+    }
+
+    pub fn apply_stale_cutoff_from_event(&mut self, event: &EventEnvelope) {
+        match event.kind {
+            EventKind::SessionIdle | EventKind::SessionInterrupted => {
+                self.ignore_stale_run_events = true;
+                self.stale_run_cutoff_seq = Some(event.seq);
+            }
+            EventKind::ProviderTurnStarted => {
+                self.ignore_stale_run_events = false;
+                self.stale_run_cutoff_seq = None;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn set_idle_stale_cutoff(&mut self, cutoff_seq: i64) {
+        self.ignore_stale_run_events = true;
+        self.stale_run_cutoff_seq = Some(cutoff_seq);
+    }
+
+    /// Queue a live event that arrived while hydration was in progress.
+    pub fn defer_event_during_hydration(&mut self, event: EventEnvelope) {
+        if self.pending_hydration_events.len() >= PENDING_HYDRATION_EVENTS_CAP {
+            self.pending_hydration_events.remove(0);
+        }
+        self.pending_hydration_events.push(event);
+    }
+
+    /// Drain queued events that the hydration backfill does NOT already cover
+    /// (anything beyond `gap_head`), oldest first, ready for replay.
+    pub fn take_pending_events_after(&mut self, gap_head: i64) -> Vec<EventEnvelope> {
+        let pending = std::mem::take(&mut self.pending_hydration_events);
+        pending
+            .into_iter()
+            .filter(|event| event.seq > gap_head)
+            .collect()
+    }
+
+    pub fn apply_hydrate_gap_events(&mut self, events: &[EventEnvelope]) {
+        for event in events {
+            if event.kind == EventKind::ToolProgress {
+                continue;
+            }
+            self.apply_stale_cutoff_from_event(event);
+            push_session_event(&mut self.session_events, event.clone());
+        }
+        if !events.is_empty() {
+            self.rebuild_activity_tree("hydrate_gap_backfill");
+            self.rebuild_detail_from_events();
+        }
+    }
+
+    pub fn enable_session_events(&mut self, head_seq: i64) {
+        self.since_seq = head_seq;
+        self.session_events_enabled = true;
     }
 
     pub fn rebuild_detail_from_events(&mut self) {
@@ -340,5 +411,30 @@ mod tests {
         );
 
         assert_eq!(store.activity_tree.roots.len(), 1);
+    }
+
+    #[test]
+    fn hydrate_from_api_rebuilds_locally_when_server_tree_empty_with_events() {
+        let mut store = SessionActivityStore::default();
+        let session_id = SessionId::new();
+        let event = EventEnvelope {
+            seq: 1,
+            kind: EventKind::PromptAdmitted,
+            session_id: Some(session_id),
+            payload: serde_json::json!({
+                "message_id": "msg-1",
+                "prompt": "hello",
+            }),
+            created_at: chrono::Utc::now(),
+        };
+        store.hydrate_from_api(
+            vec![event],
+            Vec::new(),
+            ActivityTree::default(),
+            DetailStore::default(),
+            1,
+        );
+        // Must not strand the UI on an empty tree while events exist.
+        assert!(!store.activity_tree.roots.is_empty());
     }
 }

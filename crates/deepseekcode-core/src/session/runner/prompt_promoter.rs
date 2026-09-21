@@ -69,9 +69,8 @@ impl<'a> PromptPromoter<'a> {
 
     async fn promote_input(&self, message_id: MessageId, prompt: &str) -> Result<bool> {
         self.sessions
-            .insert_message(message_id, self.session_id, "user", prompt)
+            .promote_input_atomic(message_id, self.session_id, prompt)
             .await?;
-        self.sessions.promote_input(message_id).await?;
         self.events
             .append(
                 EventKind::Prompted,

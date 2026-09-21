@@ -12,4 +12,4 @@ pub use export::{
 pub use filter::{build_filter_string, resolve_console_enabled, resolve_logs_root};
 pub use init::init;
 pub use redact::{redact, summarize_prompt};
-pub use targets::{APP, AUDIT, DESKTOP, LLM, PERMISSION, SERVER, SESSION, STORAGE, TOOL};
+pub use targets::{APP, AUDIT, CLI, DESKTOP, LLM, PERMISSION, SERVER, SESSION, STORAGE, TOOL};

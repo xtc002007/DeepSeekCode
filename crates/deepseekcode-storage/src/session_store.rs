@@ -7,6 +7,7 @@ use std::str::FromStr;
 
 use crate::paths::normalize_directory_path_for_lookup;
 
+#[derive(Clone)]
 pub struct SessionStore {
     pool: SqlitePool,
 }
@@ -149,6 +150,107 @@ impl SessionStore {
             .await
             .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
         Ok(())
+    }
+
+    /// Atomically insert a user message and mark the matching inbox row promoted.
+    pub async fn promote_input_atomic(
+        &self,
+        message_id: MessageId,
+        session_id: SessionId,
+        prompt: &str,
+    ) -> Result<()> {
+        let now = Utc::now();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        let seq = self.next_message_seq_tx(&mut tx, session_id).await?;
+        sqlx::query(
+            r#"INSERT INTO messages (id, session_id, role, seq, created_at) VALUES (?, ?, 'user', ?, ?)"#,
+        )
+        .bind(message_id.to_string())
+        .bind(session_id.to_string())
+        .bind(seq)
+        .bind(now.to_rfc3339())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        sqlx::query(
+            r#"INSERT INTO message_parts (message_id, part_index, kind, text) VALUES (?, 0, 'text', ?)"#,
+        )
+        .bind(message_id.to_string())
+        .bind(prompt)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        let updated = sqlx::query(
+            r#"UPDATE session_input SET promoted = 1 WHERE id = ? AND session_id = ? AND promoted = 0"#,
+        )
+        .bind(message_id.to_string())
+        .bind(session_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        if updated.rows_affected() == 0 {
+            tx.rollback()
+                .await
+                .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+            return Err(DeepSeekCodeError::Storage(
+                "promote_input_atomic: inbox row missing or already promoted".into(),
+            ));
+        }
+        tx.commit()
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn has_unpromoted_pending(&self, session_id: SessionId) -> Result<bool> {
+        let count: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM session_input WHERE session_id = ? AND promoted = 0"#,
+        )
+        .bind(session_id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        Ok(count > 0)
+    }
+
+    /// Delete unpromoted inbox entries admitted after the given message
+    /// sequence, inside the caller's transaction (used by timeline revert).
+    pub async fn delete_pending_inputs_after_seq_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        session_id: SessionId,
+        boundary_seq: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"DELETE FROM session_input
+               WHERE session_id = ?
+                 AND promoted = 0
+                 AND admitted_at > (
+                     SELECT created_at FROM messages WHERE session_id = ? AND seq = ?
+                 )"#,
+        )
+        .bind(session_id.to_string())
+        .bind(session_id.to_string())
+        .bind(boundary_seq)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Latest assigned message sequence for a session (`-1` when empty).
+    pub async fn latest_message_seq(&self, session_id: SessionId) -> Result<i64> {
+        let seq: Option<i64> =
+            sqlx::query_scalar(r#"SELECT MAX(seq) FROM messages WHERE session_id = ?"#)
+                .bind(session_id.to_string())
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        Ok(seq.unwrap_or(-1))
     }
 
     pub async fn clear_pending_inputs(&self, session_id: SessionId) -> Result<()> {
@@ -831,8 +933,28 @@ impl SessionStore {
         summary: &str,
         recent: &str,
     ) -> Result<i64> {
+        self.commit_compaction_with_epoch(session_id, message_id, summary, recent, None, None)
+            .await
+    }
+
+    /// Atomically insert a compaction checkpoint and optionally replace the context epoch baseline.
+    pub async fn commit_compaction_with_epoch(
+        &self,
+        session_id: SessionId,
+        message_id: MessageId,
+        summary: &str,
+        recent: &str,
+        baseline: Option<&str>,
+        snapshot_json: Option<&str>,
+    ) -> Result<i64> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+
         let now = Utc::now();
-        let seq = self.next_message_seq(session_id).await?;
+        let seq = self.next_message_seq_tx(&mut tx, session_id).await?;
         let payload = serde_json::json!({ "summary": summary, "recent": recent });
         sqlx::query(
             r#"INSERT INTO messages (id, session_id, role, seq, created_at) VALUES (?, ?, 'compaction', ?, ?)"#,
@@ -841,7 +963,7 @@ impl SessionStore {
         .bind(session_id.to_string())
         .bind(seq)
         .bind(now.to_rfc3339())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
 
@@ -850,9 +972,27 @@ impl SessionStore {
         )
         .bind(message_id.to_string())
         .bind(payload.to_string())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+
+        if let (Some(baseline), Some(snapshot_json)) = (baseline, snapshot_json) {
+            sqlx::query(
+                r#"INSERT OR REPLACE INTO context_epochs (session_id, baseline, snapshot, baseline_seq, created_at) VALUES (?, ?, ?, ?, ?)"#,
+            )
+            .bind(session_id.to_string())
+            .bind(baseline)
+            .bind(snapshot_json)
+            .bind(seq)
+            .bind(now.to_rfc3339())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
         Ok(seq)
     }
 }

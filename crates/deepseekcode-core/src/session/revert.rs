@@ -12,6 +12,9 @@ use crate::snapshot::{FileSnapshotStore, RevertDiffEntry};
 
 pub type StagedRevert = RevertState;
 
+const SHELL_ONLY_REVERT_WARNING: &str =
+    "Timeline reverted only; workspace files were not restored because shell commands had no capturable paths.";
+
 pub struct RevertManager {
     snapshots: FileSnapshotStore,
     sessions: SessionStore,
@@ -80,8 +83,16 @@ impl RevertManager {
             self.snapshots.restore_entry(entry)?;
         }
 
+        let shell_only = self
+            .has_non_revertable_shell_after_seq(session_id, boundary_seq)
+            .await?;
+        let warning = shell_only.then(|| SHELL_ONLY_REVERT_WARNING.to_string());
+
         let staged_at = Utc::now();
-        let diff_json = json!({ "files": diff_entries });
+        let diff_json = json!({
+            "files": diff_entries,
+            "warning": warning,
+        });
         sqlx::query(
             r#"INSERT INTO session_revert (session_id, staged_message_id, staged_at, diff_json)
                VALUES (?, ?, ?, ?)"#,
@@ -104,6 +115,7 @@ impl RevertManager {
                     snapshot_id: e.snapshot_id,
                 })
                 .collect(),
+            warning,
         })
     }
 
@@ -153,13 +165,68 @@ impl RevertManager {
         let boundary_seq = self
             .message_seq(session_id, state.staged_message_id)
             .await?;
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+
+        let ids: Vec<String> =
+            sqlx::query_scalar(r#"SELECT id FROM messages WHERE session_id = ? AND seq > ?"#)
+                .bind(session_id.to_string())
+                .bind(boundary_seq)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+
+        for id in ids {
+            sqlx::query(r#"DELETE FROM message_parts WHERE message_id = ?"#)
+                .bind(&id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+            sqlx::query(r#"DELETE FROM messages WHERE id = ?"#)
+                .bind(&id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        }
+
         self.sessions
-            .delete_messages_after_seq(session_id, boundary_seq)
+            .delete_pending_inputs_after_seq_tx(&mut tx, session_id, boundary_seq)
             .await?;
+
+        sqlx::query(
+            r#"DELETE FROM events
+               WHERE session_id = ?
+                 AND created_at > (
+                     SELECT created_at FROM messages WHERE session_id = ? AND seq = ?
+                 )"#,
+        )
+        .bind(session_id.to_string())
+        .bind(session_id.to_string())
+        .bind(boundary_seq)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+
+        // Drop the context epoch entirely: keeping the old baseline would keep
+        // feeding summaries of the now-deleted messages to the model. The next
+        // turn's ensure_epoch() re-renders a clean baseline.
+        sqlx::query(r#"DELETE FROM context_epochs WHERE session_id = ?"#)
+            .bind(session_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
 
         sqlx::query(r#"DELETE FROM session_revert WHERE session_id = ?"#)
             .bind(session_id.to_string())
-            .execute(&self.pool)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+
+        tx.commit()
             .await
             .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
 
@@ -170,11 +237,56 @@ impl RevertManager {
                 json!({
                     "message_id": state.staged_message_id.to_string(),
                     "files": state.files.len(),
+                    "warning": state.warning,
                 }),
             )
             .await?;
 
         Ok(state)
+    }
+
+    async fn has_non_revertable_shell_after_seq(
+        &self,
+        session_id: SessionId,
+        boundary_seq: i64,
+    ) -> Result<bool> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            r#"SELECT payload FROM events
+               WHERE session_id = ?
+                 AND kind = 'tool.completed'
+                 AND created_at > (
+                     SELECT created_at FROM messages WHERE session_id = ? AND seq = ?
+                 )
+               ORDER BY seq ASC"#,
+        )
+        .bind(session_id.to_string())
+        .bind(session_id.to_string())
+        .bind(boundary_seq)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+
+        for payload in rows {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                continue;
+            };
+            let tool_name = value
+                .get("tool_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !matches!(tool_name, "bash" | "powershell") {
+                continue;
+            }
+            let non_revertable = value
+                .get("metadata")
+                .and_then(|m| m.get("non_revertable"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if non_revertable {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     async fn message_seq(&self, session_id: SessionId, message_id: MessageId) -> Result<i64> {
@@ -229,10 +341,15 @@ impl RevertRow {
                     .collect()
             })
             .unwrap_or_default();
+        let warning = diff
+            .get("warning")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         Ok(StagedRevert {
             staged_message_id,
             staged_at,
             files,
+            warning,
         })
     }
 }

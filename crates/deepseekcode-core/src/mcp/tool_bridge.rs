@@ -6,9 +6,10 @@ use std::sync::Arc;
 use super::local_stdio::McpToolInfo;
 use super::pool::McpConnectionPool;
 use crate::tools::registry::Tool;
+use crate::tools::services::{ensure_not_cancelled, race_cancel};
 
 pub fn bridged_tool_name(server: &str, tool: &str) -> String {
-    format!("{server}_{tool}")
+    format!("mcp_{server}_{tool}")
 }
 
 pub fn bridged_tools_from_pool(pool: &Arc<McpConnectionPool>) -> Vec<Box<dyn Tool>> {
@@ -68,16 +69,18 @@ impl Tool for McpBridgedTool {
         input: Value,
         _ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        ensure_not_cancelled()?;
         let pool = self.pool.clone();
         let server = self.server.clone();
         let tool = self.mcp_tool_name.clone();
-        let result = pool
-            .call_tool(&server, &tool, input)
-            .await
-            .map_err(|e| ToolFailure {
-                message: e.to_string(),
-                retryable: true,
-            })?;
-        Ok(result)
+        race_cancel(async move {
+            pool.call_tool(&server, &tool, input)
+                .await
+                .map_err(|e| ToolFailure {
+                    message: e.to_string(),
+                    retryable: true,
+                })
+        })
+        .await
     }
 }

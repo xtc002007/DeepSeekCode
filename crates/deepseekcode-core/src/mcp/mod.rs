@@ -14,6 +14,6 @@ mod tests {
 
     #[test]
     fn bridged_tool_name_format() {
-        assert_eq!(bridged_tool_name("github", "search"), "github_search");
+        assert_eq!(bridged_tool_name("github", "search"), "mcp_github_search");
     }
 }

@@ -18,7 +18,10 @@ pub async fn generate(
         http,
         request,
         Some(api_key),
-        Some("https://openrouter.ai/api/v1"),
+        request
+            .base_url
+            .as_deref()
+            .or(Some("https://openrouter.ai/api/v1")),
     )
     .await
 }
@@ -35,7 +38,10 @@ pub async fn stream(
         http,
         request,
         Some(api_key),
-        Some("https://openrouter.ai/api/v1"),
+        request
+            .base_url
+            .as_deref()
+            .or(Some("https://openrouter.ai/api/v1")),
     )
     .await
 }

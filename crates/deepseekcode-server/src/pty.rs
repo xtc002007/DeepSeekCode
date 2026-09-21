@@ -16,6 +16,9 @@ pub struct PtySession {
     pub directory: String,
     pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pub master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    /// Handle to the spawned shell so `destroy` can terminate it outright
+    /// instead of relying on PTY-master teardown.
+    pub child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
     pub input_tx: broadcast::Sender<Vec<u8>>,
 }
 
@@ -58,7 +61,7 @@ impl PtyManager {
 
         let mut cmd = CommandBuilder::new(&shell);
         cmd.cwd(&cwd);
-        let _child = pair
+        let child = pair
             .slave
             .spawn_command(cmd)
             .map_err(|e| DeepSeekCodeError::Other(e.to_string()))?;
@@ -122,6 +125,7 @@ impl PtyManager {
             directory: cwd.to_string(),
             writer,
             master,
+            child: Arc::new(Mutex::new(child)),
             input_tx,
         });
         self.sessions
@@ -171,6 +175,42 @@ impl PtyManager {
             .unwrap()
             .write_all(data)
             .map_err(DeepSeekCodeError::Io)?;
+        Ok(())
+    }
+
+    /// Remove a PTY session: kill the child shell, drop any live tickets.
+    /// `directory` must match the directory the PTY was created under, so one
+    /// project cannot destroy another project's terminals.
+    pub fn destroy(&self, id: &str, directory: &str) -> Result<()> {
+        let requested = normalize_pty_cwd(directory);
+        let session = {
+            let mut sessions = self.sessions.lock().unwrap();
+            let session = sessions
+                .get(id)
+                .cloned()
+                .ok_or_else(|| DeepSeekCodeError::NotFound(format!("pty {id}")))?;
+            if session.directory != requested {
+                return Err(DeepSeekCodeError::NotFound(format!(
+                    "pty {id} does not belong to this project directory"
+                )));
+            }
+            sessions.remove(id);
+            session
+        };
+        if let Ok(mut child) = session.child.lock() {
+            if let Err(e) = child.kill() {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::SERVER,
+                    pty_id = %id,
+                    error = %e,
+                    "pty child kill failed"
+                );
+            }
+        }
+        self.tickets
+            .lock()
+            .unwrap()
+            .retain(|_, record| record.pty_id != id);
         Ok(())
     }
 

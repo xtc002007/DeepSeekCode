@@ -357,6 +357,10 @@ async fn main() -> anyhow::Result<()> {
             use futures::StreamExt;
             let result = tokio::time::timeout(std::time::Duration::from_secs(600), async {
                 let mut since_seq = 0i64;
+                // Exponential backoff for reconnects after a failed gap
+                // backfill; otherwise the server keeps reporting the same gap
+                // and we would hammer it in a tight reconnect loop.
+                let mut reconnect_backoff = std::time::Duration::from_millis(500);
                 loop {
                     let mut stream = client.event_stream(since_seq, Some(session.id)).await?;
                     let mut stream_ended = true;
@@ -364,17 +368,50 @@ async fn main() -> anyhow::Result<()> {
                         stream_ended = false;
                         match item {
                             EventStreamItem::Gap { head, .. } => {
-                                let events =
-                                    client.list_session_events(session.id, since_seq).await?;
-                                for event in events {
-                                    if event.session_id != Some(session.id) {
-                                        continue;
+                                match client.list_session_events(session.id, since_seq).await {
+                                    Ok(events) => {
+                                        reconnect_backoff = std::time::Duration::from_millis(500);
+                                        for event in events {
+                                            if event.session_id != Some(session.id) {
+                                                continue;
+                                            }
+                                            if event.kind == EventKind::SessionIdle {
+                                                return Ok(());
+                                            }
+                                            if event.kind == EventKind::MessageDelta {
+                                                if let Some(delta) = event
+                                                    .payload
+                                                    .get("delta")
+                                                    .and_then(|v| v.as_str())
+                                                {
+                                                    print!("{delta}");
+                                                    let _ = std::io::Write::flush(
+                                                        &mut std::io::stdout(),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        // Advance only: never move backwards.
+                                        // The server's `head` can lag behind what
+                                        // this client already applied (e.g. after
+                                        // a broadcast-lag gap).
+                                        if head > since_seq {
+                                            since_seq = head;
+                                        }
                                     }
-                                    if event.kind == EventKind::SessionIdle {
-                                        return Ok(());
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            target: deepseekcode_telemetry::CLI,
+                                            error = %e,
+                                            since_seq,
+                                            head,
+                                            "sse gap backfill failed; keeping since_seq"
+                                        );
+                                        tokio::time::sleep(reconnect_backoff).await;
+                                        reconnect_backoff = (reconnect_backoff * 2)
+                                            .min(std::time::Duration::from_secs(30));
                                     }
                                 }
-                                since_seq = head;
                                 break;
                             }
                             EventStreamItem::Event(event) => {
@@ -475,8 +512,11 @@ async fn main() -> anyhow::Result<()> {
             } => {
                 let (engine, client) = scoped_client(&directory).await?;
                 let session_id = resolve_session(&client, session.as_deref()).await?;
+                let session = client.get_session(session_id).await?;
+                let model = session.model_id.unwrap_or_else(|| "gpt-4o-mini".into());
+                let provider = session.provider_id.unwrap_or_else(|| "openai".into());
                 client
-                    .update_model(session_id, Some(&agent), "gpt-4o-mini", "openai")
+                    .update_model(session_id, Some(&agent), &model, &provider)
                     .await?;
                 println!("agent set to {agent}");
                 engine.shutdown().await;

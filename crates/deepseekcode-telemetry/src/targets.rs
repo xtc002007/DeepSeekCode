@@ -8,6 +8,7 @@ pub const PERMISSION: &str = "deepseekcode::permission";
 pub const STORAGE: &str = "deepseekcode::storage";
 pub const SERVER: &str = "deepseekcode::server";
 pub const DESKTOP: &str = "deepseekcode::desktop";
+pub const CLI: &str = "deepseekcode::cli";
 pub const AUDIT: &str = "deepseekcode::audit";
 
 pub fn is_session_target(target: &str) -> bool {

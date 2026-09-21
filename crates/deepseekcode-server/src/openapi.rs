@@ -172,6 +172,7 @@ pub struct CreatePtyRequest {
         crate::routes::fs_diff,
         crate::routes::create_pty,
         crate::routes::resize_pty,
+        crate::routes::destroy_pty,
         crate::routes::pty_ticket,
         crate::routes::pty_connect,
         crate::routes::list_projects,

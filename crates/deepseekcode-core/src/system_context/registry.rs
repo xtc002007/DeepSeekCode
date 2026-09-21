@@ -5,7 +5,6 @@ use super::source::{
 };
 use crate::skills::SkillCatalog;
 use deepseekcode_config::DeepSeekCodeConfig;
-use deepseekcode_storage::EventStore;
 use deepseekcode_types::{Result, SessionId};
 
 pub struct SystemContextRegistry {
@@ -138,7 +137,7 @@ impl SystemContextRegistry {
     pub async fn ensure_epoch(
         &self,
         store: &ContextEpochStore,
-        events: &EventStore,
+        sessions: &deepseekcode_storage::SessionStore,
         session_id: SessionId,
     ) -> Result<Option<Generation>> {
         if store.get(session_id).await?.is_some() {
@@ -149,7 +148,7 @@ impl SystemContextRegistry {
         }
         let generation = self.render_baseline();
         if let Some(ref gen) = generation {
-            let baseline_seq = events.latest_seq(session_id).await?;
+            let baseline_seq = sessions.latest_message_seq(session_id).await?;
             store.initialize(session_id, gen, baseline_seq).await?;
         }
         Ok(generation)
@@ -255,7 +254,7 @@ fn baseline_differs_materially(generation: &Generation, previous: &Snapshot) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use deepseekcode_storage::{Database, EventStore, SessionStore};
+    use deepseekcode_storage::{Database, SessionStore};
     use deepseekcode_types::{LocationId, SessionId};
     use tempfile::TempDir;
 
@@ -354,9 +353,8 @@ mod tests {
             .unwrap();
 
         let store = ContextEpochStore::new(db.pool().clone());
-        let events = EventStore::new(db.pool().clone());
         registry
-            .ensure_epoch(&store, &events, session_id)
+            .ensure_epoch(&store, &sessions, session_id)
             .await
             .unwrap();
         assert!(store.get(session_id).await.unwrap().is_some());

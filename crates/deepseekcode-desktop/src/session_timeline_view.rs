@@ -48,7 +48,6 @@ impl SessionTimelineView {
         highlighted_todo_leaf: Option<&str>,
         scroll_handle: &ScrollHandle,
         session_loading: bool,
-        has_activity_history: bool,
     ) -> impl gpui::IntoElement {
         crate::activity_timeline::ActivityTimelineView::render(
             cx,
@@ -59,7 +58,6 @@ impl SessionTimelineView {
             highlighted_todo_leaf,
             scroll_handle,
             session_loading,
-            has_activity_history,
         )
     }
 }

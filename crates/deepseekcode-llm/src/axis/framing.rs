@@ -30,7 +30,7 @@ pub fn parse_openai_sse_frame(
 ) -> Vec<Result<LlmEvent>> {
     let mut events = Vec::new();
     for line in frame.lines() {
-        let Some(data) = line.strip_prefix("data: ") else {
+        let Some(data) = sse_data_payload(line) else {
             continue;
         };
         if data == "[DONE]" {
@@ -108,6 +108,12 @@ pub fn parse_openai_sse_frame(
         }
     }
     events
+}
+
+pub(crate) fn sse_data_payload(line: &str) -> Option<&str> {
+    let payload = line.strip_prefix("data:")?;
+    let payload = payload.strip_prefix(' ').unwrap_or(payload);
+    Some(payload)
 }
 
 pub(crate) fn parse_message_response(value: &Value) -> Result<crate::request::LlmResponse> {

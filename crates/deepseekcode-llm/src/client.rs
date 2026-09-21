@@ -14,7 +14,11 @@ impl LlmClient {
     pub fn new() -> Self {
         Self {
             http: Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
+                .connect_timeout(std::time::Duration::from_secs(30))
+                // Bounds stalls between reads so a provider that stops sending
+                // data cannot hang a session forever (streaming is additionally
+                // guarded by the runner's idle watchdog).
+                .read_timeout(std::time::Duration::from_secs(120))
                 .build()
                 .unwrap_or_default(),
         }

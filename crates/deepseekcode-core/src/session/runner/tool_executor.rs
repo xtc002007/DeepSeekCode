@@ -18,6 +18,10 @@ impl SessionRunner {
         tool_call: LlmToolCall,
         assistant_id: MessageId,
     ) -> Result<()> {
+        if self.interrupted.is_cancelled() {
+            return Err(DeepSeekCodeError::SessionInterrupted);
+        }
+
         let tool_call_id = provider_tool_call_id(&tool_call);
         let internal_tool_call_id =
             ToolCallId::from_str(&tool_call_id).unwrap_or_else(|_| ToolCallId::new());
@@ -132,11 +136,32 @@ impl SessionRunner {
                 internal_tool_call_id,
                 &format!("{:?}", session.agent).to_lowercase(),
                 Some(self.hooks.as_ref()),
+                Some(self.interrupted.clone()),
             )
             .await
         {
             Ok(value) => value,
             Err(DeepSeekCodeError::ToolFailure(msg)) => {
+                if self.interrupted.is_cancelled() {
+                    let envelope = ToolResultEnvelope::new(
+                        format!("{} interrupted", tool_call.name),
+                        json!({
+                            "error": msg,
+                            "success": false,
+                            "interrupted": true,
+                        }),
+                    )
+                    .with_duration_ms(start.elapsed().as_millis() as u64);
+                    return self
+                        .complete_tool_interrupted(
+                            &tool_call,
+                            &tool_call_id,
+                            assistant_id,
+                            start,
+                            envelope,
+                        )
+                        .await;
+                }
                 tracing::warn!(
                     target: deepseekcode_telemetry::TOOL,
                     session_id = %self.session_id,
@@ -153,6 +178,12 @@ impl SessionRunner {
             }
             Err(e) => return Err(e),
         };
+
+        if self.interrupted.is_cancelled() {
+            return self
+                .complete_tool_interrupted(&tool_call, &tool_call_id, assistant_id, start, envelope)
+                .await;
+        }
 
         let stored = envelope.to_stored();
         let output = self.tool_output.store(
@@ -201,6 +232,65 @@ impl SessionRunner {
         );
 
         Ok(())
+    }
+
+    async fn complete_tool_interrupted(
+        &self,
+        tool_call: &LlmToolCall,
+        tool_call_id: &str,
+        _assistant_id: MessageId,
+        start: std::time::Instant,
+        envelope: ToolResultEnvelope,
+    ) -> Result<()> {
+        let interrupted = ToolResultEnvelope::new(
+            envelope.title,
+            json!({
+                "error": "tool execution interrupted",
+                "success": false,
+                "interrupted": true,
+                "partial_output": envelope.output,
+            }),
+        )
+        .with_duration_ms(start.elapsed().as_millis() as u64);
+
+        let result_id = MessageId::new();
+        let stored = interrupted.to_stored();
+        let output = self.tool_output.store(
+            self.session_id,
+            tool_call_id,
+            &tool_call.name,
+            &stored,
+            &self.tool_output_limits(),
+        )?;
+
+        self.sessions
+            .insert_tool_result(
+                result_id,
+                self.session_id,
+                0,
+                tool_call_id,
+                &tool_call.name,
+                &output,
+            )
+            .await?;
+
+        self.events
+            .append(
+                EventKind::ToolCompleted,
+                Some(self.session_id),
+                json!({
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_call.name,
+                    "title": interrupted.title,
+                    "metadata": interrupted.metadata,
+                    "duration_ms": interrupted.duration_ms,
+                    "output": output,
+                }),
+            )
+            .await?;
+
+        let _ = crate::activity::emit_activity_updated(&self.events, self.session_id, 0).await;
+        Err(DeepSeekCodeError::SessionInterrupted)
     }
 
     async fn check_loop_guard(

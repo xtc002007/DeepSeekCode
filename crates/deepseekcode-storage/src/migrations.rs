@@ -53,6 +53,65 @@ fn split_trigger_statements(sql: &str) -> Vec<String> {
         .collect()
 }
 
+async fn repair_checksum(pool: &SqlitePool, version: i32, checksum: &str) -> Result<()> {
+    sqlx::query("UPDATE refinery_schema_history SET checksum = ? WHERE version = ?")
+        .bind(checksum)
+        .bind(version)
+        .execute(pool)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+    Ok(())
+}
+
+async fn verify_applied_migration(
+    pool: &SqlitePool,
+    migration: &Migration,
+    stored: Option<String>,
+) -> Result<()> {
+    let version = migration.version() as i32;
+    let sql = migration
+        .sql()
+        .ok_or_else(|| DeepSeekCodeError::Storage(format!("migration V{version} has no sql")))?;
+    let expected = stable_migration_checksum(sql);
+    let refinery_expected = migration.checksum().to_string();
+
+    if stored.as_deref() == Some(expected.as_str()) {
+        return Ok(());
+    }
+
+    if stored.as_deref() == Some(refinery_expected.as_str()) {
+        repair_checksum(pool, version, &expected).await?;
+        tracing::info!(
+            target: deepseekcode_telemetry::STORAGE,
+            version,
+            "upgraded migration checksum to stable sha256 format"
+        );
+        return Ok(());
+    }
+
+    // Last-resort self-heal for databases written by older builds whose
+    // embedded SQL drifted (CRLF/whitespace differences): if the migration's
+    // schema effects are already present, the migration effectively ran —
+    // repair the checksum instead of bricking the database on startup.
+    if migration_effects_present(pool, sql).await? {
+        repair_checksum(pool, version, &expected).await?;
+        tracing::warn!(
+            target: deepseekcode_telemetry::STORAGE,
+            version,
+            stored_checksum = ?stored,
+            expected_checksum = %expected,
+            "migration checksum drift detected; repaired after schema verification"
+        );
+        return Ok(());
+    }
+
+    Err(DeepSeekCodeError::Storage(format!(
+        "migration V{version} checksum mismatch (stored={stored:?}, expected={expected}); \
+         the database may come from an incompatible build — back it up and remove \
+         refinery_schema_history rows for versions whose schema is already applied"
+    )))
+}
+
 fn extract_create_tables(sql: &str) -> Vec<String> {
     let mut tables = Vec::new();
     let normalized = normalize_migration_sql(sql);
@@ -148,59 +207,6 @@ async fn migration_effects_present(pool: &SqlitePool, sql: &str) -> Result<bool>
     Ok(true)
 }
 
-async fn repair_checksum(pool: &SqlitePool, version: i32, checksum: &str) -> Result<()> {
-    sqlx::query("UPDATE refinery_schema_history SET checksum = ? WHERE version = ?")
-        .bind(checksum)
-        .bind(version)
-        .execute(pool)
-        .await
-        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-    Ok(())
-}
-
-async fn verify_applied_migration(
-    pool: &SqlitePool,
-    migration: &Migration,
-    stored: Option<String>,
-) -> Result<()> {
-    let version = migration.version() as i32;
-    let sql = migration
-        .sql()
-        .ok_or_else(|| DeepSeekCodeError::Storage(format!("migration V{version} has no sql")))?;
-    let expected = stable_migration_checksum(sql);
-    let refinery_expected = migration.checksum().to_string();
-
-    if stored.as_deref() == Some(expected.as_str()) {
-        return Ok(());
-    }
-
-    if stored.as_deref() == Some(refinery_expected.as_str()) {
-        repair_checksum(pool, version, &expected).await?;
-        tracing::info!(
-            target: deepseekcode_telemetry::STORAGE,
-            version,
-            "upgraded migration checksum to stable sha256 format"
-        );
-        return Ok(());
-    }
-
-    if migration_effects_present(pool, sql).await? {
-        repair_checksum(pool, version, &expected).await?;
-        tracing::warn!(
-            target: deepseekcode_telemetry::STORAGE,
-            version,
-            stored_checksum = ?stored,
-            expected_checksum = %expected,
-            "migration checksum drift detected; repaired after schema verification"
-        );
-        return Ok(());
-    }
-
-    Err(DeepSeekCodeError::Storage(format!(
-        "migration V{version} checksum mismatch (stored={stored:?}, expected={expected}) and schema verification failed"
-    )))
-}
-
 async fn apply_migration(
     pool: &SqlitePool,
     migration: &Migration,
@@ -276,16 +282,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stable_checksum_is_line_ending_invariant() {
-        let sql = "CREATE TABLE IF NOT EXISTS sessions (\n    id TEXT\n);\n";
-        let crlf = sql.replace('\n', "\r\n");
-        assert_eq!(
-            stable_migration_checksum(sql),
-            stable_migration_checksum(&crlf)
-        );
-    }
-
-    #[test]
     fn extracts_create_tables_and_columns() {
         let sql = r#"
 CREATE TABLE IF NOT EXISTS sessions (id TEXT);
@@ -298,8 +294,18 @@ ALTER TABLE messages ADD COLUMN input_tokens INTEGER;
         );
     }
 
+    #[test]
+    fn stable_checksum_is_line_ending_invariant() {
+        let sql = "CREATE TABLE IF NOT EXISTS sessions (\n    id TEXT\n);\n";
+        let crlf = sql.replace('\n', "\r\n");
+        assert_eq!(
+            stable_migration_checksum(sql),
+            stable_migration_checksum(&crlf)
+        );
+    }
+
     #[tokio::test]
-    async fn repairs_legacy_checksum_when_schema_present() {
+    async fn repairs_legacy_refinery_checksum() {
         use crate::Database;
 
         let db = Database::open_in_memory().await.expect("memory db");
@@ -319,5 +325,35 @@ ALTER TABLE messages ADD COLUMN input_tokens INTEGER;
                 .await
                 .unwrap();
         assert!(stored.starts_with("sha256:"));
+    }
+
+    #[tokio::test]
+    async fn repairs_drifted_checksum_when_schema_effects_present() {
+        use crate::Database;
+
+        let db = Database::open_in_memory().await.expect("memory db");
+        let pool = db.pool().clone();
+
+        // A checksum that matches neither the stable sha256 nor the legacy
+        // refinery value, i.e. genuine drift. The schema itself is untouched,
+        // so the effects-verification self-heal must repair it instead of
+        // failing database open.
+        sqlx::query("UPDATE refinery_schema_history SET checksum = ? WHERE version = 1")
+            .bind("deadbeef-drifted")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run(&pool).await.expect("drift repair should succeed");
+
+        let stored: String =
+            sqlx::query_scalar("SELECT checksum FROM refinery_schema_history WHERE version = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            stored.starts_with("sha256:"),
+            "repaired checksum, got {stored}"
+        );
     }
 }

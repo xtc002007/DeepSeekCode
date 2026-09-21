@@ -5,12 +5,183 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 use std::path::Path;
 use std::sync::Arc;
-use wasmtime::*;
+use wasmtime::Module;
 
 use crate::hooks::{
-    ChatSystemTransformInput, ChatSystemTransformOutput, HookRegistry, SessionHook,
+    ChatSystemTransformInput, ChatSystemTransformOutput, HookRegistry, SessionCompactingInput,
+    SessionCompactingOutput, SessionHook, ToolExecuteAfterInput, ToolExecuteAfterOutput,
+    ToolExecuteBeforeInput, ToolExecuteBeforeOutput,
 };
 use crate::wasm::WasmPluginRuntime;
+
+struct WasmSessionHook {
+    plugin_id: String,
+    module: Module,
+    exports: WasmHookExports,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct WasmHookExports {
+    chat_system_transform: bool,
+    tool_execute_before: bool,
+    tool_execute_after: bool,
+    session_compacting: bool,
+}
+
+impl WasmHookExports {
+    fn from_module(module: &Module) -> Self {
+        let names: std::collections::HashSet<&str> = module.exports().map(|e| e.name()).collect();
+        Self {
+            chat_system_transform: names.contains("chat_system_transform"),
+            tool_execute_before: names.contains("tool_execute_before"),
+            tool_execute_after: names.contains("tool_execute_after"),
+            session_compacting: names.contains("session_compacting"),
+        }
+    }
+
+    fn has_any(self) -> bool {
+        self.chat_system_transform
+            || self.tool_execute_before
+            || self.tool_execute_after
+            || self.session_compacting
+    }
+}
+
+#[async_trait]
+impl SessionHook for WasmSessionHook {
+    fn id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    async fn chat_system_transform(
+        &self,
+        input: &ChatSystemTransformInput,
+        output: &mut ChatSystemTransformOutput,
+    ) -> Result<()> {
+        if !self.exports.chat_system_transform {
+            return Ok(());
+        }
+        let module = self.module.clone();
+        let plugin_id = self.plugin_id.clone();
+        let model = input.model.clone();
+        let system_lines = output.system.clone();
+        let transformed = tokio::task::spawn_blocking(move || {
+            WasmPluginRuntime::transform_system_prompt(&module, &plugin_id, &system_lines, &model)
+        })
+        .await
+        .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))??;
+        if let Some(lines) = transformed {
+            output.system = lines;
+        }
+        Ok(())
+    }
+
+    async fn tool_execute_before(
+        &self,
+        input: &ToolExecuteBeforeInput,
+        output: &mut ToolExecuteBeforeOutput,
+    ) -> Result<()> {
+        if !self.exports.tool_execute_before {
+            return Ok(());
+        }
+        let module = self.module.clone();
+        let plugin_id = self.plugin_id.clone();
+        let payload = serde_json::json!({
+            "tool": input.tool,
+            "session_id": input.session_id,
+            "call_id": input.call_id,
+            "args": output.args,
+        });
+        let result = tokio::task::spawn_blocking(move || {
+            WasmPluginRuntime::invoke_json_hook(
+                &module,
+                &plugin_id,
+                "tool_execute_before",
+                &payload,
+            )
+        })
+        .await
+        .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))??;
+        if let Some(value) = result {
+            if let Some(args) = value.get("args") {
+                output.args = args.clone();
+            }
+        }
+        Ok(())
+    }
+
+    async fn tool_execute_after(
+        &self,
+        input: &ToolExecuteAfterInput,
+        output: &mut ToolExecuteAfterOutput,
+    ) -> Result<()> {
+        if !self.exports.tool_execute_after {
+            return Ok(());
+        }
+        let module = self.module.clone();
+        let plugin_id = self.plugin_id.clone();
+        let payload = serde_json::json!({
+            "tool": input.tool,
+            "session_id": input.session_id,
+            "call_id": input.call_id,
+            "args": input.args,
+            "title": output.title,
+            "output": output.output,
+            "metadata": output.metadata,
+        });
+        let result = tokio::task::spawn_blocking(move || {
+            WasmPluginRuntime::invoke_json_hook(&module, &plugin_id, "tool_execute_after", &payload)
+        })
+        .await
+        .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))??;
+        if let Some(value) = result {
+            if let Some(title) = value.get("title").and_then(|v| v.as_str()) {
+                output.title = title.to_string();
+            }
+            if let Some(tool_output) = value.get("output") {
+                output.output = tool_output.clone();
+            }
+            if let Some(metadata) = value.get("metadata") {
+                output.metadata = metadata.clone();
+            }
+        }
+        Ok(())
+    }
+
+    async fn session_compacting(
+        &self,
+        input: &SessionCompactingInput,
+        output: &mut SessionCompactingOutput,
+    ) -> Result<()> {
+        if !self.exports.session_compacting {
+            return Ok(());
+        }
+        let module = self.module.clone();
+        let plugin_id = self.plugin_id.clone();
+        let payload = serde_json::json!({
+            "session_id": input.session_id,
+            "context": output.context,
+            "prompt": output.prompt,
+        });
+        let result = tokio::task::spawn_blocking(move || {
+            WasmPluginRuntime::invoke_json_hook(&module, &plugin_id, "session_compacting", &payload)
+        })
+        .await
+        .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))??;
+        if let Some(value) = result {
+            if let Some(prompt) = value.get("prompt").and_then(|v| v.as_str()) {
+                output.prompt = Some(prompt.to_string());
+            }
+            if let Some(context) = value.get("context").and_then(|v| v.as_array()) {
+                output.context = context
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect();
+            }
+        }
+        Ok(())
+    }
+}
 
 pub trait DeepSeekCodePlugin: Send + Sync {
     fn id(&self) -> &str;
@@ -224,14 +395,31 @@ impl PluginHost {
         for hook in &self.native_hooks {
             registry.register(hook.clone());
         }
+        for (name, module) in &self.wasm_modules {
+            let exports = WasmHookExports::from_module(module);
+            if !exports.has_any() {
+                continue;
+            }
+            registry.register(Arc::new(WasmSessionHook {
+                plugin_id: name.clone(),
+                module: module.clone(),
+                exports,
+            }));
+        }
     }
 
     pub fn list(&self) -> Vec<String> {
         self.plugins
             .iter()
             .map(|p| p.id().to_string())
-            .chain(self.wasm_modules.keys().cloned())
             .chain(self.native_hooks.iter().map(|h| h.id().to_string()))
+            .chain(self.wasm_modules.iter().filter_map(|(name, module)| {
+                if WasmHookExports::from_module(module).has_any() {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            }))
             .collect()
     }
 

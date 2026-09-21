@@ -6,9 +6,9 @@ use deepseekcode_schema::event::EventKind;
 use deepseekcode_schema::session::PromptDelivery;
 use deepseekcode_types::{MessageId, Result, SessionId};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use super::runner::SessionRunner;
 use crate::mcp::McpConnectionPool;
@@ -27,6 +27,7 @@ pub struct SessionExecution {
     events: Arc<EventStore>,
     mcp: Arc<McpConnectionPool>,
     hooks: Arc<HookRegistry>,
+    sessions: SessionStore,
     runners: Mutex<HashMap<SessionId, Arc<SessionRunner>>>,
     question_channels: Mutex<
         HashMap<
@@ -36,7 +37,15 @@ pub struct SessionExecution {
     >,
     child_sessions: Mutex<HashMap<SessionId, Vec<SessionId>>>,
     child_handles: Mutex<HashMap<SessionId, tokio::task::JoinHandle<()>>>,
-    active_session_id: Option<Arc<std::sync::RwLock<Option<SessionId>>>>,
+    drain_handles: Mutex<HashMap<SessionId, tokio::task::JoinHandle<()>>>,
+    /// Sessions whose current run cycle was cancelled by the user. Unlike the
+    /// per-runner flag (reset on every `drain()` entry), this survives runner
+    /// recreation between drain-loop iterations, so an interrupt can never be
+    /// swallowed by a fresh runner starting mid-cycle. Cleared on `wake`.
+    interrupt_requested: std::sync::Mutex<HashSet<SessionId>>,
+    active_session_ids: Option<Arc<std::sync::RwLock<HashSet<SessionId>>>>,
+    pub(crate) drain_active: Arc<RwLock<HashSet<SessionId>>>,
+    pub(crate) drain_needs_rerun: Arc<RwLock<HashSet<SessionId>>>,
 }
 
 struct ExecutionTaskSpawner {
@@ -66,7 +75,10 @@ impl SessionExecution {
         events: Arc<EventStore>,
         mcp: Arc<McpConnectionPool>,
         hooks: Arc<HookRegistry>,
-        active_session_id: Option<Arc<std::sync::RwLock<Option<SessionId>>>>,
+        active_session_ids: Option<Arc<std::sync::RwLock<HashSet<SessionId>>>>,
+        sessions: SessionStore,
+        drain_active: Arc<RwLock<HashSet<SessionId>>>,
+        drain_needs_rerun: Arc<RwLock<HashSet<SessionId>>>,
     ) -> Self {
         Self {
             db,
@@ -77,18 +89,146 @@ impl SessionExecution {
             events,
             mcp,
             hooks,
+            sessions,
             runners: Mutex::new(HashMap::new()),
             question_channels: Mutex::new(HashMap::new()),
             child_sessions: Mutex::new(HashMap::new()),
             child_handles: Mutex::new(HashMap::new()),
-            active_session_id,
+            drain_handles: Mutex::new(HashMap::new()),
+            interrupt_requested: std::sync::Mutex::new(HashSet::new()),
+            active_session_ids,
+            drain_active,
+            drain_needs_rerun,
         }
     }
 
+    fn request_interrupt(&self, session_id: SessionId) {
+        self.interrupt_requested
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(session_id);
+    }
+
+    pub(crate) fn is_interrupt_requested(&self, session_id: SessionId) -> bool {
+        self.interrupt_requested
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&session_id)
+    }
+
+    fn clear_interrupt_request(&self, session_id: SessionId) {
+        self.interrupt_requested
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&session_id);
+    }
+
+    pub async fn wake(self: &Arc<Self>, session_id: SessionId) -> Result<()> {
+        // A fresh user prompt starts a new run cycle: drop any leftover
+        // interrupt request from a previous cancelled cycle.
+        self.clear_interrupt_request(session_id);
+        {
+            let mut active = self.drain_active.write().await;
+            if !active.insert(session_id) {
+                self.drain_needs_rerun.write().await.insert(session_id);
+                tracing::debug!(
+                    target: deepseekcode_telemetry::SESSION,
+                    session_id = %session_id,
+                    "session already draining; marked for rerun"
+                );
+                return Ok(());
+            }
+        }
+        let handle = self.spawn_drain(session_id);
+        self.drain_handles.lock().await.insert(session_id, handle);
+        Ok(())
+    }
+
+    fn spawn_drain(self: &Arc<Self>, session_id: SessionId) -> tokio::task::JoinHandle<()> {
+        let execution = Arc::clone(self);
+        let active = self.drain_active.clone();
+        let needs_rerun = self.drain_needs_rerun.clone();
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            loop {
+                // An interrupt may land between drain iterations; honor it
+                // instead of starting another run with a recreated runner.
+                if execution.is_interrupt_requested(session_id) {
+                    break;
+                }
+                let result = execution.run(session_id).await;
+                let interrupted = matches!(
+                    result,
+                    Err(deepseekcode_types::DeepSeekCodeError::SessionInterrupted)
+                );
+                if let Err(e) = result {
+                    if interrupted {
+                        tracing::debug!(
+                            target: deepseekcode_telemetry::SESSION,
+                            session_id = %session_id,
+                            "session drain interrupted"
+                        );
+                    } else {
+                        tracing::error!(
+                            target: deepseekcode_telemetry::SESSION,
+                            session_id = %session_id,
+                            error = %e,
+                            "session drain error"
+                        );
+                        let _ = events
+                            .append(
+                                EventKind::SessionInterrupted,
+                                Some(session_id),
+                                json!({ "error": e.to_string() }),
+                            )
+                            .await;
+                    }
+                    break;
+                }
+                let should_rerun = needs_rerun.write().await.remove(&session_id)
+                    || execution
+                        .sessions
+                        .has_unpromoted_pending(session_id)
+                        .await
+                        .unwrap_or(false);
+                if !should_rerun {
+                    // Don't announce idle for a cycle the user just cancelled.
+                    if execution.is_interrupt_requested(session_id) {
+                        break;
+                    }
+                    let _ = events
+                        .append(EventKind::SessionIdle, Some(session_id), json!({}))
+                        .await;
+                    if let Ok(seq) = events.latest_seq(session_id).await {
+                        let _ = events
+                            .append(
+                                EventKind::ActivityUpdated,
+                                Some(session_id),
+                                json!({ "since_seq": seq }),
+                            )
+                            .await;
+                    }
+                    break;
+                }
+            }
+            active.write().await.remove(&session_id);
+            // The drain_handles entry is intentionally left in place: it is
+            // consumed (remove + await) by drop_runner / wait_children, and the
+            // next wake() overwrites it. A finished handle awaits immediately,
+            // so a stale entry is harmless.
+        })
+    }
+
     pub async fn run(self: &Arc<Self>, session_id: SessionId) -> Result<()> {
-        if let Some(active) = &self.active_session_id {
+        // A cancelled cycle must not (re)enter a provider turn. Both checks
+        // close the race where `interrupt()` lands while this function is
+        // between its entry check and runner creation.
+        if self.is_interrupt_requested(session_id) {
+            return Err(deepseekcode_types::DeepSeekCodeError::SessionInterrupted);
+        }
+        if let Some(active) = &self.active_session_ids {
             if let Ok(mut guard) = active.write() {
-                *guard = Some(session_id);
+                guard.insert(session_id);
             }
         }
         let spawner: Arc<dyn TaskSpawner> = Arc::new(ExecutionTaskSpawner {
@@ -114,6 +254,12 @@ impl SessionExecution {
                 })
                 .clone()
         };
+        if self.is_interrupt_requested(session_id) {
+            // Drop the freshly (re)created runner so the next cycle starts with
+            // a clean interrupted flag instead of draining once more.
+            self.runners.lock().await.remove(&session_id);
+            return Err(deepseekcode_types::DeepSeekCodeError::SessionInterrupted);
+        }
         self.question_channels
             .lock()
             .await
@@ -121,11 +267,9 @@ impl SessionExecution {
         let result = runner.drain().await;
         self.question_channels.lock().await.remove(&session_id);
         self.wait_children(session_id).await;
-        if let Some(active) = &self.active_session_id {
+        if let Some(active) = &self.active_session_ids {
             if let Ok(mut guard) = active.write() {
-                if guard.as_ref() == Some(&session_id) {
-                    *guard = None;
-                }
+                guard.remove(&session_id);
             }
         }
         result
@@ -204,26 +348,7 @@ impl SessionExecution {
             .or_default()
             .push(child_id);
 
-        let execution = Arc::clone(self);
-        let events = self.events.clone();
-        let handle = tokio::spawn(async move {
-            let result = execution.run(child_id).await;
-            if result.is_ok() {
-                let _ = events
-                    .append(EventKind::SessionIdle, Some(child_id), json!({}))
-                    .await;
-            } else if let Err(e) = result {
-                let _ = events
-                    .append(
-                        EventKind::SessionInterrupted,
-                        Some(child_id),
-                        json!({ "error": e.to_string() }),
-                    )
-                    .await;
-            }
-            execution.child_handles.lock().await.remove(&child_id);
-        });
-        self.child_handles.lock().await.insert(child_id, handle);
+        Arc::clone(self).wake(child_id).await?;
 
         Ok(child_id)
     }
@@ -236,6 +361,10 @@ impl SessionExecution {
             .remove(&parent_id)
             .unwrap_or_default();
         for child_id in children {
+            if let Some(handle) = self.drain_handles.lock().await.remove(&child_id) {
+                let _ = handle.await;
+                continue;
+            }
             if let Some(handle) = self.child_handles.lock().await.remove(&child_id) {
                 let _ = handle.await;
             }
@@ -272,6 +401,9 @@ impl SessionExecution {
                 .cloned()
                 .unwrap_or_default();
             stack.extend(children);
+            // Durable per-cycle marker: survives runner recreation between
+            // drain iterations, so a later drain pass cannot resurrect the run.
+            self.request_interrupt(sid);
             let runners = self.runners.lock().await;
             if let Some(runner) = runners.get(&sid) {
                 runner.interrupt().await;
@@ -283,6 +415,9 @@ impl SessionExecution {
     pub async fn drop_runner(&self, session_id: SessionId) {
         let _ = self.interrupt(session_id).await;
         self.runners.lock().await.remove(&session_id);
+        if let Some(handle) = self.drain_handles.lock().await.remove(&session_id) {
+            let _ = handle.await;
+        }
     }
 
     pub async fn refresh_mcp_tools_for_all_runners(&self) {

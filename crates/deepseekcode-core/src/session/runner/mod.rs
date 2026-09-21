@@ -42,7 +42,7 @@ use crate::provider::ProviderCatalog;
 use crate::session::projector::EventProjector;
 use crate::snapshot::FileSnapshotStore;
 use crate::system_context::{ContextEpochStore, SystemContextRegistry};
-use crate::tools::{EventToolProgressSink, ToolRegistry, ToolServices};
+use crate::tools::{CancelToken, EventToolProgressSink, ToolRegistry, ToolServices};
 use deepseekcode_plugin::HookRegistry;
 use deepseekcode_storage::TodoStore;
 
@@ -71,7 +71,7 @@ pub struct SessionRunner {
     permissions: Arc<PermissionService>,
     providers: Arc<ProviderCatalog>,
     tool_output: ManagedToolOutput,
-    interrupted: Arc<AtomicBool>,
+    interrupted: Arc<CancelToken>,
     in_provider_turn: AtomicBool,
     llm: Arc<Mutex<LlmClient>>,
     mcp: Arc<McpConnectionPool>,
@@ -110,6 +110,7 @@ impl SessionRunner {
             progress: Some(progress),
             question_tx: Some(question_tx.clone()),
             task_spawner: Some(task_spawner),
+            cancel: None,
         };
         let mut tools = ToolRegistry::with_services(project_dir.clone(), &config, services)
             .with_snapshot_store(snapshot_store);
@@ -123,7 +124,7 @@ impl SessionRunner {
             permissions,
             providers,
             events,
-            interrupted: Arc::new(AtomicBool::new(false)),
+            interrupted: Arc::new(CancelToken::new()),
             in_provider_turn: AtomicBool::new(false),
             llm: Arc::new(Mutex::new(LlmClient::new())),
             session_id,
@@ -153,7 +154,11 @@ impl SessionRunner {
     }
 
     pub async fn interrupt(&self) {
-        self.interrupted.store(true, Ordering::SeqCst);
+        self.interrupted.cancel();
+        crate::process::kill_session_children(self.session_id).await;
+        // Drop any pending question responder so blocked tools exit promptly.
+        let mut question = self.question_tx.lock().await;
+        question.take();
     }
 
     /// Test helper: simulate an in-flight provider turn.
@@ -236,7 +241,7 @@ impl SessionRunner {
     }
 
     pub async fn drain(&self) -> Result<()> {
-        self.interrupted.store(false, Ordering::SeqCst);
+        self.interrupted.reset();
         self.in_provider_turn.store(false, Ordering::SeqCst);
         tracing::info!(
             target: deepseekcode_telemetry::SESSION,
@@ -245,11 +250,11 @@ impl SessionRunner {
         );
 
         self.context_registry
-            .ensure_epoch(&self.context_epochs, self.events.as_ref(), self.session_id)
+            .ensure_epoch(&self.context_epochs, &self.sessions, self.session_id)
             .await?;
 
         loop {
-            if self.interrupted.load(Ordering::SeqCst) {
+            if self.interrupted.is_cancelled() {
                 return Err(DeepSeekCodeError::SessionInterrupted);
             }
 
@@ -331,7 +336,7 @@ impl SessionRunner {
         let mut overflow_retried = false;
 
         loop {
-            if self.interrupted.load(Ordering::SeqCst) {
+            if self.interrupted.is_cancelled() {
                 return Err(DeepSeekCodeError::SessionInterrupted);
             }
 
@@ -431,6 +436,10 @@ impl SessionRunner {
             }
 
             for tool_call in response.tool_calls {
+                if self.interrupted.is_cancelled() {
+                    self.in_provider_turn.store(false, Ordering::SeqCst);
+                    return Err(DeepSeekCodeError::SessionInterrupted);
+                }
                 let session = self.sessions.get(self.session_id).await?;
                 if let Err(e) = self
                     .execute_tool(&session, tool_call, outcome.assistant_message_id)
@@ -620,6 +629,13 @@ impl SessionRunner {
                             .map(|v| serde_json::to_string(v).unwrap_or_else(|_| v.to_string()))
                             .unwrap_or_default();
                         if content.is_empty() {
+                            messages.push(LlmMessage {
+                                role: LlmRole::Tool,
+                                content: "{}".into(),
+                                tool_call_id: Some(tool_call_id.clone()),
+                                name: part.tool_name.clone(),
+                                tool_calls: Vec::new(),
+                            });
                             continue;
                         }
                         messages.push(LlmMessage {
@@ -784,7 +800,16 @@ impl SessionRunner {
                     ));
                 }
             };
-            if self.interrupted.load(Ordering::SeqCst) {
+            if self.interrupted.is_cancelled() {
+                if assistant_started {
+                    // Persist only the streamed text/reasoning. Tool calls are
+                    // deliberately NOT persisted: none of them have started
+                    // executing at this point, and storing them would leave a
+                    // dangling tool_use without a tool result (which breaks
+                    // strict tool-chain validation on resume).
+                    self.persist_interrupted_assistant_turn(assistant_id, &content, &reasoning)
+                        .await?;
+                }
                 return Err(DeepSeekCodeError::SessionInterrupted);
             }
             match event? {
@@ -978,5 +1003,40 @@ impl SessionRunner {
             },
             assistant_message_id: assistant_id,
         })
+    }
+
+    async fn persist_interrupted_assistant_turn(
+        &self,
+        assistant_id: MessageId,
+        content: &str,
+        reasoning: &str,
+    ) -> Result<()> {
+        self.sessions
+            .insert_assistant_turn(
+                assistant_id,
+                self.session_id,
+                if reasoning.is_empty() {
+                    None
+                } else {
+                    Some(reasoning)
+                },
+                content,
+            )
+            .await?;
+
+        self.events
+            .append(
+                EventKind::MessageCompleted,
+                Some(self.session_id),
+                json!({
+                    "message_id": assistant_id.to_string(),
+                    "content": content,
+                    "reasoning": if reasoning.is_empty() { None } else { Some(reasoning) },
+                    "has_tool_calls": false,
+                    "interrupted": true,
+                }),
+            )
+            .await?;
+        Ok(())
     }
 }

@@ -35,6 +35,11 @@ pub fn discover_config_files(project_dir: &Utf8Path) -> Vec<Utf8PathBuf> {
         }
     }
 
+    // Capture the global-file count before walking so only the hierarchy walk
+    // below is reversed: merged config applies root-first and the project file
+    // last, so the closest directory wins.
+    let global_len = files.len();
+
     let mut current = Some(project_dir.to_path_buf());
     while let Some(dir) = current {
         for name in CONFIG_NAMES {
@@ -53,6 +58,8 @@ pub fn discover_config_files(project_dir: &Utf8Path) -> Vec<Utf8PathBuf> {
         }
         current = dir.parent().map(|p| p.to_path_buf());
     }
+
+    files[global_len..].reverse();
 
     files
 }
@@ -198,5 +205,43 @@ mod tests {
         let config = load_effective_config(project).unwrap();
         assert_eq!(config.shell.as_deref(), Some("powershell.exe"));
         assert_eq!(config.instructions, vec!["AGENTS.md"]);
+    }
+
+    #[test]
+    fn discover_orders_project_config_last() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("repo");
+        let mid = root.join("crates");
+        let leaf = mid.join("app");
+        for path in [&root, &mid, &leaf] {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(path.join("deepseekcode.jsonc"), "{}").unwrap();
+        }
+        let project = Utf8Path::from_path(&leaf).unwrap();
+        let files = discover_config_files(project);
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.as_str().replace('\\', "/"))
+            .collect();
+        assert!(names[0].ends_with("repo/deepseekcode.jsonc"), "{names:?}");
+        assert!(names[1].ends_with("crates/deepseekcode.jsonc"), "{names:?}");
+        assert!(names[2].ends_with("app/deepseekcode.jsonc"), "{names:?}");
+    }
+
+    #[test]
+    fn project_config_overrides_parent_config() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("repo");
+        let project = root.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(root.join("deepseekcode.jsonc"), r#"{"shell": "cmd.exe"}"#).unwrap();
+        std::fs::write(
+            project.join("deepseekcode.jsonc"),
+            r#"{"shell": "pwsh.exe"}"#,
+        )
+        .unwrap();
+        let project_path = Utf8Path::from_path(&project).unwrap();
+        let config = load_effective_config(project_path).unwrap();
+        assert_eq!(config.shell.as_deref(), Some("pwsh.exe"));
     }
 }

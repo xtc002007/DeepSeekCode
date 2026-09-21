@@ -16,6 +16,7 @@ wasmtime = { workspace = true }
 tracing = { workspace = true }
 deepseekcode-telemetry = { workspace = true }
 libloading = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

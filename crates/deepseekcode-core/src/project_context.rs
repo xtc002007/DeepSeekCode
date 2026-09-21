@@ -179,6 +179,129 @@ pub fn command_escapes_project_directory(command: &str, project_dir: &str) -> Op
     None
 }
 
+/// Extract filesystem paths that a shell command may create or modify.
+pub fn shell_command_target_paths(command: &str, project_dir: &str) -> Vec<PathBuf> {
+    let root = best_effort_abs(project_dir);
+    let mut cwd = root.clone();
+    let mut paths = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for segment in split_shell_segments_quoted(command) {
+        let seg = segment.trim();
+        if seg.is_empty() {
+            continue;
+        }
+
+        if let Some(target) = parse_cd_target(seg) {
+            cwd = resolve_cd_path(&cwd, &target);
+            continue;
+        }
+
+        let redirect_targets = parse_redirect_targets(seg);
+        for target in &redirect_targets {
+            let full = resolve_relative_path(&cwd, target);
+            if seen.insert(full.clone()) {
+                paths.push(full);
+            }
+        }
+
+        for abs in extract_filesystem_path_literals(seg) {
+            if is_redirect_literal_artifact(&abs, &redirect_targets) {
+                continue;
+            }
+            let full = if PathBuf::from(&abs).is_absolute() {
+                PathBuf::from(abs)
+            } else {
+                resolve_relative_path(&cwd, &abs)
+            };
+            if seen.insert(full.clone()) {
+                paths.push(full);
+            }
+        }
+    }
+
+    paths
+}
+
+fn is_redirect_literal_artifact(literal: &str, redirect_targets: &[String]) -> bool {
+    let normalized = literal.trim_start_matches('/');
+    redirect_targets.iter().any(|target| {
+        target == normalized
+            || target.ends_with(&format!("/{normalized}"))
+            || normalized == target.trim_start_matches('/')
+    })
+}
+
+/// Single quote-aware pass over the segment: finds `>` / `>>` redirections
+/// outside quoted strings and returns their target paths. `N>&M` fd
+/// duplications are ignored, while `N>file` (e.g. `2>err.log`) is captured
+/// because it creates or truncates the file.
+fn parse_redirect_targets(segment: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    let chars: Vec<char> = segment.chars().collect();
+    let mut i = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                i += 1;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                i += 1;
+            }
+            '\\' if in_double => {
+                i += 2; // skip the escaped character
+            }
+            '>' if !in_single && !in_double => {
+                let append = chars.get(i + 1) == Some(&'>');
+                i += if append { 2 } else { 1 };
+                while i < chars.len() && chars[i].is_whitespace() {
+                    i += 1;
+                }
+                // Collect the target token; quoted whitespace stays part of it.
+                let mut path = String::new();
+                while i < chars.len() {
+                    let t = chars[i];
+                    if t == '\\' && in_double && i + 1 < chars.len() {
+                        path.push(chars[i + 1]);
+                        i += 2;
+                        continue;
+                    }
+                    if t == '\'' && !in_double {
+                        in_single = !in_single;
+                        i += 1;
+                        continue;
+                    }
+                    if t == '"' && !in_single {
+                        in_double = !in_double;
+                        i += 1;
+                        continue;
+                    }
+                    if t == '>' && !in_single && !in_double {
+                        break; // the next redirection operator starts here
+                    }
+                    if t.is_whitespace() && !in_single && !in_double {
+                        break;
+                    }
+                    path.push(t);
+                    i += 1;
+                }
+                let path = path.trim();
+                if !path.is_empty() && !path.starts_with('&') {
+                    targets.push(path.to_string());
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    targets
+}
+
 fn best_effort_abs(path: &str) -> PathBuf {
     let p = PathBuf::from(path);
     strip_verbatim_prefix(std::fs::canonicalize(&p).unwrap_or(p))
@@ -220,7 +343,20 @@ fn normalize_compare_path(path: &Path) -> String {
         .to_lowercase()
 }
 
+/// Split a command into segments at `&&` / `;`, dropping the operator
+/// characters but keeping everything else verbatim (quotes stripped).
 fn split_shell_segments(command: &str) -> Vec<String> {
+    split_shell_segments_impl(command, false)
+}
+
+/// Like [`split_shell_segments`], but preserves the quote characters in the
+/// output so downstream parsing can tell quoted text (a literal `>` inside
+/// `echo "a > b"`) apart from shell syntax.
+fn split_shell_segments_quoted(command: &str) -> Vec<String> {
+    split_shell_segments_impl(command, true)
+}
+
+fn split_shell_segments_impl(command: &str, keep_quotes: bool) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current = String::new();
     let mut in_double = false;
@@ -229,8 +365,18 @@ fn split_shell_segments(command: &str) -> Vec<String> {
     let mut chars = command.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
-            '"' if !in_single => in_double = !in_double,
-            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => {
+                in_double = !in_double;
+                if keep_quotes {
+                    current.push(ch);
+                }
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                if keep_quotes {
+                    current.push(ch);
+                }
+            }
             '&' if !in_double && !in_single => {
                 if chars.peek() == Some(&'&') {
                     chars.next();
@@ -521,6 +667,44 @@ fn parse_destructive_targets(segment: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn redirect_targets_respect_quotes() {
+        assert_eq!(
+            parse_redirect_targets("echo hello > src/out.txt"),
+            vec!["src/out.txt".to_string()]
+        );
+        // A `>` inside quotes is literal text, not a redirection.
+        assert!(parse_redirect_targets("echo \"a > b\"").is_empty());
+        assert!(parse_redirect_targets("echo 'x > y'").is_empty());
+        // Quoted targets keep their inner whitespace.
+        assert_eq!(
+            parse_redirect_targets("echo hi > \"my file.txt\""),
+            vec!["my file.txt".to_string()]
+        );
+        // fd duplication is ignored; fd redirection to a file is captured.
+        assert_eq!(
+            parse_redirect_targets("cmd 2>&1 > out.log"),
+            vec!["out.log".to_string()]
+        );
+        assert_eq!(
+            parse_redirect_targets("make 2> build-errors.log"),
+            vec!["build-errors.log".to_string()]
+        );
+        // Multiple redirections in one segment.
+        assert_eq!(
+            parse_redirect_targets("run > a.txt 2>> b.txt"),
+            vec!["a.txt".to_string(), "b.txt".to_string()]
+        );
+    }
+
+    #[test]
+    fn shell_paths_skip_quoted_redirect_lookalikes() {
+        let paths = shell_command_target_paths(r#"echo "a > b" > real.txt"#, "/proj");
+        // The quoted `a > b` must not be treated as a redirection; only the
+        // real redirect target may be captured.
+        assert_eq!(paths, vec![PathBuf::from("/proj/real.txt")]);
+    }
 
     #[test]
     fn ensure_agents_md_creates_missing_file() {

@@ -55,6 +55,8 @@ pub async fn generate(
     let response = route
         .auth
         .apply(http.post(url), &api_key)
+        // Non-streaming requests have no natural end; cap them outright.
+        .timeout(std::time::Duration::from_secs(300))
         .json(&body)
         .send()
         .await
