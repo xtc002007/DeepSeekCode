@@ -123,6 +123,43 @@ impl SessionExecution {
             .remove(&session_id);
     }
 
+    /// Get-or-create the live runner for a session. Shared by `run` and
+    /// manual compaction so both build provider-visible context (system,
+    /// messages, tools) from the same live registries — never a hollow
+    /// context (P0-2).
+    async fn runner_for(self: &Arc<Self>, session_id: SessionId) -> Arc<SessionRunner> {
+        let spawner: Arc<dyn TaskSpawner> = Arc::new(ExecutionTaskSpawner {
+            execution: Arc::clone(self),
+        });
+        let mut runners = self.runners.lock().await;
+        runners
+            .entry(session_id)
+            .or_insert_with(|| {
+                Arc::new(SessionRunner::new(
+                    self.db.clone(),
+                    session_id,
+                    self.project_dir.clone(),
+                    self.config.clone(),
+                    self.permissions.clone(),
+                    self.providers.clone(),
+                    self.events.clone(),
+                    self.mcp.clone(),
+                    self.hooks.clone(),
+                    spawner.clone(),
+                ))
+            })
+            .clone()
+    }
+
+    /// Manual `/compact` through the live runner: one forced checkpoint with
+    /// real baseline/messages/tools, so the stored lineage matches subsequent
+    /// turns and validates on read (P0-2). Returns whether a checkpoint was
+    /// installed. History is appended, never rewritten.
+    pub async fn compact_manual(self: &Arc<Self>, session_id: SessionId) -> Result<bool> {
+        let runner = self.runner_for(session_id).await;
+        runner.compact_manual_turn().await
+    }
+
     pub async fn wake(self: &Arc<Self>, session_id: SessionId) -> Result<()> {
         // A fresh user prompt starts a new run cycle: drop any leftover
         // interrupt request from a previous cancelled cycle.
@@ -231,29 +268,7 @@ impl SessionExecution {
                 guard.insert(session_id);
             }
         }
-        let spawner: Arc<dyn TaskSpawner> = Arc::new(ExecutionTaskSpawner {
-            execution: Arc::clone(self),
-        });
-        let runner = {
-            let mut runners = self.runners.lock().await;
-            runners
-                .entry(session_id)
-                .or_insert_with(|| {
-                    Arc::new(SessionRunner::new(
-                        self.db.clone(),
-                        session_id,
-                        self.project_dir.clone(),
-                        self.config.clone(),
-                        self.permissions.clone(),
-                        self.providers.clone(),
-                        self.events.clone(),
-                        self.mcp.clone(),
-                        self.hooks.clone(),
-                        spawner,
-                    ))
-                })
-                .clone()
-        };
+        let runner = self.runner_for(session_id).await;
         if self.is_interrupt_requested(session_id) {
             // Drop the freshly (re)created runner so the next cycle starts with
             // a clean interrupted flag instead of draining once more.

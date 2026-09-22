@@ -1,7 +1,8 @@
 use super::epoch::{reconcile_snapshot, reconcile_snapshot_removed, ContextEpochStore};
 use super::source::{
-    agents_md_source, environment_source, instructions_source, skill_guidance_source,
-    workspace_source, ContextSource, Generation, LoadResult, ReconcileResult, Snapshot,
+    agents_md_source, environment_source, instructions_source, is_standing_source_key,
+    memory_background_source, memory_standing_source, skill_guidance_source, workspace_source,
+    ContextSource, Generation, LoadResult, ReconcileResult, Snapshot,
 };
 use crate::skills::SkillCatalog;
 use deepseekcode_config::DeepSeekCodeConfig;
@@ -10,6 +11,7 @@ use deepseekcode_types::{Result, SessionId};
 pub struct SystemContextRegistry {
     project_dir: String,
     sources: Vec<Box<dyn ErasedSource>>,
+    standing_replacement_on_edit: bool,
 }
 
 impl SystemContextRegistry {
@@ -30,11 +32,18 @@ impl SystemContextRegistry {
             Box::new(environment_source(&project_dir)),
             Box::new(agents_md_source(&project_dir)),
             Box::new(instructions_source(&project_dir, &config.instructions)),
+            // Issue-9: standing enters the prefix; background rides the tail.
+            // See `MemorySet::system_block` (prefix) vs `background_data_block`
+            // (tail); empty sets contribute zero bytes so the prefix stays
+            // maximal.
+            Box::new(memory_standing_source(&project_dir)),
+            Box::new(memory_background_source(&project_dir)),
             Box::new(skill_guidance_source(guidance)),
         ];
         Self {
             project_dir,
             sources,
+            standing_replacement_on_edit: config.context.standing_replacement_on_edit,
         }
     }
 
@@ -88,11 +97,17 @@ impl SystemContextRegistry {
         let mut combined_text = Vec::new();
         let mut snapshot = previous.clone();
         let mut changed = false;
+        let mut standing_changed = false;
 
         for source in &self.sources {
             match source.reconcile(&snapshot) {
                 ReconcileResult::Unchanged => {}
                 ReconcileResult::Updated { text, snapshot: s } => {
+                    if self.standing_replacement_on_edit
+                        && is_standing_source_key(&source.key_str())
+                    {
+                        standing_changed = true;
+                    }
                     combined_text.push(text);
                     snapshot = s;
                     changed = true;
@@ -120,6 +135,15 @@ impl SystemContextRegistry {
 
         if let Some(generation) = self.render_baseline() {
             if baseline_differs_materially(&generation, previous) {
+                return ReconcileResult::ReplacementReady { generation };
+            }
+        }
+
+        // P2-7 opt-in: standing edits replace the baseline (one expected
+        // miss for a short tail) instead of accumulating tail deltas forever.
+        // Default-off preserves the cache-stable tail behavior.
+        if self.standing_replacement_on_edit && standing_changed {
+            if let Some(generation) = self.render_baseline() {
                 return ReconcileResult::ReplacementReady { generation };
             }
         }
@@ -326,6 +350,62 @@ mod tests {
             }
             other => panic!("expected Updated, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn standing_edit_rides_tail_by_default() {
+        // P2-7 default-off: editing AGENTS.md emits a tail delta, the
+        // baseline (prefix) is untouched.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "# Agent\nv1.").unwrap();
+        let registry = SystemContextRegistry::new(dir.path().to_string_lossy());
+        let baseline = registry.render_baseline().expect("baseline");
+        std::fs::write(dir.path().join("AGENTS.md"), "# Agent\nv2.").unwrap();
+        let result = registry.reconcile(&baseline.snapshot);
+        assert!(
+            matches!(result, ReconcileResult::Updated { .. }),
+            "default must keep edits in the tail, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn standing_edit_replaces_baseline_when_opted_in() {
+        // P2-7 opt-in: the same edit replaces the baseline (one expected
+        // miss for a short tail).
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "# Agent\nv1.").unwrap();
+        let config = DeepSeekCodeConfig {
+            context: deepseekcode_config::schema::ContextConfig {
+                standing_replacement_on_edit: true,
+            },
+            ..Default::default()
+        };
+        let registry = SystemContextRegistry::with_config(dir.path().to_string_lossy(), &config);
+        let baseline = registry.render_baseline().expect("baseline");
+        std::fs::write(dir.path().join("AGENTS.md"), "# Agent\nv2.").unwrap();
+        let result = registry.reconcile(&baseline.snapshot);
+        match result {
+            ReconcileResult::ReplacementReady { generation } => {
+                assert!(generation.baseline.contains("v2"));
+            }
+            other => panic!("expected ReplacementReady, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn baseline_is_byte_stable_across_renders() {
+        // Issue-6: same inputs must produce byte-identical system prefix or
+        // every turn pays a full DeepSeek miss.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "# Agent\nRules.").unwrap();
+        let registry = SystemContextRegistry::new(dir.path().to_string_lossy());
+        let first = registry.render_baseline().expect("baseline");
+        let second = registry.render_baseline().expect("baseline");
+        assert_eq!(first.baseline, second.baseline);
+        assert_eq!(
+            serde_json::to_string(&first.snapshot).unwrap(),
+            serde_json::to_string(&second.snapshot).unwrap()
+        );
     }
 
     #[tokio::test]

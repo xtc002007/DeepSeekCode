@@ -1,10 +1,12 @@
 pub mod activity;
 pub mod agent;
+pub mod cache_status;
 pub mod compaction;
 pub mod engine;
 pub mod git;
 pub mod location;
 pub mod mcp;
+pub mod memory;
 pub mod permission;
 pub mod plan;
 pub mod policy;

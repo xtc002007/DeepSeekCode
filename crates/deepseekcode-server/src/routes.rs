@@ -156,6 +156,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/session/{id}/events", get(list_session_events))
         .route("/api/v1/session/{id}/events/head", get(session_event_head))
+        .route(
+            "/api/v1/session/{id}/cache-status",
+            get(session_cache_status),
+        )
         .route("/api/v1/session/{id}/compact", post(compact_session))
         .route("/api/v1/session/{id}/fork", post(fork_session))
         .route("/api/v1/session/{id}/revert", get(revert_get_staged))
@@ -877,6 +881,71 @@ pub(crate) async fn session_event_head(
 }
 
 #[utoipa::path(
+    get,
+    path = "/api/v1/session/{id}/cache-status",
+    tag = "session",
+    params(("id" = String, Path, description = "Session ID")),
+    responses((status = 200, description = "DeepSeek prefix-cache status"))
+)]
+pub(crate) async fn session_cache_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    use deepseekcode_schema::event::EventKind;
+    let dir = project_dir(&headers);
+    let session_id = parse_session_path!(&id);
+    let engine = state.engine.read().await;
+    let location = engine.location(&dir).await;
+    match location.session_service.list_events(session_id, 0).await {
+        Ok(events) => {
+            let mut payloads = Vec::new();
+            let mut compacted = Vec::new();
+            for e in events {
+                match e.kind {
+                    EventKind::MessageCompleted => payloads.push(e.payload),
+                    EventKind::SessionCompacted => compacted.push(e.payload),
+                    _ => {}
+                }
+            }
+            let status =
+                deepseekcode_core::cache_status::aggregate_with_compaction(&payloads, &compacted);
+            // P1-5: read-only cost attribution from the configured rate
+            // card. Never gates requests; purely so "tokens saved" is
+            // auditable as money saved.
+            let card = deepseekcode_core::cache_status::RateCard::from(&engine.config.billing);
+            let estimated_cost = deepseekcode_core::cache_status::estimated_cost(&status, &card);
+            Json(serde_json::json!({
+                "session_id": id,
+                "turns": status.turns,
+                "input_tokens": status.input_tokens,
+                "output_tokens": status.output_tokens,
+                "reasoning_tokens": status.reasoning_tokens,
+                "cache_hit": status.cache_hit,
+                "cache_miss": status.cache_miss,
+                "cache_write": status.cache_write,
+                "hit_rate": status.hit_rate,
+                "receipt": status.receipt(),
+                "summary_count": status.summary_count,
+                "summary_input_tokens": status.summary_input_tokens,
+                "summary_output_tokens": status.summary_output_tokens,
+                "summary_cache_hit": status.summary_cache_hit,
+                "summary_cache_miss": status.summary_cache_miss,
+                "summary_cache_write": status.summary_cache_write,
+                "first_input_tokens": status.first_input_tokens,
+                "first_cache_hit": status.first_cache_hit,
+                "first_cache_miss": status.first_cache_miss,
+                "first_hit_rate": status.first_hit_rate,
+                "currency": card.currency,
+                "estimated_cost": estimated_cost,
+            }))
+            .into_response()
+        }
+        Err(e) => service_error_response(e).into_response(),
+    }
+}
+
+#[utoipa::path(
     post,
     path = "/api/v1/session/{id}/compact",
     tag = "session",
@@ -892,19 +961,11 @@ pub(crate) async fn compact_session(
     let session_id = parse_session_path!(&id);
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
-    let registry = deepseekcode_core::system_context::SystemContextRegistry::new(dir.clone());
-    let epochs =
-        deepseekcode_core::system_context::ContextEpochStore::new(engine.db.pool().clone());
-    match deepseekcode_core::compaction::CompactionService::compact(
-        &registry,
-        &epochs,
-        &location.session_service,
-        session_id,
-        &engine.config,
-    )
-    .await
-    {
-        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+    // P0-2: manual compaction runs through the live runner so the checkpoint
+    // carries the real baseline/messages/tools lineage (never a hollow
+    // context that would poison the next auto pass).
+    match location.session_service.compact_manual(session_id).await {
+        Ok(installed) => Json(serde_json::json!({ "ok": installed })).into_response(),
         Err(e) => service_error_response(e).into_response(),
     }
 }

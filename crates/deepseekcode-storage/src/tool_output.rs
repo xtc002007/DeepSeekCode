@@ -2,8 +2,12 @@ use deepseekcode_types::{DeepSeekCodeError, Result, SessionId};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_MAX_LINES: usize = 2_000;
-pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;
+/// DeepSeek prefix-cache budget: provider-visible tool projection stays
+/// within 32KiB so one huge output cannot permanently poison the prefix.
+/// Full output is always retained in `.deepseekcode/tool-output/` for paged
+/// recovery via the `tool_result_page` tool (`full_output_file` pointer).
+pub const DEFAULT_MAX_LINES: usize = 400;
+pub const DEFAULT_MAX_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ToolOutputLimits {

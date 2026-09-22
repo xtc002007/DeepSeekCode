@@ -134,6 +134,7 @@ pub struct CreatePtyRequest {
         crate::routes::answer_session_question,
         crate::routes::list_session_events,
         crate::routes::session_event_head,
+        crate::routes::session_cache_status,
         crate::routes::compact_session,
         crate::routes::fork_session,
         crate::routes::move_session,

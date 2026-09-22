@@ -755,10 +755,12 @@ impl DeepSeekCodeClient {
         Ok(())
     }
 
-    pub async fn compact_session(&self, session_id: SessionId) -> Result<()> {
+    /// Manual compaction. Returns whether a checkpoint was installed
+    /// (`false` when history is empty/already compacted — no-op, no miss).
+    pub async fn compact_session(&self, session_id: SessionId) -> Result<bool> {
         let path = format!("/api/v1/session/{session_id}/compact");
-        let _: serde_json::Value = self.post_empty(&path).await?;
-        Ok(())
+        let value: serde_json::Value = self.post_empty(&path).await?;
+        Ok(value.get("ok").and_then(|v| v.as_bool()).unwrap_or(true))
     }
 
     pub async fn list_mcp(&self) -> Result<Vec<serde_json::Value>> {

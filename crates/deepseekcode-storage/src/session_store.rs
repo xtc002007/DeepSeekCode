@@ -898,33 +898,10 @@ impl SessionStore {
         Ok(())
     }
 
-    pub async fn delete_messages_after_seq(
-        &self,
-        session_id: SessionId,
-        cutoff_seq: i64,
-    ) -> Result<()> {
-        let ids: Vec<String> =
-            sqlx::query_scalar(r#"SELECT id FROM messages WHERE session_id = ? AND seq > ?"#)
-                .bind(session_id.to_string())
-                .bind(cutoff_seq)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-
-        for id in ids {
-            sqlx::query(r#"DELETE FROM message_parts WHERE message_id = ?"#)
-                .bind(&id)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-            sqlx::query(r#"DELETE FROM messages WHERE id = ?"#)
-                .bind(&id)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-        }
-        Ok(())
-    }
+    // NOTE: a `delete_messages_after_seq` helper lived here. It was removed:
+    // zero callers, and row deletion would violate the canonical-transcript
+    // invariant (history is append-only; rewind/fork/visibility are handled
+    // by seq filtering, never DELETE). Re-add only with a design review.
 
     pub async fn insert_compaction(
         &self,
@@ -938,6 +915,9 @@ impl SessionStore {
     }
 
     /// Atomically insert a compaction checkpoint and optionally replace the context epoch baseline.
+    /// Issue-13: `lineage_json` carries `{lineage,tools_hash,model,covered_hash,version}`
+    /// so later turns can validate the checkpoint belongs to the current
+    /// prefix lineage instead of blindly reusing a stale summary.
     pub async fn commit_compaction_with_epoch(
         &self,
         session_id: SessionId,
@@ -947,6 +927,29 @@ impl SessionStore {
         baseline: Option<&str>,
         snapshot_json: Option<&str>,
     ) -> Result<i64> {
+        self.commit_compaction_with_lineage(
+            session_id,
+            message_id,
+            summary,
+            recent,
+            baseline,
+            snapshot_json,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_compaction_with_lineage(
+        &self,
+        session_id: SessionId,
+        message_id: MessageId,
+        summary: &str,
+        recent: &str,
+        baseline: Option<&str>,
+        snapshot_json: Option<&str>,
+        lineage_json: Option<&serde_json::Value>,
+    ) -> Result<i64> {
         let mut tx = self
             .pool
             .begin()
@@ -955,7 +958,14 @@ impl SessionStore {
 
         let now = Utc::now();
         let seq = self.next_message_seq_tx(&mut tx, session_id).await?;
-        let payload = serde_json::json!({ "summary": summary, "recent": recent });
+        let mut payload = serde_json::json!({ "summary": summary, "recent": recent, "version": 1 });
+        if let Some(extra) = lineage_json {
+            if let (Some(obj), Some(ex)) = (payload.as_object_mut(), extra.as_object()) {
+                for (k, v) in ex {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
         sqlx::query(
             r#"INSERT INTO messages (id, session_id, role, seq, created_at) VALUES (?, ?, 'compaction', ?, ?)"#,
         )

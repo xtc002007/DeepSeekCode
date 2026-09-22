@@ -138,6 +138,9 @@ pub struct WorkspaceView {
     policy_patterns_expanded: bool,
     policy_rule_rows: Vec<PolicyRuleRow>,
     policy_auto_mode: bool,
+    /// P1-4: mirrors `ui.show_turn_usage` (default true). Gates the per-turn
+    /// cache receipt display only — accounting always runs server-side.
+    show_turn_usage: bool,
     selected_policy_row: Option<usize>,
     pending_question: Option<QuestionPromptState>,
     prompt_input: Entity<PromptInput>,
@@ -340,6 +343,7 @@ impl WorkspaceView {
             policy_patterns_expanded: false,
             policy_rule_rows: Vec::new(),
             policy_auto_mode: false,
+            show_turn_usage: true,
             selected_policy_row: None,
             pending_question: None,
             prompt_input,
@@ -2928,12 +2932,23 @@ Describe this project so the AI assistant has context.\n\n\
                     token_usage_from_payload(&event.payload)
                 {
                     self.apply_token_usage(input, output, reasoning_tokens);
+                    // P1-4: per-turn cache receipt, gated by `ui.show_turn_usage`.
+                    // Display-only: the server always records the fields.
+                    self.context_usage.last_receipt =
+                        deepseekcode_core::cache_status::receipt_from_payload(
+                            &event.payload,
+                            self.show_turn_usage,
+                        );
                 } else {
                     self.apply_token_usage(
                         0,
                         Self::estimate_tokens(&content),
                         reasoning.as_deref().map(Self::estimate_tokens).unwrap_or(0),
                     );
+                    // P1-3: no provider usage in this payload — clear any
+                    // previous receipt instead of showing a stale card next
+                    // to fresh estimates.
+                    self.context_usage.last_receipt = String::new();
                 }
                 if has_tool_calls {
                     self.set_session_busy(true, "Running tools…");
@@ -3586,7 +3601,8 @@ Describe this project so the AI assistant has context.\n\n\
             let result = client.compact_session(session_id).await;
             let failed = result.is_err();
             let message = match result {
-                Ok(()) => "Compaction requested".to_string(),
+                Ok(true) => "Compaction checkpoint installed".to_string(),
+                Ok(false) => "Nothing to compact".to_string(),
                 Err(e) => format!("Compaction failed: {e}"),
             };
             let _ = view.update(cx, |this, cx| {
@@ -4762,6 +4778,9 @@ Describe this project so the AI assistant has context.\n\n\
                 })
                 .collect();
             self.policy_auto_mode = cfg.policy_mode == Some(PolicyMode::Auto);
+            // P1-4: refresh the receipt display gate from the same config
+            // load (no extra IO) — accounting is unaffected.
+            self.show_turn_usage = cfg.ui.show_turn_usage;
             self.selected_policy_row = None;
             self.permission_allow_input.update(cx, |input, cx| {
                 input.set_text(policy_text, cx);

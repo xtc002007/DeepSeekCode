@@ -87,10 +87,30 @@ impl SkillCatalog {
         if skills.is_empty() {
             return String::new();
         }
+        // Cache-stable catalog: bound the prefix, spill the rest behind the
+        // `skill` tool. Full SKILL.md bodies never enter `system`.
+        const MAX_CATALOG_ENTRIES: usize = 24;
+        const MAX_CATALOG_CHARS: usize = 2_000;
         let mut lines =
             vec!["Available skills (use the skill tool to load full content):".to_string()];
-        for s in skills {
-            lines.push(format!("- {}: {}", s.name, s.description));
+        let mut chars = lines[0].len();
+        let mut shown = 0usize;
+        let mut sorted: Vec<&SkillEntry> = skills.iter().collect();
+        sorted.sort_by(|a, b| a.name.cmp(&b.name));
+        for s in sorted.iter().take(MAX_CATALOG_ENTRIES) {
+            let line = format!("- {}: {}", s.name, s.description);
+            if chars + line.len() + 1 > MAX_CATALOG_CHARS {
+                break;
+            }
+            chars += line.len() + 1;
+            lines.push(line);
+            shown += 1;
+        }
+        if shown < skills.len() {
+            lines.push(format!(
+                "…({} more; discover with skill tool)",
+                skills.len() - shown
+            ));
         }
         lines.join("\n")
     }
@@ -205,7 +225,17 @@ fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
 }
 
 fn fetch_remote_index(url: &str) -> Vec<SkillEntry> {
-    let response = match reqwest::blocking::get(url) {
+    // Issue-9: 5s timeout + entry bound, mirroring `load_instruction_url`.
+    // A hanging skills index must never block `drain` nor flap the catalog
+    // prefix every turn.
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build();
+    let Ok(client) = client else {
+        return Vec::new();
+    };
+    // Same executor hygiene as instruction URLs: never park an async worker.
+    let response = match crate::system_context::source::blocking_http_get(&client, url) {
         Ok(resp) if resp.status().is_success() => resp,
         Ok(resp) => {
             tracing::warn!(
@@ -244,18 +274,25 @@ fn fetch_remote_index(url: &str) -> Vec<SkillEntry> {
         .or_else(|| value.as_array())
         .cloned()
         .unwrap_or_default();
+    // Bound remote catalog so one huge index cannot blow the prefix; the
+    // `guidance_text` budget (24 entries / 2000 chars) truncates the rest
+    // behind the `skill` tool.
+    const MAX_REMOTE_SKILLS: usize = 64;
     items
         .into_iter()
+        .take(MAX_REMOTE_SKILLS)
         .filter_map(|item| {
             let name = item
                 .get("name")
                 .and_then(|v| v.as_str())
                 .map(String::from)?;
-            let description = item
+            let description: String = item
                 .get("description")
                 .and_then(|v| v.as_str())
                 .unwrap_or("No description")
-                .to_string();
+                .chars()
+                .take(200)
+                .collect();
             let path = item
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -270,39 +307,11 @@ fn fetch_remote_index(url: &str) -> Vec<SkillEntry> {
         .collect()
 }
 
+/// Delegates to the canonical allow-list in `tools::registry` (single source
+/// of truth). A forked copy lived here and drifted out of sync; delegating
+/// keeps skill visibility consistent with what the runner actually sends.
 fn agent_allowed_tools(agent: &str, config: &DeepSeekCodeConfig) -> Vec<String> {
-    if let Some(agent_cfg) = config.agents.get(agent) {
-        if let Some(tools) = &agent_cfg.tools {
-            return tools.clone();
-        }
-    }
-    match agent {
-        "plan" => vec![
-            "read".into(),
-            "grep".into(),
-            "glob".into(),
-            "list".into(),
-            "write".into(),
-            "edit".into(),
-            "skill".into(),
-            "question".into(),
-            "plan_complete".into(),
-        ],
-        _ => vec![
-            "read".into(),
-            "write".into(),
-            "edit".into(),
-            "grep".into(),
-            "glob".into(),
-            "bash".into(),
-            "apply_patch".into(),
-            "todowrite".into(),
-            "todo_write".into(),
-            "skill".into(),
-            "webfetch".into(),
-            "lsp".into(),
-        ],
-    }
+    crate::tools::registry::agent_allowed_tools(agent, config)
 }
 
 fn skill_pattern_matches(pattern: &str, skill_name: &str) -> bool {
@@ -338,5 +347,24 @@ mod tests {
         let skills = SkillCatalog::discover(&[], dir.path().to_str().unwrap(), None);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "test-skill");
+    }
+
+    #[test]
+    fn guidance_text_is_bounded_and_sorted() {
+        let skills: Vec<SkillEntry> = (0..30)
+            .map(|i| SkillEntry {
+                name: format!("skill-{i:02}"),
+                description: "d".into(),
+                path: PathBuf::from(format!("/tmp/{i}")),
+            })
+            .collect();
+        let text = SkillCatalog::guidance_text(&skills);
+        // Bounded for prefix cache, remainder behind the skill tool.
+        assert!(text.len() <= 2200);
+        assert!(text.contains("more; discover with skill tool"));
+        // Sorted so the prefix is byte-stable.
+        let first = text.find("skill-00").unwrap();
+        let second = text.find("skill-01").unwrap();
+        assert!(first < second);
     }
 }

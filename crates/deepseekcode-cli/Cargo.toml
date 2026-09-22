@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 deepseekcode-types = { workspace = true }
 deepseekcode-schema = { workspace = true }
+deepseekcode-core = { workspace = true }
 deepseekcode-config = { workspace = true }
 deepseekcode-telemetry = { workspace = true }
 deepseekcode-sdk = { workspace = true }

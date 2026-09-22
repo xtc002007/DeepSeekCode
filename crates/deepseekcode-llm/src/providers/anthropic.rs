@@ -90,6 +90,7 @@ pub async fn generate(
         content,
         tool_calls,
         usage: None,
+        reasoning_content: None,
     })
 }
 

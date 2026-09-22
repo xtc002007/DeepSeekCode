@@ -53,6 +53,10 @@ pub struct ToolRegistry {
     working_directory: String,
     snapshot_store: Option<Arc<FileSnapshotStore>>,
     services: ToolServices,
+    /// Issue-7: when false (default) MCP stays behind the stable
+    /// `use_capability` proxy; true opts into direct `mcp_*` tools at the
+    /// cost of a prefix miss on every MCP change.
+    mcp_direct: bool,
 }
 
 impl ToolRegistry {
@@ -78,11 +82,17 @@ impl ToolRegistry {
         services: ToolServices,
         shell_env: std::collections::HashMap<String, String>,
     ) -> Self {
+        let mcp_direct = config
+            .mcp
+            .as_ref()
+            .and_then(|m| m.direct_tools)
+            .unwrap_or(false);
         let mut registry = Self {
             tools: HashMap::new(),
             working_directory,
             snapshot_store: None,
             services,
+            mcp_direct,
         };
         registry.register_builtin(config, shell_env);
         registry
@@ -90,6 +100,14 @@ impl ToolRegistry {
 
     pub fn set_services(&mut self, services: ToolServices) {
         self.services = services;
+    }
+
+    /// Whether MCP tools are exposed directly (`mcp_*`). When false (default)
+    /// the stable `use_capability` proxy is the only MCP surface, so callers
+    /// must NOT fold live MCP catalog names into the lineage hash — otherwise
+    /// every MCP connect/disconnect false-positives `prefix_changed`.
+    pub fn mcp_direct(&self) -> bool {
+        self.mcp_direct
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<FileSnapshotStore>) -> Self {
@@ -140,6 +158,9 @@ impl ToolRegistry {
             inner: Box::new(PlanCompleteTool),
         }));
         self.register(Box::new(TaskTool));
+        // Issue-10: stable paged recovery for truncated outputs. Frozen
+        // schema so it never breaks the prefix.
+        self.register(Box::new(super::tool_result_page::ToolResultPageTool));
         let skills = SkillCatalog::discover(
             &config.skills,
             &self.working_directory,
@@ -150,8 +171,17 @@ impl ToolRegistry {
     }
 
     pub fn register_extensions(&mut self, mcp: &Arc<McpConnectionPool>) {
-        for tool in mcp.bridged_tools() {
-            self.register(tool);
+        // Issue-7: always register the frozen proxy; direct tools only on
+        // explicit opt-in. Proxy keeps `tools` byte-identical across MCP churn.
+        self.register(Box::new(super::use_capability::UseCapabilityTool::new(
+            mcp.clone(),
+        )));
+        if self.mcp_direct {
+            for tool in mcp.bridged_tools() {
+                if tool.name() != "use_capability" {
+                    self.register(tool);
+                }
+            }
         }
     }
 
@@ -165,12 +195,27 @@ impl ToolRegistry {
         let prefixes: Vec<String> = mcp
             .status()
             .into_iter()
-            .map(|s| format!("{}_", s.name))
+            .map(|s| format!("mcp_{}_", s.name))
             .collect();
         self.tools
             .retain(|name, _| !prefixes.iter().any(|prefix| name.starts_with(prefix)));
-        for tool in mcp.bridged_tools() {
-            self.register(tool);
+        // Keep the proxy stable across refreshes; only re-add direct tools
+        // when explicitly opted in (each such change is one expected miss).
+        if !self.tools.contains_key("use_capability") {
+            self.register(Box::new(super::use_capability::UseCapabilityTool::new(
+                mcp.clone(),
+            )));
+        }
+        if self.mcp_direct {
+            for tool in mcp.bridged_tools() {
+                if tool.name() != "use_capability" {
+                    self.register(tool);
+                }
+            }
+            tracing::info!(
+                target: deepseekcode_telemetry::SESSION,
+                "mcp direct tools refreshed; expect one DeepSeek prefix miss"
+            );
         }
     }
 
@@ -190,14 +235,33 @@ impl ToolRegistry {
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
+        // Cache-stable order: HashMap iteration is random and would break the
+        // DeepSeek automatic prefix cache on every turn. Same LLM-safety
+        // filter as `definitions_for_agent` so invalid names (e.g. aliases
+        // containing `.`) can never leak into a provider request.
+        let mut defs: Vec<ToolDefinition> = self
+            .tools
             .values()
+            .filter(|t| {
+                if is_llm_safe_tool_name(t.name()) {
+                    true
+                } else {
+                    tracing::warn!(
+                        target: deepseekcode_telemetry::SESSION,
+                        tool = t.name(),
+                        "skipping tool with invalid LLM function name"
+                    );
+                    false
+                }
+            })
             .map(|t| ToolDefinition {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
-                input_schema: t.input_schema(),
+                input_schema: canonicalize_schema(&t.input_schema()),
             })
-            .collect()
+            .collect();
+        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs
     }
 
     pub fn definitions_for_agent(
@@ -207,7 +271,8 @@ impl ToolRegistry {
         mcp_tools: &[String],
     ) -> Vec<ToolDefinition> {
         let allowed = agent_allowed_tools_with_mcp(agent, config, mcp_tools);
-        self.tools
+        let mut defs: Vec<ToolDefinition> = self
+            .tools
             .values()
             .filter(|t| allowed.iter().any(|a| a == t.name()))
             .filter(|t| {
@@ -225,9 +290,12 @@ impl ToolRegistry {
             .map(|t| ToolDefinition {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
-                input_schema: t.input_schema(),
+                input_schema: canonicalize_schema(&t.input_schema()),
             })
-            .collect()
+            .collect();
+        // Stable name order keeps `tools` JSON byte-identical across turns.
+        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -419,7 +487,11 @@ pub fn preview_tool_start(name: &str, input: &Value) -> (String, Value) {
     )
 }
 
-fn agent_allowed_tools(
+/// Canonical per-agent tool allow-list. Single source of truth — `skills.rs`
+/// used to carry a forked copy that drifted (missing `question`/`task`/
+/// `lsp`/`use_capability`/`tool_result_page`/`powershell`); it now delegates
+/// here so the two can never diverge again.
+pub(crate) fn agent_allowed_tools(
     agent: &str,
     config: &deepseekcode_config::DeepSeekCodeConfig,
 ) -> Vec<String> {
@@ -459,6 +531,10 @@ fn agent_allowed_tools(
                 "question".into(),
                 "task".into(),
                 "lsp".into(),
+                // Issue-7: stable MCP proxy is part of the default contract.
+                "use_capability".into(),
+                // Issue-10: paged recovery never rewrites history.
+                "tool_result_page".into(),
             ];
             #[cfg(windows)]
             {
@@ -497,6 +573,26 @@ pub fn is_llm_safe_tool_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Recursively sort JSON object keys so `input_schema` serializes
+/// byte-identically across turns. DeepSeek's prefix cache hashes the raw
+/// `tools` JSON; unsorted keys from different construction paths would
+/// otherwise cause a miss on every request.
+pub fn canonicalize_schema(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut sorted = serde_json::Map::with_capacity(map.len());
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for k in keys {
+                sorted.insert(k.clone(), canonicalize_schema(&map[k]));
+            }
+            Value::Object(sorted)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(canonicalize_schema).collect()),
+        _ => value.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -542,5 +638,68 @@ mod tests {
         registry.refresh_mcp_tools(&pool);
         let after = registry.definitions().len();
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn definitions_are_sorted_for_prefix_cache() {
+        let registry = ToolRegistry::new("/tmp".into(), &DeepSeekCodeConfig::default());
+        let defs = registry.definitions();
+        let mut names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(
+            names, sorted,
+            "tools must serialize sorted for DeepSeek prefix"
+        );
+        // Twice in a row must be byte-identical (HashMap order is random).
+        let again = registry.definitions();
+        assert_eq!(
+            serde_json::to_string(&defs).unwrap(),
+            serde_json::to_string(&again).unwrap()
+        );
+    }
+
+    #[test]
+    fn canonicalize_sorts_object_keys() {
+        let v = serde_json::json!({"z": 1, "a": {"d": 1, "b": 2}});
+        let c = canonicalize_schema(&v);
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(s.find("\"a\"").unwrap() < s.find("\"z\"").unwrap());
+        assert!(s.find("\"b\"").unwrap() < s.find("\"d\"").unwrap());
+    }
+
+    #[test]
+    fn request_and_compaction_lineage_share_one_hash_source() {
+        // P0-1 regression: the request path (runner) and the compaction write
+        // path must hash the provider-visible contract with the SAME function
+        // over the SAME JSON construction, or validation false-positives on
+        // every turn (`lineage-changed`) and breaks the incremental chain.
+        use deepseekcode_llm::request::{lineage_key_for, normalize_thinking, tools_hash_for_json};
+        let config = DeepSeekCodeConfig::default();
+        let registry = ToolRegistry::new("/tmp".into(), &config);
+        // Runner path: definitions_for_agent -> JSON -> hash.
+        let runner_defs = registry.definitions_for_agent("build", &config, &[]);
+        let runner_json = serde_json::to_value(&runner_defs).unwrap();
+        let runner_hash = tools_hash_for_json(&runner_json);
+        // Compaction path: identical construction from the same registry.
+        let compact_defs = registry.definitions_for_agent("build", &config, &[]);
+        let compact_json = serde_json::to_value(&compact_defs).unwrap();
+        let compact_hash = tools_hash_for_json(&compact_json);
+        assert_eq!(
+            runner_hash, compact_hash,
+            "dual hash fork: request and compaction paths diverged"
+        );
+        let thinking = normalize_thinking("deepseek-chat", None, true);
+        assert_eq!(
+            lineage_key_for("deepseek", "deepseek-chat", thinking, &runner_hash),
+            lineage_key_for("deepseek", "deepseek-chat", thinking, &compact_hash),
+            "lineage strings must be byte-identical for the same contract"
+        );
+        // Schema drift must move the hash (else stale checkpoints reuse).
+        assert_ne!(
+            runner_hash,
+            tools_hash_for_json(&serde_json::json!([{"different": true}])),
+            "hash must be sensitive to contract content"
+        );
     }
 }

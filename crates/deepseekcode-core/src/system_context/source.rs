@@ -150,16 +150,62 @@ fn load_instruction_glob(project_dir: &str, pattern: &str, texts: &mut Vec<Strin
     }
 }
 
+/// Sync blocking GET that never parks the async executor. Source loaders run
+/// inside async runner tasks; a 5s remote hang on an executor thread would
+/// stall turns. Outside a multi-thread runtime (tests/CLI bootstrap) it runs
+/// inline. Shared by instruction URLs and the skills index so both stay
+/// bounded the same way.
+pub(crate) fn blocking_http_get(
+    client: &reqwest::blocking::Client,
+    url: &str,
+) -> Result<reqwest::blocking::Response, reqwest::Error> {
+    let in_multi_thread = tokio::runtime::Handle::try_current()
+        .map(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+        .unwrap_or(false);
+    if in_multi_thread {
+        tokio::task::block_in_place(|| client.get(url).send())
+    } else {
+        client.get(url).send()
+    }
+}
+
 fn load_instruction_url(url: &str, texts: &mut Vec<String>) {
-    if let Ok(response) = reqwest::blocking::get(url) {
-        if response.status().is_success() {
-            if let Ok(content) = response.text() {
-                if !content.is_empty() {
-                    texts.push(content);
-                }
+    // Issue-8: 5s timeout + failure preserves old prefix. A hanging or
+    // flapping URL must never block `drain` nor rewrite the system prefix
+    // every turn (each rewrite = full DeepSeek miss).
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build();
+    let Ok(client) = client else { return };
+    let Ok(response) = blocking_http_get(&client, url) else {
+        tracing::warn!(
+            target: deepseekcode_telemetry::APP,
+            url = %url,
+            "instruction URL fetch failed; keeping cached prefix"
+        );
+        return;
+    };
+    if response.status().is_success() {
+        if let Ok(content) = response.text() {
+            // Bound single remote doc so one huge wiki cannot blow the prefix.
+            const MAX_REMOTE_CHARS: usize = 8_000;
+            let bounded: String = content.chars().take(MAX_REMOTE_CHARS).collect();
+            if !bounded.is_empty() {
+                texts.push(bounded);
             }
         }
     }
+}
+
+/// P2-7: standing-source keys whose content edits may replace the baseline
+/// when `context.standing_replacement_on_edit` is on. Background, workspace,
+/// environment, and skill catalog sources are never standing: their churn
+/// must always ride the tail.
+pub fn is_standing_source_key(key: &str) -> bool {
+    matches!(
+        key,
+        "memory/standing" | "project/agents_md" | "project/instructions"
+    )
 }
 
 pub fn workspace_source(project_dir: &str) -> ContextSource<serde_json::Value> {
@@ -276,6 +322,67 @@ pub fn instructions_source(
         |texts| serde_json::to_value(texts).unwrap_or(serde_json::Value::Null),
     )
     .with_removed(|_| "Project instructions were removed.".into())
+}
+
+/// Issue-9: standing memory (`.deepseekcode/MEMORY.md`). New file →
+/// `ReplacementReady` (one expected miss, then stable); edits fold on next
+/// epoch. Never carries dynamic facts.
+pub fn memory_standing_source(project_dir: &str) -> ContextSource<Vec<String>> {
+    let dir = project_dir.to_string();
+    ContextSource::make(
+        ContextKey::new("memory", "standing"),
+        move || {
+            let set = crate::memory::MemorySet::load(&dir);
+            if set.standing.is_empty() {
+                LoadResult::Unavailable
+            } else {
+                LoadResult::Available(set.standing)
+            }
+        },
+        |docs| {
+            docs.iter()
+                .enumerate()
+                .map(|(i, d)| format!("### Memory fragment {}\n{}", i + 1, d.trim()))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        },
+        |_, curr| {
+            format!(
+                "Memory updated.\n\n{}",
+                curr.iter()
+                    .enumerate()
+                    .map(|(i, d)| format!("### Memory fragment {}\n{}", i + 1, d.trim()))
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            )
+        },
+        |docs| serde_json::to_value(docs).unwrap_or(serde_json::Value::Null),
+    )
+    .with_removed(|_| "Previously loaded memory instructions no longer apply.".into())
+}
+
+/// Issue-9 (+Issue-8 clarification): background memory (pinned facts). The
+/// FIRST version necessarily enters the baseline (all sources render into it;
+/// one expected miss), but every LATER change emits `Updated` tail user
+/// messages and never rewrites the system prefix.
+pub fn memory_background_source(project_dir: &str) -> ContextSource<String> {
+    let dir = project_dir.to_string();
+    ContextSource::make(
+        ContextKey::new("memory", "background"),
+        move || {
+            let set = crate::memory::MemorySet::load(&dir);
+            let block = set.background_data_block();
+            if block.trim().is_empty() {
+                LoadResult::Unavailable
+            } else {
+                LoadResult::Available(block)
+            }
+        },
+        |block| block.clone(),
+        |_, curr| curr.clone(),
+        |block| serde_json::to_value(block).unwrap_or(serde_json::Value::Null),
+    )
+    .with_removed(|_| "Pinned memory facts were removed.".into())
 }
 
 pub fn skill_guidance_source(guidance_text: String) -> ContextSource<String> {

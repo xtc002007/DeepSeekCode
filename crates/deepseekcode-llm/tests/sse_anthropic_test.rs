@@ -39,9 +39,12 @@ async fn anthropic_sse_stream_emits_text_and_completion() {
             tool_calls: vec![],
             tool_call_id: None,
             name: None,
+            reasoning_content: None,
         }],
         tools: vec![],
         base_url: Some(base.clone()),
+        effort: None,
+        max_output_tokens: None,
     };
 
     let mut stream = anthropic::stream(&http, &request, Some("test-key".into()))
@@ -96,9 +99,12 @@ async fn anthropic_sse_stream_emits_tool_use_block() {
             tool_calls: vec![],
             tool_call_id: None,
             name: None,
+            reasoning_content: None,
         }],
         tools: vec![],
         base_url: Some(base.clone()),
+        effort: None,
+        max_output_tokens: None,
     };
 
     let mut stream = anthropic::stream(&http, &request, Some("test-key".into()))

@@ -158,6 +158,12 @@ impl McpConnectionPool {
             .collect()
     }
 
+    /// Issue-7: snapshot for the stable `use_capability` proxy so catalog
+    /// reads never touch the prefix.
+    pub fn connected_tools_snapshot(&self) -> Vec<(String, Vec<McpToolInfo>)> {
+        self.connected_tools()
+    }
+
     pub(crate) fn connected_tools(&self) -> Vec<(String, Vec<McpToolInfo>)> {
         let connected = self.connected.lock().unwrap();
         connected

@@ -8,6 +8,33 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+/// P1-4: one-line per-turn cache receipt from a `MessageCompleted` payload.
+/// Delegates to the single shared formatter in `deepseekcode-core` (the same
+/// bytes the desktop meter and `/cache-status` aggregate) so the CLI can
+/// never drift from it. Returns `None` when `show` is false
+/// (`ui.show_turn_usage` gates display only — accounting always runs) or
+/// when the payload carries no usage.
+fn turn_receipt_line(payload: &serde_json::Value, show: bool) -> Option<String> {
+    // Transcript-only events carry no usage: stay silent instead of printing
+    // a zero line (the shared helper rebuilds from zeros when asked).
+    let has_usage = payload
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .is_some()
+        || payload
+            .get("cache_receipt")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+    if !has_usage {
+        return None;
+    }
+    let line = deepseekcode_core::cache_status::receipt_from_payload(payload, show);
+    if line.is_empty() {
+        return None;
+    }
+    Some(format!("\n{line}"))
+}
+
 #[derive(Parser)]
 #[command(name = "deepseekcode", about = "DeepSeekCode command-line interface")]
 struct Cli {
@@ -355,6 +382,12 @@ async fn main() -> anyhow::Result<()> {
             use deepseekcode_schema::event::EventKind;
             use deepseekcode_sdk::EventStreamItem;
             use futures::StreamExt;
+            // P1-4: receipt display gate. Accounting always runs server-side;
+            // this only controls the per-turn line. Default true on error.
+            let show_turn_usage =
+                deepseekcode_config::load_effective_config(camino::Utf8Path::new(&directory))
+                    .map(|cfg| cfg.ui.show_turn_usage)
+                    .unwrap_or(true);
             let result = tokio::time::timeout(std::time::Duration::from_secs(600), async {
                 let mut since_seq = 0i64;
                 // Exponential backoff for reconnects after a failed gap
@@ -385,6 +418,19 @@ async fn main() -> anyhow::Result<()> {
                                                     .and_then(|v| v.as_str())
                                                 {
                                                     print!("{delta}");
+                                                    let _ = std::io::Write::flush(
+                                                        &mut std::io::stdout(),
+                                                    );
+                                                }
+                                            }
+                                            // P1-4: per-turn cache receipt on
+                                            // completion (gap-backfill path).
+                                            if event.kind == EventKind::MessageCompleted {
+                                                if let Some(line) = turn_receipt_line(
+                                                    &event.payload,
+                                                    show_turn_usage,
+                                                ) {
+                                                    print!("{line}");
                                                     let _ = std::io::Write::flush(
                                                         &mut std::io::stdout(),
                                                     );
@@ -425,6 +471,16 @@ async fn main() -> anyhow::Result<()> {
                                             event.payload.get("delta").and_then(|v| v.as_str())
                                         {
                                             print!("{delta}");
+                                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                                        }
+                                    }
+                                    // P1-4: per-turn cache receipt on
+                                    // completion (live-stream path).
+                                    EventKind::MessageCompleted => {
+                                        if let Some(line) =
+                                            turn_receipt_line(&event.payload, show_turn_usage)
+                                        {
+                                            print!("{line}");
                                             let _ = std::io::Write::flush(&mut std::io::stdout());
                                         }
                                     }
@@ -654,8 +710,15 @@ async fn main() -> anyhow::Result<()> {
             SessionCommands::Compact { directory, session } => {
                 let (engine, client) = scoped_client(&directory).await?;
                 let session_id = SessionId::from_str(&session)?;
-                client.compact_session(session_id).await?;
-                println!("compaction requested");
+                let installed = client.compact_session(session_id).await?;
+                println!(
+                    "{}",
+                    if installed {
+                        "compaction checkpoint installed"
+                    } else {
+                        "nothing to compact"
+                    }
+                );
                 engine.shutdown().await;
             }
             SessionCommands::Move {
@@ -823,4 +886,40 @@ fn load_logging_config() -> LoggingConfig {
     deepseekcode_config::load_effective_config(camino::Utf8Path::new("."))
         .map(|c| c.logging)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn receipt_prefers_server_bytes_and_gates_display() {
+        let payload = json!({
+            "input_tokens": 12000u64,
+            "output_tokens": 100u64,
+            "cache_receipt": " (10800 cached / 1200 new)",
+        });
+        let line = turn_receipt_line(&payload, true).expect("receipt");
+        assert!(line.contains("10800 cached") && line.contains("out 100"));
+        assert_eq!(turn_receipt_line(&payload, false), None);
+    }
+
+    #[test]
+    fn receipt_rebuilds_and_reports_write() {
+        let payload = json!({
+            "input_tokens": 12000u64,
+            "output_tokens": 100u64,
+            "cache_hit": 10800u64,
+            "cache_miss": 1200u64,
+            "cache_write": 300u64,
+        });
+        let line = turn_receipt_line(&payload, true).expect("receipt");
+        assert!(line.contains("10800 cached") && line.contains("300 write"));
+    }
+
+    #[test]
+    fn receipt_absent_without_usage() {
+        assert_eq!(turn_receipt_line(&json!({"content": "hi"}), true), None);
+    }
 }

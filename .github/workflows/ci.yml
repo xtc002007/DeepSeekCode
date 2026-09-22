@@ -41,6 +41,10 @@ jobs:
         run: cargo test -p deepseekcode-desktop
       - name: Check desktop
         run: cargo check -p deepseekcode-desktop
+      - name: Cache impact guard (DeepSeek prefix)
+        env:
+          DEEPSEEKCODE_DISABLE_KEYRING: "1"
+        run: ./scripts/check-cache-impact.ps1 -Mode cold
       - name: Workspace tests
         env:
           DEEPSEEKCODE_DISABLE_KEYRING: "1"

@@ -219,6 +219,14 @@ impl SessionService {
         Ok(())
     }
 
+    /// Manual `/compact` through the live runner (P0-2). The checkpoint is
+    /// built from the real baseline/messages/tools, so its lineage validates
+    /// on subsequent turns. Returns whether a checkpoint was installed.
+    pub async fn compact_manual(&self, session_id: SessionId) -> Result<bool> {
+        self.ensure_session_in_location(session_id).await?;
+        self.execution.compact_manual(session_id).await
+    }
+
     pub async fn latest_event_seq(&self, session_id: SessionId) -> Result<i64> {
         self.ensure_session_in_location(session_id).await?;
         self.events.latest_seq(session_id).await

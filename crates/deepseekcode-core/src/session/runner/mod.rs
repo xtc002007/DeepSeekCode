@@ -10,8 +10,9 @@ mod repair;
 mod tool_executor;
 use prompt_promoter::PromptPromoter;
 use repair::{
-    agent_step_limit, estimate_message_tokens, message_text, message_tool_calls,
-    provider_tool_call_id, repair_llm_tool_chain,
+    agent_step_limit, estimate_message_tokens, message_reasoning, message_text, message_tool_calls,
+    provider_tool_call_id, repair_llm_tool_chain, should_retry_without_reasoning,
+    truncate_tool_content_for_prefix,
 };
 
 pub(super) struct ProviderTurnOutcome {
@@ -34,7 +35,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::compaction::{
-    compaction_checkpoint_content, parse_compaction_message, CompactionContext, CompactionService,
+    compaction_checkpoint_content, parse_compaction_message, verify_checkpoint_coverage,
+    CompactionContext, CompactionService, FailedCompaction,
 };
 use crate::mcp::McpConnectionPool;
 use crate::permission::PermissionService;
@@ -45,6 +47,14 @@ use crate::system_context::{ContextEpochStore, SystemContextRegistry};
 use crate::tools::{CancelToken, EventToolProgressSink, ToolRegistry, ToolServices};
 use deepseekcode_plugin::HookRegistry;
 use deepseekcode_storage::TodoStore;
+
+/// Issue-6 helper: hex sha256 for system-cache keys.
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
+}
 
 const MAX_STEPS_PROMPT: &str = "CRITICAL - MAXIMUM STEPS REACHED\n\n\
 The maximum number of steps allowed for this task has been reached. Tools are disabled until next user input. Respond with text only.\n\n\
@@ -78,6 +88,15 @@ pub struct SessionRunner {
     hooks: Arc<HookRegistry>,
     question_tx: Arc<tokio::sync::Mutex<Option<crate::tools::services::QuestionResponder>>>,
     loop_guard: Arc<Mutex<Option<(String, u32)>>>,
+    /// Issue-6: deterministic `transform_system` cache. Key =
+    /// `sha256(baseline)|agent|model|cfg_prompt_hash`. Only used when
+    /// `hooks.is_empty()` so dynamic hook output is never frozen.
+    system_cache: Mutex<std::collections::HashMap<String, String>>,
+    /// P1-3: last deterministic compaction failure for this session's view.
+    /// Same-view repeats skip the summarizer call (`blocked-same-view`);
+    /// progress or success clears it. Threaded into every `CompactionContext`
+    /// built here so auto/overflow/manual share one record.
+    compaction_failure: Mutex<Option<FailedCompaction>>,
 }
 
 impl SessionRunner {
@@ -134,6 +153,8 @@ impl SessionRunner {
             hooks,
             question_tx,
             loop_guard: Arc::new(Mutex::new(None)),
+            system_cache: Mutex::new(std::collections::HashMap::new()),
+            compaction_failure: Mutex::new(None),
         }
     }
 
@@ -183,17 +204,26 @@ impl SessionRunner {
         tools.refresh_skill_tool(config);
     }
 
+    /// Issue-11: provider-visible MCP names. When `direct_tools=false`
+    /// (default) MCP lives behind the frozen `use_capability` proxy, so the
+    /// live catalog must NOT enter the allowed-filter or lineage hash —
+    /// otherwise every MCP connect/disconnect false-positives
+    /// `prefix_changed` while the actual `tools` array never moved.
+    async fn provider_visible_mcp_tools(&self) -> Vec<String> {
+        let direct = self.tools.lock().await.mcp_direct();
+        if direct {
+            self.mcp.list_registered_tool_names()
+        } else {
+            Vec::new()
+        }
+    }
+
     async fn tool_definitions(
         &self,
         agent: &deepseekcode_schema::agent::AgentKind,
     ) -> Vec<deepseekcode_schema::tool::ToolDefinition> {
         let agent_str = format!("{agent:?}").to_lowercase();
-        let mcp_tools = self
-            .mcp
-            .bridged_tools()
-            .into_iter()
-            .map(|t| t.name().to_string())
-            .collect::<Vec<_>>();
+        let mcp_tools = self.provider_visible_mcp_tools().await;
         let tools = self.tools.lock().await;
         tools.definitions_for_agent(&agent_str, &self.config, &mcp_tools)
     }
@@ -202,8 +232,53 @@ impl SessionRunner {
         &self,
         baseline: String,
         model: &str,
+        provider: &str,
+        base_url: Option<&str>,
+        effort: Option<&str>,
         agent: &deepseekcode_schema::agent::AgentKind,
     ) -> Result<String> {
+        // Issue-6: byte-stable fast path. When hooks are empty the transform
+        // is pure (baseline + plan builtin + config prompt) so we cache by
+        // content hash. The key binds provider/base_url/effort as well: the
+        // same model id on different gateways (or flipped thinking) must not
+        // share a cached system string.
+        if self.hooks.is_empty() {
+            let agent_key = format!("{agent:?}").to_lowercase();
+            let cfg_prompt = self
+                .config
+                .agents
+                .get(&agent_key)
+                .and_then(|a| a.system_prompt.as_deref())
+                .unwrap_or("");
+            let cache_key = format!(
+                "{}|{}|{}|{}|{}|{}|{}",
+                sha256_hex(baseline.as_bytes()),
+                agent_key,
+                model,
+                provider,
+                base_url.unwrap_or("default"),
+                effort.unwrap_or("default"),
+                sha256_hex(cfg_prompt.as_bytes())
+            );
+            if let Some(hit) = self.system_cache.lock().await.get(&cache_key) {
+                return Ok(hit.clone());
+            }
+            let mut merged = baseline;
+            if matches!(agent, deepseekcode_schema::agent::AgentKind::Plan) {
+                let builtin = crate::agent::plan_system_prompt();
+                if !builtin.is_empty() {
+                    merged = format!("{merged}\n\n{builtin}");
+                }
+            }
+            if !cfg_prompt.is_empty() {
+                merged = format!("{merged}\n\n{cfg_prompt}");
+            }
+            self.system_cache
+                .lock()
+                .await
+                .insert(cache_key, merged.clone());
+            return Ok(merged);
+        }
         let agent_key = format!("{agent:?}").to_lowercase();
         let mut merged = baseline;
         if matches!(agent, deepseekcode_schema::agent::AgentKind::Plan) {
@@ -221,9 +296,6 @@ impl SessionRunner {
             if !prompt.is_empty() {
                 merged = format!("{merged}\n\n{prompt}");
             }
-        }
-        if self.hooks.is_empty() {
-            return Ok(merged);
         }
         let mut output = deepseekcode_plugin::ChatSystemTransformOutput {
             system: vec![merged],
@@ -382,6 +454,7 @@ impl SessionRunner {
                         tool_calls: Vec::new(),
                         tool_call_id: None,
                         name: None,
+                        reasoning_content: None,
                     });
                     max_steps_summary_done = true;
                 }
@@ -461,7 +534,7 @@ impl SessionRunner {
         llm_messages: &[LlmMessage],
     ) -> Result<()> {
         let agent = format!("{:?}", session.agent).to_lowercase();
-        let mcp_tools = self.mcp.list_registered_tool_names();
+        let mcp_tools = self.provider_visible_mcp_tools().await;
         let tools = {
             let registry = self.tools.lock().await;
             registry.definitions_for_agent(&agent, &self.config, &mcp_tools)
@@ -481,6 +554,7 @@ impl SessionRunner {
             messages: llm_messages,
             tools_json,
             hooks: Some(self.hooks.as_ref()),
+            failure_slot: Some(&self.compaction_failure),
         };
         if !CompactionService::compact_after_overflow(&ctx).await? {
             return Err(DeepSeekCodeError::Llm(
@@ -497,7 +571,7 @@ impl SessionRunner {
     ) -> Result<bool> {
         let (baseline, _) = self.prepare_context_epoch().await?;
         let agent = format!("{:?}", session.agent).to_lowercase();
-        let mcp_tools = self.mcp.list_registered_tool_names();
+        let mcp_tools = self.provider_visible_mcp_tools().await;
         let tools = {
             let registry = self.tools.lock().await;
             registry.definitions_for_agent(&agent, &self.config, &mcp_tools)
@@ -517,20 +591,62 @@ impl SessionRunner {
             messages: llm_messages,
             tools_json,
             hooks: Some(self.hooks.as_ref()),
+            failure_slot: Some(&self.compaction_failure),
         };
         CompactionService::compact_if_needed(&ctx).await
     }
 
+    /// Manual `/compact`: one forced checkpoint built from the live context —
+    /// real baseline, real projected messages, real provider-visible tools —
+    /// so the stored lineage matches subsequent turns and validates on read.
+    /// P0-2: never a hollow context; history is appended, never rewritten.
+    pub async fn compact_manual_turn(&self) -> Result<bool> {
+        // P1-3: explicit operator intent bypasses the same-view block (mirrors
+        // Reasonix `trigger != manual`): the user asked for exactly one fresh
+        // attempt. Fresh failures below still re-arm the record.
+        self.compaction_failure.lock().await.take();
+        let session = self.sessions.get(self.session_id).await?;
+        let (baseline, _) = self.prepare_context_epoch().await?;
+        let llm_messages = self.build_llm_messages().await?;
+        let agent = format!("{:?}", session.agent).to_lowercase();
+        let mcp_tools = self.provider_visible_mcp_tools().await;
+        let tools = {
+            let registry = self.tools.lock().await;
+            registry.definitions_for_agent(&agent, &self.config, &mcp_tools)
+        };
+        let tools_json = serde_json::to_value(&tools).unwrap_or_else(|_| json!([]));
+        let ctx = CompactionContext {
+            session_id: self.session_id,
+            session: &session,
+            config: &self.config,
+            sessions: &self.sessions,
+            events: self.events.as_ref(),
+            llm: &self.llm,
+            providers: self.providers.as_ref(),
+            registry: &self.context_registry,
+            epochs: &self.context_epochs,
+            system: &baseline,
+            messages: &llm_messages,
+            tools_json,
+            hooks: Some(self.hooks.as_ref()),
+            failure_slot: Some(&self.compaction_failure),
+        };
+        CompactionService::compact_forced(&ctx).await
+    }
+
     pub(super) fn tool_output_limits(&self) -> ToolOutputLimits {
         let cfg = self.config.tool_output.as_ref();
+        // Clamp to the 32KiB prefix budget even if the user configured a
+        // larger limit: provider-visible history must stay bounded for the
+        // DeepSeek prefix cache, while the full output remains on disk.
         ToolOutputLimits {
             max_lines: cfg
                 .and_then(|c| c.max_lines)
-                .map(|v| v as usize)
+                .map(|v| (v as usize).min(400))
                 .unwrap_or(deepseekcode_storage::DEFAULT_MAX_LINES),
             max_bytes: cfg
                 .and_then(|c| c.max_bytes)
-                .map(|v| v as usize)
+                .map(|v| (v as usize).min(32 * 1024))
                 .unwrap_or(deepseekcode_storage::DEFAULT_MAX_BYTES),
         }
     }
@@ -559,6 +675,7 @@ impl SessionRunner {
                             tool_calls: Vec::new(),
                             tool_call_id: None,
                             name: None,
+                            reasoning_content: None,
                         });
                     }
                     i += 1;
@@ -572,12 +689,19 @@ impl SessionRunner {
                             tool_calls: Vec::new(),
                             tool_call_id: None,
                             name: None,
+                            reasoning_content: None,
                         });
                     }
                     i += 1;
                 }
                 MessageRole::Assistant => {
-                    let content = message_text(msg);
+                    // Issue-11: merging consecutive assistant rows must not drop
+                    // any content/reasoning or the next-turn replay diverges
+                    // from what was sent (prefix miss + quality loss).
+                    // Concatenate text with newlines, concatenate reasoning,
+                    // and extend tool_calls — nothing is discarded.
+                    let mut contents = vec![message_text(msg)];
+                    let mut reasonings = vec![message_reasoning(msg)];
                     let mut tool_calls = message_tool_calls(msg);
                     let mut j = i + 1;
                     while j < history.len() && matches!(history[j].role, MessageRole::Assistant) {
@@ -585,15 +709,40 @@ impl SessionRunner {
                         if next_calls.is_empty() {
                             break;
                         }
+                        let next_text = message_text(&history[j]);
+                        if !next_text.is_empty() {
+                            contents.push(next_text);
+                        }
+                        if let Some(r) = message_reasoning(&history[j]) {
+                            if !r.is_empty() {
+                                reasonings.push(Some(r));
+                            }
+                        }
                         tool_calls.extend(next_calls);
                         j += 1;
                     }
+                    let content = contents
+                        .into_iter()
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let flat_reason: Vec<String> = reasonings
+                        .into_iter()
+                        .flatten()
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    let reasoning = if flat_reason.is_empty() {
+                        None
+                    } else {
+                        Some(flat_reason.join("\n"))
+                    };
                     messages.push(LlmMessage {
                         role: LlmRole::Assistant,
                         content,
                         tool_calls,
                         tool_call_id: None,
                         name: None,
+                        reasoning_content: reasoning,
                     });
                     i = j;
                 }
@@ -605,6 +754,7 @@ impl SessionRunner {
                             tool_calls: Vec::new(),
                             tool_call_id: None,
                             name: None,
+                            reasoning_content: None,
                         });
                     }
                     i += 1;
@@ -635,15 +785,17 @@ impl SessionRunner {
                                 tool_call_id: Some(tool_call_id.clone()),
                                 name: part.tool_name.clone(),
                                 tool_calls: Vec::new(),
+                                reasoning_content: None,
                             });
                             continue;
                         }
                         messages.push(LlmMessage {
                             role: LlmRole::Tool,
-                            content,
+                            content: truncate_tool_content_for_prefix(&content),
                             tool_call_id: Some(tool_call_id.clone()),
                             name: part.tool_name.clone(),
                             tool_calls: Vec::new(),
+                            reasoning_content: None,
                         });
                     }
                     i += 1;
@@ -722,19 +874,41 @@ impl SessionRunner {
             .or_else(|| self.config.model.as_ref().and_then(|m| m.provider.clone()))
             .unwrap_or_else(|| "openai".into());
 
-        let baseline = self
-            .transform_system(baseline, &model, &session.agent)
-            .await?;
-
         let api_key = self.providers.resolve_api_key(&provider).await;
         let base_url = self.providers.get_base_url(&provider).await;
+
+        // Issue-2: effort is real and part of the lineage. Config
+        // `model.effort` flows through; changing it starts a new prefix.
+        // (DeepSeek detection lives in `LlmRequest::is_deepseek` / protocol.)
+        // Resolved before `transform_system` so the system cache key binds it.
+        let effort = self
+            .config
+            .model
+            .as_ref()
+            .and_then(|m| m.effort.clone())
+            .filter(|s| !s.trim().is_empty());
+
+        let baseline = self
+            .transform_system(
+                baseline,
+                &model,
+                &provider,
+                base_url.as_deref(),
+                effort.as_deref(),
+                &session.agent,
+            )
+            .await?;
 
         let tools = if force_text_only {
             Vec::new()
         } else {
             self.tool_definitions(&session.agent).await
         };
-
+        // Issue-7: the max-steps fallback is a text-only summary turn with
+        // empty `tools`, so the protocol layer would send `max_tokens` if
+        // set. Cap it at 2048: the turn must summarize, never balloon into
+        // a full continuation that poisons the next prefix.
+        let max_output_tokens = if force_text_only { Some(2048) } else { None };
         let request = LlmRequest {
             provider: provider.clone(),
             model: model.clone(),
@@ -742,6 +916,80 @@ impl SessionRunner {
             messages,
             tools,
             base_url,
+            // DeepSeek official main turns omit so the server uses its 384K
+            // ceiling. Non-DeepSeek leaves the default path untouched.
+            // (`force_text_only` sets an explicit cap above.)
+            effort,
+            max_output_tokens,
+        };
+        // Issues 7/P0-1: tools_hash + lineage for prefix_changed attribution.
+        // Single hash source shared with the compaction write path: sha256 of
+        // the canonical provider-visible `tools` JSON (name-sorted,
+        // canonicalized schemas). Hashing the final array — not the registry
+        // internals — guarantees request path and compaction path produce
+        // byte-identical lineage strings for the same contract, so validation
+        // never false-positives. MCP names reach the array only when directly
+        // exposed (`provider_visible_mcp_tools`); otherwise the proxy keeps
+        // the contract (and hash) stable across MCP churn.
+        let tools_hash = deepseekcode_llm::request::tools_hash_for_json(
+            &serde_json::to_value(&request.tools).unwrap_or_else(|_| json!([])),
+        );
+        let lineage = request.lineage_key(&tools_hash);
+        // Issue-1 (read path): validate the stored checkpoint against the
+        // current lineage. Mismatch never deletes history; it only attributes
+        // the coming cold miss instead of letting it go unexplained.
+        let prefix_changed: Option<&'static str> = {
+            match self.sessions.list_messages(self.session_id).await {
+                Ok(history) => {
+                    let (valid, reason) =
+                        crate::compaction::validate_compaction_lineage(&history, &lineage);
+                    if !valid && reason != "no-checkpoint" {
+                        tracing::warn!(
+                            target: deepseekcode_telemetry::SESSION,
+                            session_id = %self.session_id,
+                            reason = reason,
+                            current_lineage = %lineage,
+                            "prefix_changed: lineage — stored checkpoint not from this lineage",
+                        );
+                        Some(reason)
+                    } else if valid {
+                        // Lineage matches: recompute `covered_hash` over the
+                        // pre-checkpoint canonical messages with the same
+                        // tail budget the write path used (P1-3). A mismatch
+                        // means the covered head diverged (tampering/partial
+                        // coverage) and the coming turn cold-misses.
+                        // Unknown window: cannot recompute, so skip coverage
+                        // (lineage already matched) rather than false-positive.
+                        match crate::compaction::resolve_context_window(
+                            self.providers.as_ref(),
+                            session,
+                        ) {
+                            None => None,
+                            Some(window) => {
+                                let keep =
+                                    crate::compaction::keep_tokens_for_config(&self.config, window);
+                                let (covered_valid, covered_reason) =
+                                    verify_checkpoint_coverage(&history, keep);
+                                if covered_valid {
+                                    None
+                                } else {
+                                    tracing::warn!(
+                                        target: deepseekcode_telemetry::SESSION,
+                                        session_id = %self.session_id,
+                                        reason = covered_reason,
+                                        current_lineage = %lineage,
+                                        "prefix_changed: covered — checkpoint coverage diverged",
+                                    );
+                                    Some(covered_reason)
+                                }
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None,
+            }
         };
 
         tracing::debug!(
@@ -764,6 +1012,10 @@ impl SessionRunner {
                     "turn": turn,
                     "max_turns": max_turns.unwrap_or(0),
                     "force_text_only": force_text_only,
+                    "effort": request.effort,
+                    "tools_hash": tools_hash,
+                    "lineage": lineage,
+                    "prefix_changed": prefix_changed,
                 }),
             )
             .await?;
@@ -775,10 +1027,50 @@ impl SessionRunner {
         let mut tool_call_args: BTreeMap<usize, String> = BTreeMap::new();
         let mut assistant_started = false;
         let mut overflow_error: Option<String> = None;
+        // Provider-reported usage (DeepSeek `prompt_cache_hit/miss_tokens`
+        // via `stream_options.include_usage`). Falls back to estimates below.
+        let mut provider_cache_hit: Option<u32> = None;
+        let mut provider_cache_miss: Option<u32> = None;
+        let mut provider_cache_write: Option<u32> = None;
+        let mut provider_input: Option<u32> = None;
+        let mut provider_output: Option<u32> = None;
+        let mut provider_reasoning: Option<u32> = None;
 
         let mut stream = {
             let llm = self.llm.lock().await;
-            llm.stream(&request, api_key).await?
+            // P1-5 reasoning-shape recovery: pre-send repair already ran, so
+            // a transport-level 400 naming reasoning/tool shape means the
+            // gateway rejected the replay itself — resending identical bytes
+            // is pure waste. Budget is exactly one retry with
+            // `reasoning_content` stripped; overflow/auth/quota/rate never
+            // enter (see `should_retry_without_reasoning`).
+            let api_key_retry = api_key.clone();
+            match llm.stream(&request, api_key).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let text = e.to_string();
+                    let had_reasoning = request
+                        .messages
+                        .iter()
+                        .any(|m| m.reasoning_content.as_ref().is_some_and(|s| !s.is_empty()));
+                    if !should_retry_without_reasoning(&text, had_reasoning) {
+                        return Err(e);
+                    }
+                    tracing::warn!(
+                        target: deepseekcode_telemetry::LLM,
+                        session_id = %self.session_id,
+                        provider = %request.provider,
+                        model = %request.model,
+                        error = %text,
+                        "provider rejected reasoning replay shape; retrying once stripped"
+                    );
+                    let mut stripped = request.clone();
+                    for m in &mut stripped.messages {
+                        m.reasoning_content = None;
+                    }
+                    llm.stream(&stripped, api_key_retry).await?
+                }
+            }
         };
 
         let stream_timeout = std::time::Duration::from_secs(90);
@@ -865,6 +1157,30 @@ impl SessionRunner {
                             .entry(index)
                             .or_default()
                             .push_str(&arguments);
+                    }
+                }
+                LlmEvent::Usage(u) => {
+                    // Prefer provider-reported accounting (DeepSeek cache
+                    // hit/miss/write) over local estimates. Keep the last one.
+                    if let Some(hit) = u.cache_hit.or(u.cache_tokens) {
+                        provider_cache_hit = Some(hit);
+                    }
+                    if let Some(miss) = u.cache_miss {
+                        provider_cache_miss = Some(miss);
+                    }
+                    // Issue-3: `write` is a subset of miss billed at a
+                    // premium; dropping it blinds cost attribution.
+                    if let Some(w) = u.cache_write {
+                        provider_cache_write = Some(w);
+                    }
+                    if let Some(input) = u.input_tokens {
+                        provider_input = Some(input);
+                    }
+                    if let Some(output) = u.output_tokens {
+                        provider_output = Some(output);
+                    }
+                    if let Some(r) = u.reasoning_tokens {
+                        provider_reasoning = Some(r);
                     }
                 }
                 LlmEvent::Completed => break,
@@ -956,14 +1272,39 @@ impl SessionRunner {
                 .await?;
         }
 
-        let input_tokens: u32 = request
-            .messages
-            .iter()
-            .map(|m| estimate_message_tokens(&m.content))
-            .sum::<u32>()
-            .saturating_add(estimate_message_tokens(&baseline));
-        let output_tokens = estimate_message_tokens(&content);
-        let reasoning_tokens = estimate_message_tokens(&reasoning);
+        // Issue-2: unified estimator — system + content + reasoning +
+        // tool_calls + tools_json. The old hand-rolled sum omitted
+        // tool_calls/tools and systematically underestimated input, which
+        // then polluted derived `miss` and the 90% guard denominator.
+        let tools_json = serde_json::to_value(&request.tools).unwrap_or_else(|_| json!([]));
+        let estimated_input: u32 = crate::token::estimate_llm_request(
+            &baseline,
+            &request.messages,
+            &tools_json,
+            Some(model.as_str()),
+        );
+        // P1-4: learn the tokenizer ratio from billed provider tokens only —
+        // never from estimates — so future thresholds track the real
+        // tokenizer instead of drifting on `chars/3`.
+        if let Some(measured) = provider_input {
+            crate::token::set_calibration_from_usage(
+                model.as_str(),
+                crate::token::request_chars(&baseline, &request.messages, &tools_json),
+                measured,
+            );
+        }
+        // Prefer provider-reported accounting so cache hit-rate receipts and
+        // guards reflect billed tokens, not estimates.
+        let input_tokens = provider_input.unwrap_or(estimated_input);
+        let output_tokens = provider_output.unwrap_or_else(|| estimate_message_tokens(&content));
+        let reasoning_tokens =
+            provider_reasoning.unwrap_or_else(|| estimate_message_tokens(&reasoning));
+        let cache_hit = provider_cache_hit;
+        let cache_miss = provider_cache_miss.or_else(|| match (provider_input, cache_hit) {
+            (Some(input), Some(hit)) => Some(input.saturating_sub(hit)),
+            _ => None,
+        });
+        let cache_write = provider_cache_write;
 
         self.sessions
             .update_message_tokens(
@@ -974,6 +1315,15 @@ impl SessionRunner {
             )
             .await?;
 
+        let usage_for_receipt = deepseekcode_llm::TokenUsage {
+            input_tokens: Some(input_tokens),
+            output_tokens: Some(output_tokens),
+            reasoning_tokens: Some(reasoning_tokens),
+            cache_tokens: cache_hit,
+            cache_hit,
+            cache_miss,
+            cache_write,
+        };
         self.events
             .append(
                 EventKind::MessageCompleted,
@@ -986,6 +1336,11 @@ impl SessionRunner {
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "reasoning_tokens": reasoning_tokens,
+                    "cache_hit": cache_hit,
+                    "cache_miss": cache_miss,
+                    "cache_write": cache_write,
+                    "cache_receipt": usage_for_receipt.receipt_fragment(),
+                    "cache_hit_rate": usage_for_receipt.hit_rate(),
                 }),
             )
             .await?;
@@ -994,12 +1349,12 @@ impl SessionRunner {
             response: LlmResponse {
                 content,
                 tool_calls: calls,
-                usage: Some(deepseekcode_llm::TokenUsage {
-                    input_tokens: Some(input_tokens),
-                    output_tokens: Some(output_tokens),
-                    reasoning_tokens: Some(reasoning_tokens),
-                    cache_tokens: None,
-                }),
+                usage: Some(usage_for_receipt),
+                reasoning_content: if reasoning.is_empty() {
+                    None
+                } else {
+                    Some(reasoning)
+                },
             },
             assistant_message_id: assistant_id,
         })

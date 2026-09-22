@@ -11,6 +11,9 @@ pub struct ContextUsageState {
     pub output_tokens: u32,
     pub reasoning_tokens: u32,
     pub expanded: bool,
+    /// P1-4: last turn cache receipt (` (H cached / M new)`). Empty when
+    /// `ui.show_turn_usage` is off — accounting still runs server-side.
+    pub last_receipt: String,
 }
 
 impl ContextUsageState {
@@ -95,7 +98,7 @@ impl ContextUsageMeter {
         state: &ContextUsageState,
         theme: &ThemeTokens,
     ) -> impl IntoElement {
-        div()
+        let mut panel = div()
             .absolute()
             .top(px(32.))
             .right_0()
@@ -117,7 +120,12 @@ impl ContextUsageMeter {
             ))
             .child(format!("Input: {}", state.input_tokens))
             .child(format!("Last output: {}", state.output_tokens))
-            .child(format!("Last reasoning: {}", state.reasoning_tokens))
+            .child(format!("Last reasoning: {}", state.reasoning_tokens));
+        // P1-4: receipt line only when `show_turn_usage` produced one.
+        if !state.last_receipt.is_empty() {
+            panel = panel.child(format!("Cache:{}", state.last_receipt));
+        }
+        panel
     }
 
     pub fn render(
@@ -165,26 +173,29 @@ impl ContextUsageMeter {
             )));
 
         if state.expanded {
-            panel = panel.child(
-                div()
-                    .absolute()
-                    .top(px(36.))
-                    .right_0()
-                    .w(px(240.))
-                    .p_3()
-                    .rounded_md()
-                    .bg(theme.bg_surface)
-                    .border_1()
-                    .border_color(theme.border_default)
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .text_xs()
-                    .text_color(theme.text_secondary)
-                    .child(format!("Input: {}", state.input_tokens))
-                    .child(format!("Output: {}", state.output_tokens))
-                    .child(format!("Reasoning: {}", state.reasoning_tokens)),
-            );
+            let mut detail = div()
+                .absolute()
+                .top(px(36.))
+                .right_0()
+                .w(px(240.))
+                .p_3()
+                .rounded_md()
+                .bg(theme.bg_surface)
+                .border_1()
+                .border_color(theme.border_default)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .text_xs()
+                .text_color(theme.text_secondary)
+                .child(format!("Input: {}", state.input_tokens))
+                .child(format!("Output: {}", state.output_tokens))
+                .child(format!("Reasoning: {}", state.reasoning_tokens));
+            // P1-4: receipt line only when `show_turn_usage` produced one.
+            if !state.last_receipt.is_empty() {
+                detail = detail.child(format!("Cache:{}", state.last_receipt));
+            }
+            panel = panel.child(detail);
         }
 
         panel

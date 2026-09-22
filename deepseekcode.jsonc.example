@@ -4,8 +4,40 @@
 
   "model": {
     "provider": "deepseek",
-    "id": "deepseek-chat"
+    "id": "deepseek-v4-pro"
+    // DeepSeek official: omit max_output_tokens so the server uses its 384K
+    // ceiling; thinking stays disabled for stable agent/tool loops.
   },
+
+  // DeepSeek prefix-cache tuning (all optional — defaults are cache-optimal).
+  // system+tools stay byte-stable; history is append-only; tool projections
+  // are bounded to 32KiB with full output on disk for paged `read` recovery.
+  // Compaction fires once at 80% into `system + summary + 16% tail`.
+  "compaction": {
+    "auto": true,
+    "compact_ratio": 0.80,
+    "recent_tail_ratio": 0.16
+  },
+  "tool_output": {
+    "max_lines": 400,
+    "max_bytes": 32768
+  },
+
+  // Read-only cost attribution for `GET /session/{id}/cache-status`
+  // (`estimated_cost`); never gates requests. Defaults shown.
+  // "billing": {
+  //   "currency": "CNY",
+  //   "cache_hit_per_1m": 0.10,
+  //   "input_per_1m": 3.0,
+  //   "output_per_1m": 9.0
+  // },
+
+  // Standing-doc edits ride the turn tail by default (prefix stays warm).
+  // Opt in to baseline replacement for long-lived sessions whose standing
+  // docs change often (one expected miss per edit, shorter tail).
+  // "context": {
+  //   "standing_replacement_on_edit": false
+  // },
 
   "providers": {
     "deepseek": {

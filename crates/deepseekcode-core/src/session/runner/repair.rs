@@ -25,6 +25,203 @@ pub(crate) fn message_text(msg: &Message) -> String {
         .join("\n")
 }
 
+pub(crate) fn message_reasoning(msg: &Message) -> Option<String> {
+    let reasoning: Vec<String> = msg
+        .parts
+        .iter()
+        .filter_map(|part| match part.kind {
+            PartKind::Reasoning => part.text.clone(),
+            _ => None,
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+    if reasoning.is_empty() {
+        None
+    } else {
+        Some(reasoning.join("\n"))
+    }
+}
+
+/// DeepSeek prefix-cache guard: keep the provider-visible tool projection
+/// bounded (32KiB) and byte-stable. Full output stays in storage/managed
+/// files; this only bounds what enters the request prefix so one huge `cat`
+/// cannot permanently poison the cache. Old prefixes stay byte-identical.
+pub(crate) const MAX_TOOL_PREFIX_BYTES: usize = 32 * 1024;
+
+pub(crate) fn truncate_tool_content_for_prefix(content: &str) -> String {
+    if content.len() <= MAX_TOOL_PREFIX_BYTES {
+        return content.to_string();
+    }
+    // Issue-10: preserve recovery metadata. Tool output is usually an envelope
+    // JSON containing `full_output_file`/`truncated`/`preview`. Blind head/tail
+    // could slice the file path itself away, leaving the model aware of
+    // truncation but unable to recover. Truncate long string leaves instead.
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(content) {
+        if truncate_json_strings(&mut value, MAX_TOOL_PREFIX_BYTES) {
+            if let Ok(bounded) = serde_json::to_string(&value) {
+                if bounded.len() <= MAX_TOOL_PREFIX_BYTES {
+                    return bounded;
+                }
+            }
+        }
+        // Fall through to head/tail, but re-attach the recovery path.
+        let recovery = extract_recovery_hint(&value);
+        let head_budget = MAX_TOOL_PREFIX_BYTES * 2 / 3;
+        let tail_budget = MAX_TOOL_PREFIX_BYTES - head_budget - 1024;
+        let head = snap_to_char_boundary(content, head_budget);
+        let tail = snap_to_char_boundary_tail(content, tail_budget.min(8 * 1024));
+        let mut out = format!(
+            "{head}\n…[truncated {} bytes — full output retained locally; recover with tool_result_page]…\n{tail}",
+            content.len().saturating_sub(head.len() + tail.len())
+        );
+        if !recovery.is_empty() {
+            out.push_str(&format!("\n{recovery}"));
+        }
+        return snap_to_char_boundary(&out, MAX_TOOL_PREFIX_BYTES);
+    }
+    // Head/tail split preserves errors (usually at the tail) while staying
+    // within budget. Snap to char boundaries to avoid splitting UTF-8.
+    let head_budget = MAX_TOOL_PREFIX_BYTES * 2 / 3;
+    let tail_budget = MAX_TOOL_PREFIX_BYTES - head_budget - 512;
+    let head = snap_to_char_boundary(content, head_budget);
+    let tail = snap_to_char_boundary_tail(content, tail_budget);
+    format!(
+        "{head}\n…[truncated {} bytes — full output retained locally; recover with tool_result_page]…\n{tail}",
+        content.len().saturating_sub(head.len() + tail.len())
+    )
+}
+
+/// Truncate long string leaves in place, keeping `full_output_file`,
+/// `truncated`, `title` and other recovery keys intact. Returns true when
+/// anything was shortened.
+fn truncate_json_strings(value: &mut serde_json::Value, budget: usize) -> bool {
+    use serde_json::Value::*;
+    match value {
+        String(s) => {
+            if s.len() > budget / 4 && s.len() > 1024 {
+                let keep = (budget / 4).max(1024);
+                let head = snap_to_char_boundary(s, keep * 2 / 3);
+                let tail = snap_to_char_boundary_tail(s, keep / 3);
+                *s = format!("{head}\n…[truncated — recover with tool_result_page]…\n{tail}");
+                true
+            } else {
+                false
+            }
+        }
+        Array(arr) => {
+            let mut changed = false;
+            for v in arr.iter_mut() {
+                changed |= truncate_json_strings(v, budget);
+            }
+            changed
+        }
+        Object(map) => {
+            let mut changed = false;
+            // Never truncate recovery keys themselves.
+            for (k, v) in map.iter_mut() {
+                if matches!(
+                    k.as_str(),
+                    "full_output_file" | "truncated" | "title" | "tool" | "duration_ms"
+                ) {
+                    continue;
+                }
+                changed |= truncate_json_strings(v, budget);
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
+/// Extract a one-line recovery hint that survives even the head/tail path.
+fn extract_recovery_hint(value: &serde_json::Value) -> String {
+    let mut hints = Vec::new();
+    if let Some(path) = value
+        .get("full_output_file")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            value
+                .get("output")
+                .and_then(|o| o.get("full_output_file"))
+                .and_then(|v| v.as_str())
+        })
+    {
+        hints.push(format!(
+            "full_output_file: {path} (read via tool_result_page)"
+        ));
+    }
+    hints.join("\n")
+}
+
+fn snap_to_char_boundary(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+fn snap_to_char_boundary_tail(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut start = s.len().saturating_sub(max_bytes);
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    s[start..].to_string()
+}
+
+/// P1-5 transport-level 400 recovery predicate (pure, unit-tested).
+/// Returns true only when ALL hold, bounding recovery to exactly one
+/// reasoning-stripped retry per turn:
+/// - the failure names a reasoning/tool shape (`reasoning`, `tool_calls`)
+///   with a 400-class signal, so stripping `reasoning_content` can fix it;
+/// - the request actually carried reasoning (else the retry would resend
+///   identical bytes — pure waste);
+/// - it is NOT a context overflow (dedicated recovery owns that path), nor
+///   auth/quota/rate/network failure (retrying those is pointless or harmful).
+pub(crate) fn should_retry_without_reasoning(err_text: &str, had_reasoning: bool) -> bool {
+    if !had_reasoning {
+        return false;
+    }
+    if deepseekcode_llm::is_context_overflow(err_text) {
+        return false;
+    }
+    let lower = err_text.to_ascii_lowercase();
+    let mentions_400 = lower.contains("400")
+        || lower.contains("bad request")
+        || lower.contains("invalid_request")
+        || lower.contains("invalid request");
+    let mentions_shape =
+        lower.contains("reasoning") || lower.contains("tool_calls") || lower.contains("tool_call");
+    if !(mentions_400 && mentions_shape) {
+        return false;
+    }
+    const EXCLUDED: &[&str] = &[
+        "unauthorized",
+        "forbidden",
+        "401",
+        "403",
+        "api key",
+        "apikey",
+        "quota",
+        "rate",
+        "permission",
+        "billing",
+        "credit",
+        "timed out",
+        "timeout",
+        "connection",
+        "network",
+        "dns",
+    ];
+    !EXCLUDED.iter().any(|s| lower.contains(s))
+}
+
 pub(crate) fn repair_llm_tool_chain(messages: &mut Vec<LlmMessage>) {
     if std::env::var("DEEPSEEKCODE_STRICT_TOOL_CHAIN")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
@@ -73,6 +270,7 @@ fn repair_missing_tool_results(messages: &mut Vec<LlmMessage>) {
                 tool_call_id: Some(call.id),
                 name: Some(call.name),
                 tool_calls: Vec::new(),
+                reasoning_content: None,
             });
         }
 
@@ -180,11 +378,8 @@ pub(crate) fn message_to_text(msg: &Message) -> String {
 }
 
 pub(crate) fn estimate_message_tokens(text: &str) -> u32 {
-    if text.is_empty() {
-        0
-    } else {
-        text.chars().count().div_ceil(3).max(1) as u32
-    }
+    // Issue-5: single source of truth — see `crate::token::estimate_str`.
+    crate::token::estimate_str(text)
 }
 
 pub(crate) fn agent_step_limit(config: &DeepSeekCodeConfig, agent: &AgentKind) -> Option<usize> {
@@ -209,6 +404,76 @@ mod tests {
     use deepseekcode_llm::tool_call::LlmToolCall;
 
     #[test]
+    fn tool_prefix_truncation_stays_bounded_and_stable() {
+        let big = "x".repeat(100_000);
+        let out = truncate_tool_content_for_prefix(&big);
+        assert!(out.len() <= MAX_TOOL_PREFIX_BYTES);
+        assert!(out.contains("truncated"));
+        // Small content is byte-identical (no churn on warm prefix).
+        assert_eq!(truncate_tool_content_for_prefix("ok"), "ok");
+        // Same input → same output (cache key stability).
+        assert_eq!(
+            truncate_tool_content_for_prefix(&big),
+            truncate_tool_content_for_prefix(&big)
+        );
+    }
+
+    #[test]
+    fn retry_predicate_only_strippable_reasoning_400s() {
+        // P1-5: retry only when stripping reasoning can fix the failure.
+        assert!(should_retry_without_reasoning(
+            "400: unexpected reasoning_content with tools",
+            true
+        ));
+        assert!(should_retry_without_reasoning(
+            "Bad Request: tool_calls invalid with reasoning replay",
+            true
+        ));
+        // No reasoning carried → retry would resend identical bytes.
+        assert!(!should_retry_without_reasoning(
+            "400: bad reasoning field",
+            false
+        ));
+        // Overflow owns its recovery path; auth/quota/rate/network never retry.
+        assert!(!should_retry_without_reasoning(
+            "400: prompt exceeds the context window (reasoning?)",
+            true
+        ));
+        assert!(!should_retry_without_reasoning(
+            "401 Unauthorized: bad api key",
+            true
+        ));
+        assert!(!should_retry_without_reasoning(
+            "429 rate limited, reasoning quota exceeded",
+            true
+        ));
+        // Non-shape errors pass through untouched.
+        assert!(!should_retry_without_reasoning("500 internal error", true));
+        assert!(!should_retry_without_reasoning("connection reset", true));
+    }
+
+    #[test]
+    fn message_reasoning_joins_parts() {
+        use deepseekcode_schema::message::{Message, MessagePart};
+        let msg = Message {
+            id: deepseekcode_types::MessageId::new(),
+            session_id: deepseekcode_types::SessionId::new(),
+            role: deepseekcode_schema::message::MessageRole::Assistant,
+            parts: vec![MessagePart {
+                kind: PartKind::Reasoning,
+                text: Some("think".into()),
+                tool_name: None,
+                tool_input: None,
+                tool_output: None,
+                tool_call_id: None,
+            }],
+            seq: 0,
+            created_at: chrono::Utc::now(),
+        };
+        assert_eq!(message_reasoning(&msg).as_deref(), Some("think"));
+    }
+
+    #[test]
     fn repairs_missing_tool_results_after_interrupt() {
         let mut messages = vec![
             LlmMessage {
@@ -217,6 +482,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 name: None,
+                reasoning_content: None,
             },
             LlmMessage {
                 role: LlmRole::Assistant,
@@ -228,6 +494,7 @@ mod tests {
                 }],
                 tool_call_id: None,
                 name: None,
+                reasoning_content: None,
             },
         ];
 
