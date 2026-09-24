@@ -268,6 +268,7 @@ impl ActivityProjector {
                         status: ActivityStatus::Running,
                         detail_ref: None,
                         text: None,
+                        started_at: Some(event.created_at),
                     };
                     if let Some(t) = turn.as_mut() {
                         t.children.push(ActivityNode::Leaf(leaf));
@@ -334,6 +335,7 @@ impl ActivityProjector {
                                     status: ActivityStatus::Completed,
                                     detail_ref: Some(format!("reasoning-{}", event.seq)),
                                     text: Some(t.reasoning_text.clone()),
+                                    started_at: None,
                                 })],
                                 collapsed_default: true,
                             }));
@@ -420,6 +422,7 @@ impl TurnBuilder {
                 status: ActivityStatus::Completed,
                 detail_ref: None,
                 text: Some(self.reasoning_text),
+                started_at: None,
             }));
         }
         if !self.assistant_text.is_empty() {
@@ -563,6 +566,7 @@ fn user_leaf(id: &str, text: &str) -> ActivityLeaf {
         status: ActivityStatus::Completed,
         detail_ref: None,
         text: Some(text.to_string()),
+        started_at: None,
     }
 }
 
@@ -576,6 +580,7 @@ fn assistant_leaf(id: &str, text: &str, status: ActivityStatus) -> ActivityLeaf 
         status,
         detail_ref: None,
         text: Some(text.to_string()),
+        started_at: None,
     }
 }
 
@@ -664,6 +669,7 @@ fn session_meta_group(event: &EventEnvelope) -> ActivityGroup {
             status: ActivityStatus::Completed,
             detail_ref: None,
             text: None,
+            started_at: None,
         })],
         collapsed_default: true,
     }
@@ -722,6 +728,7 @@ fn permission_leaf(event: &EventEnvelope) -> ActivityLeaf {
         status: ActivityStatus::Completed,
         detail_ref: policy_id,
         text: None,
+        started_at: None,
     }
 }
 
@@ -766,6 +773,7 @@ fn todo_leaf_from_event(event: &EventEnvelope) -> ActivityLeaf {
         status: ActivityStatus::Completed,
         detail_ref: Some(format!("todo-{}", event.seq)),
         text: None,
+        started_at: None,
     }
 }
 
@@ -855,6 +863,7 @@ fn running_leaf(id: &str, pending: &PendingTool) -> ActivityLeaf {
         status: ActivityStatus::Running,
         detail_ref: Some(id.to_string()),
         text: pending.title.clone(),
+        started_at: None,
     }
 }
 
@@ -906,6 +915,7 @@ fn completed_leaf_from_event(event: &EventEnvelope, pending: Option<PendingTool>
             .get("title")
             .and_then(|v| v.as_str())
             .map(String::from),
+        started_at: None,
     }
 }
 
@@ -942,6 +952,45 @@ fn parse_diff_stats(value: &Value) -> Option<DiffStats> {
             removed: s.get("removed")?.as_u64()? as u32,
         })
     })
+}
+
+/// Stale timeout for unclosed Running leaves (no close event).
+/// Desktop calls this during flatten with wall-clock now; leaves older than
+/// `timeout_secs` flip Running → Stale (terminal for busy indicators).
+/// Purely presentational: backend events are never mutated.
+pub const STALE_RUNNING_TIMEOUT_SECS: i64 = 600;
+
+pub fn mark_stale_running(tree: &mut ActivityTree, now: DateTime<Utc>, timeout_secs: i64) {
+    fn walk(nodes: &mut [ActivityNode], now: DateTime<Utc>, timeout_secs: i64) {
+        for node in nodes.iter_mut() {
+            match node {
+                ActivityNode::Group(g) => walk(&mut g.children, now, timeout_secs),
+                ActivityNode::Leaf(l) => {
+                    if l.status != ActivityStatus::Running {
+                        continue;
+                    }
+                    if let Some(started) = l.started_at {
+                        if (now - started).num_seconds() >= timeout_secs
+                            && (now - started).num_seconds() >= 0
+                        {
+                            l.status = ActivityStatus::Stale;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    walk(&mut tree.roots, now, timeout_secs);
+}
+
+pub fn is_terminal_status(status: ActivityStatus) -> bool {
+    matches!(
+        status,
+        ActivityStatus::Completed
+            | ActivityStatus::Failed
+            | ActivityStatus::Cancelled
+            | ActivityStatus::Stale
+    )
 }
 
 fn map_tool(

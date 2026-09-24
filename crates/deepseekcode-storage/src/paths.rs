@@ -11,32 +11,52 @@ pub fn normalize_directory_path(path: &str) -> String {
     strip_verbatim_prefix(canonical)
 }
 
-/// Compare two directory paths after canonicalization (case-insensitive on Windows).
+/// Compare two directory paths after canonicalization.
+/// Case-insensitive ONLY on Windows; Linux/macOS stay case-sensitive so
+/// `/Tmp/A` and `/tmp/a` do not collide.
 pub fn directory_paths_equal(a: &str, b: &str) -> bool {
     if a.trim().is_empty() && b.trim().is_empty() {
         return true;
     }
-    normalize_directory_path(a).eq_ignore_ascii_case(&normalize_directory_path(b))
+    let na = normalize_directory_path(a);
+    let nb = normalize_directory_path(b);
+    #[cfg(windows)]
+    {
+        na.eq_ignore_ascii_case(&nb)
+    }
+    #[cfg(not(windows))]
+    {
+        na == nb
+    }
 }
 
 /// Normalized key for SQL lookups of `working_directory`.
+/// Lowercases ONLY on Windows; preserves case on Unix. Also strips
+/// `\\?\` / `\\.\` verbatim prefixes and trailing slashes uniformly so
+/// Rust and SQL (`lower(rtrim(replace(...)))`) agree.
 pub fn normalize_directory_path_for_lookup(path: &str) -> String {
-    normalize_directory_path(path)
+    let normalized = normalize_directory_path(path)
         .replace('\\', "/")
         .trim_end_matches('/')
-        .to_lowercase()
+        .to_string();
+    #[cfg(windows)]
+    {
+        normalized.to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        normalized
+    }
 }
 
 fn strip_verbatim_prefix(path: std::path::PathBuf) -> String {
     let s = path.display().to_string();
-    #[cfg(windows)]
-    {
-        s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+    for prefix in [r"\\?\", r"\\.\"] {
+        if let Some(stripped) = s.strip_prefix(prefix) {
+            return stripped.to_string();
+        }
     }
-    #[cfg(not(windows))]
-    {
-        s
-    }
+    s
 }
 
 #[cfg(test)]

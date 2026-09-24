@@ -495,17 +495,27 @@ async fn run_fixture(path: &PathBuf) -> Result<(), String> {
                 hooks,
                 deepseekcode_core::tools::services::noop_task_spawner(),
             );
-            for _ in 0..2 {
-                let promoted = runner
-                    .test_promote_at_safe_boundary()
-                    .await
-                    .map_err(|e| e.to_string())?;
-                if !promoted {
-                    return Err(format!(
-                        "{}: expected queue promotion at safe boundary",
-                        fixture.name
-                    ));
-                }
+            // Idle safe boundary promotes ALL pending in admission order
+            // (single call drains both). Second call must be no-op.
+            let first = runner
+                .test_promote_at_safe_boundary()
+                .await
+                .map_err(|e| e.to_string())?;
+            if !first {
+                return Err(format!(
+                    "{}: expected queue promotion at safe boundary",
+                    fixture.name
+                ));
+            }
+            let second = runner
+                .test_promote_at_safe_boundary()
+                .await
+                .map_err(|e| e.to_string())?;
+            if second {
+                return Err(format!(
+                    "{}: second promotion should be no-op after full drain",
+                    fixture.name
+                ));
             }
         }
         "sessions.revert_stage" => {
@@ -760,8 +770,11 @@ async fn run_fixture(path: &PathBuf) -> Result<(), String> {
         other => return Err(format!("{}: unknown action {other}", fixture.name)),
     }
 
-    if fixture.given.session_exists && fixture.then.inbox_count > 0
-        || fixture.when.action.starts_with("sessions.prompt")
+    // P0-7: parenthesized (`&&` binds tighter than `||`); previously
+    // `session_exists=false` prompt fixtures entered the branch while
+    // `session_exists=true,inbox=0` cases were skipped.
+    if (fixture.given.session_exists && fixture.then.inbox_count > 0)
+        || (fixture.when.action.starts_with("sessions.prompt") && fixture.given.session_exists)
     {
         let pending = sessions
             .pending_inputs(session_id)

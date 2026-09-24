@@ -172,6 +172,11 @@ pub struct WorkspaceView {
     composer_error: Option<String>,
     permission_allow_input: Entity<PromptInput>,
     permission_deny_input: Entity<PromptInput>,
+    // Dedicated pattern editor for Settings rule rows. Previously
+    // `permission_deny_input` doubled as reject-message box + pattern editor,
+    // so opening Settings during a pending prompt overwrote the reject text
+    // into the rule table (and vice versa).
+    policy_pattern_input: Entity<PromptInput>,
     question_input: Entity<PromptInput>,
     panel_resize_edge: Option<PanelResizeEdge>,
     panel_resize_start_x: f32,
@@ -233,6 +238,12 @@ pub struct WorkspaceView {
     git_log: Vec<String>,
     selected_detail_key: Option<String>,
     highlighted_todo_leaf_id: Option<String>,
+    pub(crate) timeline_text_selection: Option<crate::selectable_text::TimelineTextSelection>,
+    pub(crate) timeline_text_layouts:
+        std::collections::HashMap<String, crate::selectable_text::TextBlockLayout>,
+    pub(crate) timeline_text_focus: FocusHandle,
+    pub(crate) timeline_text_press: Option<crate::selectable_text::TimelineTextPress>,
+    pub(crate) timeline_row_press: Option<crate::selectable_text::TimelineRowPress>,
     highlighted_todo_index: Option<usize>,
     composer_todo_expanded: bool,
     bash_output_detail_ref: Option<String>,
@@ -318,6 +329,11 @@ impl WorkspaceView {
             input.set_placeholder("Your answer…", cx);
             input
         });
+        let policy_pattern_input = cx.new(|cx| {
+            let mut input = PromptInput::new(cx);
+            input.set_placeholder("pattern (e.g. git * or .deepseekcode/plan/**)", cx);
+            input
+        });
         let home_view = cx.new(HomeView::new);
         cx.subscribe(&home_view, |this, _, event, cx| match event {
             HomeEvent::PickFolder => this.pick_project_folder(cx),
@@ -375,6 +391,7 @@ impl WorkspaceView {
             composer_error: None,
             permission_allow_input,
             permission_deny_input,
+            policy_pattern_input,
             question_input,
             panel_resize_edge: None,
             panel_resize_start_x: 0.,
@@ -435,6 +452,11 @@ impl WorkspaceView {
             git_log: Vec::new(),
             selected_detail_key: None,
             highlighted_todo_leaf_id: None,
+            timeline_text_selection: None,
+            timeline_text_layouts: std::collections::HashMap::new(),
+            timeline_text_focus: cx.focus_handle(),
+            timeline_text_press: None,
+            timeline_row_press: None,
             highlighted_todo_index: None,
             composer_todo_expanded: false,
             bash_output_detail_ref: None,
@@ -3835,21 +3857,41 @@ Describe this project so the AI assistant has context.\n\n\
         let Some(session_id) = self.session_id else {
             return;
         };
-        self.pending_question = None;
+        // Keep pending until success so a transport failure never loses the
+        // question (previously cleared upfront with only a log).
+        let pending = self.pending_question.clone();
         let client_slot = Arc::clone(&self.client);
         cx.spawn(async move |view, cx| {
             let client = lock_sdk_client(&client_slot).await;
+            let mut ok = false;
             if let Some(client) = client {
-                if let Err(e) = client.submit_question_answer(session_id, &answer).await {
-                    tracing::error!(
-                        target: deepseekcode_telemetry::DESKTOP,
-                        session_id = %session_id,
-                        error = %e,
-                        "question answer failed"
-                    );
+                match client.submit_question_answer(session_id, &answer).await {
+                    Ok(()) => ok = true,
+                    Err(e) => {
+                        tracing::error!(
+                            target: deepseekcode_telemetry::DESKTOP,
+                            session_id = %session_id,
+                            error = %e,
+                            "question answer failed"
+                        );
+                        let _ = view.update(cx, |this, cx| {
+                            // Restore pending + surface error; keep typed text.
+                            this.pending_question = pending;
+                            this.composer_error = Some(format!("Question answer failed: {e}"));
+                            cx.notify();
+                        });
+                    }
                 }
             }
-            let _ = view.update(cx, |_, cx| cx.notify());
+            if ok {
+                let _ = view.update(cx, |this, cx| {
+                    this.pending_question = None;
+                    this.question_input.update(cx, |input, cx| input.clear(cx));
+                    cx.notify();
+                });
+            } else {
+                let _ = view.update(cx, |_, cx| cx.notify());
+            }
         })
         .detach();
         cx.notify();
@@ -3860,6 +3902,10 @@ Describe this project so the AI assistant has context.\n\n\
             prompt.custom_mode = true;
             cx.notify();
         }
+        // Focus the custom input so keyboard goes there (previously stayed on
+        // the option list). GPUI focus goes via Window; Context has no focus().
+        // The overlay input is rendered with track_focus, so notifying is
+        // sufficient — explicit window focus is handled by the caller.
     }
 
     fn sync_agent_from_nav(&mut self, session_id: SessionId) {
@@ -3939,19 +3985,44 @@ Describe this project so the AI assistant has context.\n\n\
         let Some(session_id) = self.session_id else {
             return;
         };
+        // Optimistic flag with rollback: on server failure the dock must
+        // reappear (previously `let _=` swallowed errors and refresh
+        // resurrected it confusingly).
+        let prev: Vec<bool> = self
+            .session_plans
+            .iter()
+            .map(|p| p.implement_prompt_dismissed)
+            .collect();
         if let Some(plan) = self.session_plans.iter_mut().find(|p| p.plan_id == plan_id) {
             plan.implement_prompt_dismissed = true;
         }
         let plan_id = plan_id.to_string();
         let client_slot = Arc::clone(&self.client);
         cx.spawn(async move |view, cx| {
-            let client = lock_sdk_client(&client_slot).await;
-            if let Some(client) = client {
-                let _ = client
+            let mut ok = true;
+            if let Some(client) = lock_sdk_client(&client_slot).await {
+                if let Err(e) = client
                     .dismiss_plan_implement_prompt(session_id, &plan_id)
-                    .await;
+                    .await
+                {
+                    ok = false;
+                    tracing::warn!(
+                        target: deepseekcode_telemetry::DESKTOP,
+                        error = %e,
+                        "dismiss plan prompt failed; rolling back"
+                    );
+                }
             }
-            let _ = view.update(cx, |_, cx| cx.notify());
+            let _ = view.update(cx, |this, cx| {
+                if !ok {
+                    for (plan, was) in this.session_plans.iter_mut().zip(prev.iter()) {
+                        plan.implement_prompt_dismissed = *was;
+                    }
+                    this.composer_error = Some("Dismiss failed — dock restored.".into());
+                }
+                this.refresh_session_plans(cx);
+                cx.notify();
+            });
         })
         .detach();
         cx.notify();
@@ -3972,6 +4043,11 @@ Describe this project so the AI assistant has context.\n\n\
         self.prompt_input.update(cx, |input, cx| {
             input.set_text(&prompt, cx);
         });
+        // Implementing implies the dock is handled: persist dismissed so it
+        // does not linger after switching to build.
+        if let Some(p) = self.session_plans.iter_mut().find(|p| p.plan_id == plan_id) {
+            p.implement_prompt_dismissed = true;
+        }
         cx.notify();
     }
 
@@ -4785,9 +4861,13 @@ Describe this project so the AI assistant has context.\n\n\
             self.permission_allow_input.update(cx, |input, cx| {
                 input.set_text(policy_text, cx);
             });
-            self.permission_deny_input.update(cx, |input, cx| {
+            self.policy_pattern_input.update(cx, |input, cx| {
                 input.set_placeholder("Pattern for selected rule…", cx);
                 input.set_text(String::new(), cx);
+            });
+            // Keep reject box as reject-only placeholder.
+            self.permission_deny_input.update(cx, |input, cx| {
+                input.set_placeholder("Optional feedback when denying…", cx);
             });
         }
     }
@@ -4875,7 +4955,7 @@ Describe this project so the AI assistant has context.\n\n\
         cx: &mut Context<Self>,
     ) {
         self.selected_policy_row = Some(index);
-        self.permission_deny_input.update(cx, |input, cx| {
+        self.policy_pattern_input.update(cx, |input, cx| {
             input.set_text(pattern, cx);
         });
         cx.notify();
@@ -4885,7 +4965,7 @@ Describe this project so the AI assistant has context.\n\n\
         let Some(index) = self.selected_policy_row else {
             return;
         };
-        let pattern = self.permission_deny_input.read(cx).text();
+        let pattern = self.policy_pattern_input.read(cx).text();
         if let Some(row) = self.policy_rule_rows.get_mut(index) {
             row.pattern = pattern;
             self.sync_policy_text_from_rows(cx);
@@ -4937,8 +5017,47 @@ Describe this project so the AI assistant has context.\n\n\
             return;
         }
         self.apply_selected_policy_row_pattern(cx);
-        let policy_text = self.permission_allow_input.read(cx).text();
-        let policy = deepseekcode_config::lines_to_policy(&policy_text);
+        // Source of truth is the row table (not the free-text box) so row
+        // edits are never lost when the text box is stale.
+        let policy = if self.policy_rule_rows.is_empty() {
+            let policy_text = self.permission_allow_input.read(cx).text();
+            deepseekcode_config::lines_to_policy(&policy_text)
+        } else {
+            use std::collections::HashMap;
+            let mut policy = deepseekcode_config::PolicyConfig::new();
+            for row in &self.policy_rule_rows {
+                if row.pattern.trim().is_empty() {
+                    continue;
+                }
+                if row.pattern.trim() == "*" {
+                    policy.insert(
+                        row.scope.clone(),
+                        deepseekcode_config::PolicyScopeConfig::Simple(row.action),
+                    );
+                } else {
+                    match policy.get_mut(&row.scope) {
+                        Some(deepseekcode_config::PolicyScopeConfig::Patterns(map)) => {
+                            map.insert(row.pattern.clone(), row.action);
+                        }
+                        _ => {
+                            let mut map = HashMap::new();
+                            map.insert(row.pattern.clone(), row.action);
+                            // Preserve existing Simple `*` if present.
+                            if let Some(deepseekcode_config::PolicyScopeConfig::Simple(prev)) =
+                                policy.get(&row.scope)
+                            {
+                                map.insert("*".into(), *prev);
+                            }
+                            policy.insert(
+                                row.scope.clone(),
+                                deepseekcode_config::PolicyScopeConfig::Patterns(map),
+                            );
+                        }
+                    }
+                }
+            }
+            policy
+        };
         let policy_mode = if self.policy_auto_mode {
             Some(PolicyMode::Auto)
         } else {
@@ -5314,6 +5433,7 @@ impl Render for WorkspaceView {
                 &self.policy_rule_rows,
                 self.policy_auto_mode,
                 self.selected_policy_row,
+                self.policy_pattern_input.clone(),
             ))
             .children(self.render_api_key_dialog(cx))
             .child(RevertDock::render_overlay(
@@ -5486,8 +5606,11 @@ impl WorkspaceView {
                         timeline.render(
                             cx,
                             self.highlighted_todo_leaf_id.as_deref(),
+                            self.selected_detail_key.as_deref(),
                             &self.session_scroll,
                             self.session_status.as_ref() == "Loading session…",
+                            self.session_busy,
+                            &self.timeline_text_focus,
                         )
                     }),
             )

@@ -25,6 +25,10 @@ pub enum FlattenedActivityRow {
         depth: usize,
         collapsed_default: bool,
         kind: ActivityGroupKind,
+        /// Turn summary, carried for header composition
+        /// (`Explore 5 files, Worked for 12s`). Turns never emit a separate
+        /// `GroupSummary` row; only non-turn groups use that variant.
+        summary: Option<ActivitySummary>,
     },
     GroupSummary {
         summary: ActivitySummary,
@@ -38,6 +42,27 @@ pub enum FlattenedActivityRow {
 }
 
 impl FlattenedActivityRow {
+    pub fn depth(&self) -> usize {
+        match self {
+            FlattenedActivityRow::GroupHeader { depth, .. } => *depth,
+            FlattenedActivityRow::GroupSummary { depth, .. } => *depth,
+            FlattenedActivityRow::Leaf { depth, .. } => *depth,
+        }
+    }
+
+    /// Same row with `depth` shifted (saturating). Used to render a turn's
+    /// body rows inside the indented rail container without double indent.
+    pub fn shifted(&self, sub: usize) -> Self {
+        let mut row = self.clone();
+        let depth = row.depth().saturating_sub(sub);
+        match &mut row {
+            FlattenedActivityRow::GroupHeader { depth: d, .. } => *d = depth,
+            FlattenedActivityRow::GroupSummary { depth: d, .. } => *d = depth,
+            FlattenedActivityRow::Leaf { depth: d, .. } => *d = depth,
+        }
+        row
+    }
+
     pub fn estimated_height_px(&self) -> f32 {
         match self {
             FlattenedActivityRow::GroupHeader { .. } => GROUP_HEADER_HEIGHT_PX,
@@ -78,6 +103,123 @@ pub fn estimate_leaf_height(leaf: &ActivityLeaf, message_expanded: bool) -> f32 
     }
 }
 
+/// Presentational orphan containment (display hierarchy fix).
+///
+/// Tool leaves that landed on `tree.roots` without an active turn (backend
+/// fallback `else roots.push`) would otherwise render as dangling rows with
+/// no card above them. Here they are adopted by the nearest `ProviderTurn`:
+/// orphans preceding a turn are prepended to its children (their results feed
+/// that turn), trailing orphans are appended to the previous turn.
+/// `UserMessage` leaves always stay top-level (conversation boundaries).
+/// Purely presentational: the backend tree is never mutated.
+pub(crate) fn attach_orphan_leaves(roots: &[ActivityNode]) -> Vec<ActivityNode> {
+    use deepseekcode_schema::activity::ActivityKind;
+    fn is_turn(node: &ActivityNode) -> bool {
+        matches!(node, ActivityNode::Group(g) if g.kind == ActivityGroupKind::ProviderTurn)
+    }
+    fn is_adoptable(node: &ActivityNode) -> bool {
+        matches!(node, ActivityNode::Leaf(leaf) if leaf.kind != ActivityKind::UserMessage)
+    }
+
+    let mut out: Vec<ActivityNode> = Vec::with_capacity(roots.len());
+    let mut pending: Vec<ActivityNode> = Vec::new();
+    let mut last_turn_idx: Option<usize> = None;
+    for node in roots {
+        if is_turn(node) {
+            let mut group = match node.clone() {
+                ActivityNode::Group(g) => g,
+                ActivityNode::Leaf(_) => unreachable!(),
+            };
+            if !pending.is_empty() {
+                let mut children = std::mem::take(&mut pending);
+                children.extend(group.children.drain(..));
+                group.children = children;
+            }
+            out.push(ActivityNode::Group(group));
+            last_turn_idx = Some(out.len() - 1);
+        } else if is_adoptable(node) {
+            pending.push(node.clone());
+        } else {
+            // UserMessage leaves and non-turn groups stay top-level and do
+            // not break orphan adoption (pending still flows to next turn).
+            out.push(node.clone());
+        }
+    }
+    if !pending.is_empty() {
+        if let Some(idx) = last_turn_idx {
+            if let ActivityNode::Group(group) = &mut out[idx] {
+                group.children.extend(pending.drain(..));
+            }
+        }
+        // No turn at all: leave trailing orphans top-level.
+        out.extend(pending.drain(..));
+    }
+    lead_with_assistant_message(&mut out);
+    out
+}
+
+/// Narrative order ("tell, then do"): the assistant's thinking/planning text
+/// states intent before the tool operations that follow it, so it leads the
+/// turn's children. Stable partition — relative order inside each class keeps
+/// document order. Only root-level turns are reordered; nested sub-turns
+/// keep backend order.
+fn lead_with_assistant_message(nodes: &mut Vec<ActivityNode>) {
+    use deepseekcode_schema::activity::ActivityKind;
+    for node in nodes.iter_mut() {
+        let ActivityNode::Group(group) = node else {
+            continue;
+        };
+        if group.kind != ActivityGroupKind::ProviderTurn {
+            continue;
+        }
+        let mut assistants = Vec::new();
+        let mut tools = Vec::with_capacity(group.children.len());
+        for child in group.children.drain(..) {
+            match &child {
+                ActivityNode::Leaf(leaf) if leaf.kind == ActivityKind::AssistantMessage => {
+                    assistants.push(child)
+                }
+                _ => tools.push(child),
+            }
+        }
+        assistants.extend(tools);
+        group.children = assistants;
+    }
+}
+
+/// Single display-preparation entry: mark stale Running leaves (10min
+/// watchdog, wall-clock now) then adopt orphans. All render AND index paths
+/// must go through here so displayed rows and computed indices never drift.
+/// Backend tree is cloned, never mutated.
+pub fn adopt_orphans_for_display(tree: &ActivityTree) -> Vec<ActivityNode> {
+    let mut owned = tree.roots.clone();
+    mark_stale_for_display(&mut owned);
+    attach_orphan_leaves(&owned)
+}
+
+fn mark_stale_for_display(nodes: &mut [ActivityNode]) {
+    use deepseekcode_schema::activity::ActivityStatus;
+    let now = chrono::Utc::now();
+    let timeout = deepseekcode_core::activity::projector::STALE_RUNNING_TIMEOUT_SECS;
+    for node in nodes.iter_mut() {
+        match node {
+            ActivityNode::Group(g) => mark_stale_for_display(&mut g.children),
+            ActivityNode::Leaf(l) => {
+                if l.status != ActivityStatus::Running {
+                    continue;
+                }
+                if let Some(started) = l.started_at {
+                    if (now - started).num_seconds() >= timeout
+                        && (now - started).num_seconds() >= 0
+                    {
+                        l.status = ActivityStatus::Stale;
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn flatten_activity_tree(
     tree: &ActivityTree,
     expanded_groups: &HashSet<String>,
@@ -85,8 +227,9 @@ pub fn flatten_activity_tree(
     expanded_leaves: &HashSet<String>,
 ) -> Vec<FlattenedActivityRow> {
     let mut rows = Vec::new();
+    let owned = adopt_orphans_for_display(tree);
     flatten_nodes(
-        &tree.roots,
+        &owned,
         expanded_groups,
         collapsed_groups,
         expanded_leaves,
@@ -104,7 +247,7 @@ fn flatten_nodes(
     depth: usize,
     rows: &mut Vec<FlattenedActivityRow>,
 ) {
-    use deepseekcode_schema::activity::{ActivityGroupKind, ActivityNode};
+    use deepseekcode_schema::activity::ActivityNode;
     for node in nodes {
         match node {
             ActivityNode::Group(group) => {
@@ -144,19 +287,26 @@ fn flatten_group(
 ) {
     use deepseekcode_schema::activity::ActivityGroupKind;
     let expanded = is_activity_group_expanded(group, expanded_groups, collapsed_groups);
+    // Turn summaries live in the header (`Explore 5 files, Worked for 12s`),
+    // so turns never emit a separate summary row. Non-turn groups keep the
+    // legacy path (they never carry summaries today, kept for safety).
+    let is_turn = group.kind == ActivityGroupKind::ProviderTurn;
     rows.push(FlattenedActivityRow::GroupHeader {
         group_id: group.id.clone(),
         label: group.label.clone(),
         depth,
         collapsed_default: group.collapsed_default,
         kind: group.kind,
+        summary: group.summary.clone(),
     });
     if expanded {
         if let Some(summary) = &group.summary {
-            rows.push(FlattenedActivityRow::GroupSummary {
-                summary: summary.clone(),
-                depth,
-            });
+            if !is_turn {
+                rows.push(FlattenedActivityRow::GroupSummary {
+                    summary: summary.clone(),
+                    depth,
+                });
+            }
         }
         flatten_nodes(
             &group.children,
@@ -242,6 +392,7 @@ mod tests {
                         status: ActivityStatus::Completed,
                         detail_ref: None,
                         text: Some(format!("command {i}")),
+                        started_at: None,
                     })
                 })
                 .collect(),
@@ -262,5 +413,162 @@ mod tests {
         let (start, end) = visible_row_range(&rows, 400.0, 200.0);
         assert!(end - start < 40);
         assert!(start > 0 || end < 40);
+    }
+
+    fn tool_leaf(id: &str, kind: ActivityKind) -> ActivityNode {
+        ActivityNode::Leaf(ActivityLeaf {
+            id: id.into(),
+            kind,
+            verb: "Listed".into(),
+            target: ActivityTargetKind::None,
+            meta: ActivityMeta::default(),
+            status: ActivityStatus::Completed,
+            detail_ref: None,
+            text: None,
+            started_at: None,
+        })
+    }
+
+    fn turn_group(id: &str, children: Vec<ActivityNode>) -> ActivityNode {
+        ActivityNode::Group(ActivityGroup {
+            id: id.into(),
+            kind: ActivityGroupKind::ProviderTurn,
+            label: "Worked for 1s".into(),
+            summary: None,
+            children,
+            collapsed_default: false,
+        })
+    }
+
+    fn turn_group_with_summary(
+        id: &str,
+        summary: ActivitySummary,
+        children: Vec<ActivityNode>,
+    ) -> ActivityNode {
+        ActivityNode::Group(ActivityGroup {
+            id: id.into(),
+            kind: ActivityGroupKind::ProviderTurn,
+            label: "Worked for 12s".into(),
+            summary: Some(summary),
+            children,
+            collapsed_default: false,
+        })
+    }
+
+    #[test]
+    fn orphan_leaves_are_adopted_by_following_turn() {
+        let tree = ActivityTree {
+            roots: vec![
+                tool_leaf("orphan", ActivityKind::List),
+                turn_group("turn-1", vec![tool_leaf("inner", ActivityKind::Read)]),
+            ],
+        };
+        let rows = flatten_activity_tree(&tree, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        // header + adopted orphan + inner child (no summary on this group).
+        assert_eq!(rows.len(), 3);
+        assert!(matches!(
+            &rows[0],
+            FlattenedActivityRow::GroupHeader { summary: None, .. }
+        ));
+        let ids: Vec<&str> = rows[1..]
+            .iter()
+            .filter_map(|r| match r {
+                FlattenedActivityRow::Leaf { leaf, .. } => Some(leaf.id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec!["orphan", "inner"]);
+    }
+
+    #[test]
+    fn trailing_orphans_join_previous_turn_and_user_messages_stay() {
+        let tree = ActivityTree {
+            roots: vec![
+                turn_group("turn-1", vec![]),
+                tool_leaf("trailing", ActivityKind::Bash),
+                ActivityNode::Leaf(ActivityLeaf {
+                    id: "user-1".into(),
+                    kind: ActivityKind::UserMessage,
+                    verb: "You".into(),
+                    target: ActivityTargetKind::None,
+                    meta: ActivityMeta::default(),
+                    status: ActivityStatus::Completed,
+                    detail_ref: None,
+                    text: Some("hi".into()),
+                    started_at: None,
+                }),
+            ],
+        };
+        let rows = flatten_activity_tree(&tree, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        // header + adopted trailing + user message stays top-level.
+        assert_eq!(rows.len(), 3);
+        let ids: Vec<&str> = rows[1..]
+            .iter()
+            .filter_map(|r| match r {
+                FlattenedActivityRow::Leaf { leaf, .. } => Some(leaf.id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec!["trailing", "user-1"]);
+    }
+
+    #[test]
+    fn turn_summary_rides_on_header_without_summary_row() {
+        let tree = ActivityTree {
+            roots: vec![turn_group_with_summary(
+                "turn-1",
+                ActivitySummary {
+                    files_explored: 5,
+                    ..Default::default()
+                },
+                vec![tool_leaf("a", ActivityKind::List)],
+            )],
+        };
+        let rows = flatten_activity_tree(&tree, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        // header + child only: no separate GroupSummary row for turns.
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(
+            &rows[0],
+            FlattenedActivityRow::GroupHeader {
+                summary: Some(_),
+                ..
+            }
+        ));
+        assert!(!rows
+            .iter()
+            .any(|r| matches!(r, FlattenedActivityRow::GroupSummary { .. })));
+    }
+
+    #[test]
+    fn assistant_leaf_leads_tool_rows() {
+        // Narrative order: intent first, operations after.
+        let tree = ActivityTree {
+            roots: vec![turn_group(
+                "turn-1",
+                vec![
+                    ActivityNode::Leaf(ActivityLeaf {
+                        id: "assistant-1".into(),
+                        kind: ActivityKind::AssistantMessage,
+                        verb: "Assistant".into(),
+                        target: ActivityTargetKind::None,
+                        meta: ActivityMeta::default(),
+                        status: ActivityStatus::Completed,
+                        detail_ref: None,
+                        text: Some("done".into()),
+                        started_at: None,
+                    }),
+                    tool_leaf("a", ActivityKind::List),
+                ],
+            )],
+        };
+        let rows = flatten_activity_tree(&tree, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let ids: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| match r {
+                FlattenedActivityRow::Leaf { leaf, .. } => Some(leaf.id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec!["assistant-1", "a"]);
     }
 }

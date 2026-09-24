@@ -13,8 +13,11 @@ impl PermissionStore {
     }
 
     pub async fn load_all(&self) -> Result<HashMap<String, PermissionStatus>> {
+        // Legacy global read (session_id IS NULL, any project). New code must
+        // use PolicyStore (project-scoped); this remains for one release
+        // cycle compat only.
         let rows = sqlx::query_as::<_, RuleRow>(
-            r#"SELECT pattern, status FROM permissions WHERE status IN ('allowed', 'always', 'denied')"#,
+            r#"SELECT pattern, status, created_at FROM permissions WHERE status IN ('allowed', 'always', 'denied') AND session_id IS NULL ORDER BY created_at ASC"#,
         )
         .fetch_all(&self.pool)
         .await
@@ -32,10 +35,25 @@ impl PermissionStore {
         pattern: &str,
         status: PermissionStatus,
     ) -> Result<()> {
+        // Deduplicate (tool_name,pattern): random-id REPLACE never deduped and
+        // piled duplicates. Delete-then-insert keeps one live row.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        sqlx::query(
+            r#"DELETE FROM permissions WHERE tool_name = ? AND pattern = ? AND session_id IS NULL"#,
+        )
+        .bind(tool_name)
+        .bind(pattern)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
         let id = ulid::Ulid::new().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
-            r#"INSERT OR REPLACE INTO permissions (id, session_id, tool_name, pattern, status, created_at)
+            r#"INSERT INTO permissions (id, session_id, tool_name, pattern, status, created_at)
                VALUES (?, NULL, ?, ?, ?, ?)"#,
         )
         .bind(id)
@@ -43,9 +61,12 @@ impl PermissionStore {
         .bind(pattern)
         .bind(format_status(status))
         .bind(now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
         Ok(())
     }
 }
@@ -54,6 +75,8 @@ impl PermissionStore {
 struct RuleRow {
     pattern: String,
     status: String,
+    #[allow(dead_code)]
+    created_at: String,
 }
 
 fn format_status(status: PermissionStatus) -> &'static str {

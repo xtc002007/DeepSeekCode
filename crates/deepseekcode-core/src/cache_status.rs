@@ -393,12 +393,14 @@ mod tests {
         // (hit*CacheHit + (miss-write+billedWrite)*Input + completion*Output)
         // / 1e6 with billedWrite = write at the input price. 1M-scale numbers
         // keep the arithmetic exact.
-        let mut status = CacheStatus::default();
-        status.input_tokens = 1_000_000;
-        status.output_tokens = 1_000_000;
-        status.cache_hit = 800_000;
-        status.cache_miss = 200_000;
-        status.cache_write = 50_000;
+        let status = CacheStatus {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_hit: 800_000,
+            cache_miss: 200_000,
+            cache_write: 50_000,
+            ..CacheStatus::default()
+        };
         let card = RateCard {
             currency: "CNY".to_string(),
             cache_hit_per_1m: 0.10,

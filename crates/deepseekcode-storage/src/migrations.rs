@@ -29,10 +29,94 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
             .await
             .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
 
-    for migration in embedded::migrations::runner().get_migrations() {
+    // Version-order application (critical): `embed_migrations!` yields files
+    // in WalkDir filesystem order, NOT numeric version order (e.g. V10 before
+    // V1 on NTFS). Applying out of order made backfill migrations (V9-V11)
+    // run against missing tables; the old swallow-and-continue then recorded
+    // them as applied, leaving afflicted DBs without backfill effects.
+    let mut migrations = embedded::migrations::runner().get_migrations().clone();
+    migrations.sort_by_key(|m| m.version());
+    for migration in &migrations {
         apply_migration(pool, migration, &applied_versions).await?;
     }
 
+    // Heal databases afflicted by the historic misordering: re-apply V10/V11
+    // backfill effects idempotently (guarded by existence checks so fresh and
+    // healthy DBs are untouched).
+    repair_legacy_backfills(pool).await?;
+
+    Ok(())
+}
+
+/// Idempotent repair for DBs whose V10/V11 ran out of order (and were then
+/// recorded as applied with effects skipped). Every statement is guarded and
+/// safe to re-run on healthy databases.
+async fn repair_legacy_backfills(pool: &SqlitePool) -> Result<()> {
+    // V11: ensure `admitted_seq` column exists (V11 may have been skipped).
+    let has_seq: bool = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*) FROM pragma_table_info('session_input') WHERE name = 'admitted_seq'"#,
+    )
+    .fetch_one(pool)
+    .await
+    .map(|c: i64| c > 0)
+    .unwrap_or(false);
+    // Only touch session_input when the table itself exists.
+    let has_input: bool = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_input'"#,
+    )
+    .fetch_one(pool)
+    .await
+    .map(|c: i64| c > 0)
+    .unwrap_or(false);
+    if has_input && !has_seq {
+        sqlx::query(
+            r#"ALTER TABLE session_input ADD COLUMN admitted_seq INTEGER NOT NULL DEFAULT 0"#,
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+    }
+    if has_input && has_seq {
+        // Efficient backfill via window function (V11's correlated COUNT is
+        // O(n^2)); only rows still at 0 are touched.
+        let _ = sqlx::query(
+            r#"UPDATE session_input SET admitted_seq = ranked.rn FROM (
+                    SELECT rowid AS rid, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY rowid) AS rn
+                    FROM session_input WHERE admitted_seq = 0
+                ) AS ranked WHERE session_input.rowid = ranked.rid"#,
+        )
+        .execute(pool)
+        .await;
+    }
+    // V10: normalize legacy messages.seq = 0 (idempotent: only seq=0 rows).
+    let has_messages: bool = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'messages'"#,
+    )
+    .fetch_one(pool)
+    .await
+    .map(|c: i64| c > 0)
+    .unwrap_or(false);
+    if has_messages {
+        let _ = sqlx::query(r#"UPDATE messages SET seq = seq + 1 WHERE seq = 0"#)
+            .execute(pool)
+            .await;
+    }
+    // V10: recompute sessions.next_message_seq where the column exists.
+    let has_next_seq: bool = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'next_message_seq'"#,
+    )
+    .fetch_one(pool)
+    .await
+    .map(|c: i64| c > 0)
+    .unwrap_or(false);
+    if has_next_seq && has_messages {
+        let _ = sqlx::query(
+            r#"UPDATE sessions SET next_message_seq = COALESCE(
+                    (SELECT MAX(seq) + 1 FROM messages WHERE messages.session_id = sessions.id), 1)"#,
+        )
+        .execute(pool)
+        .await;
+    }
     Ok(())
 }
 
@@ -46,11 +130,142 @@ fn stable_migration_checksum(sql: &str) -> String {
     format!("sha256:{digest:x}")
 }
 
+/// Split migration SQL into executable statements, aware of quotes,
+/// line/block comments, backticks, and trigger bodies (`BEGIN..END`).
+fn split_statements(sql: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_backtick = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut begin_depth: i32 = 0;
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        let next = bytes.get(i + 1).map(|b| *b as char);
+        // Comment handling (outside quotes).
+        if !in_single && !in_double && !in_backtick {
+            if !in_block_comment && c == '-' && next == Some('-') {
+                in_line_comment = true;
+                current.push(c);
+                i += 1;
+                continue;
+            }
+            if !in_line_comment && c == '/' && next == Some('*') {
+                in_block_comment = true;
+                current.push_str("/*");
+                i += 2;
+                continue;
+            }
+            if in_block_comment && c == '*' && next == Some('/') {
+                in_block_comment = false;
+                current.push_str("*/");
+                i += 2;
+                continue;
+            }
+            if in_line_comment && c == '\n' {
+                in_line_comment = false;
+            }
+            if in_line_comment || in_block_comment {
+                current.push(c);
+                i += 1;
+                continue;
+            }
+        }
+        if in_line_comment || in_block_comment {
+            current.push(c);
+            i += 1;
+            continue;
+        }
+        match c {
+            '\'' if !in_double && !in_backtick => {
+                // `''` is an escaped quote, not a toggle.
+                if in_single && next == Some('\'') {
+                    current.push_str("''");
+                    i += 2;
+                    continue;
+                }
+                in_single = !in_single;
+                current.push(c);
+                i += 1;
+            }
+            '"' if !in_single && !in_backtick => {
+                in_double = !in_double;
+                current.push(c);
+                i += 1;
+            }
+            '`' if !in_single && !in_double => {
+                in_backtick = !in_backtick;
+                current.push(c);
+                i += 1;
+            }
+            ';' if !in_single && !in_double && !in_backtick && begin_depth == 0 => {
+                current.push(c);
+                let stmt = current.trim().to_string();
+                if !stmt.trim_matches(';').trim().is_empty() {
+                    out.push(stmt);
+                }
+                current.clear();
+                i += 1;
+            }
+            _ => {
+                // Track BEGIN..END nesting for trigger bodies (case-insensitive,
+                // word-boundary aware) so inner `;` are not split.
+                if !in_single && !in_double && !in_backtick {
+                    let rest_upper = sql[i..].to_ascii_uppercase();
+                    let is_boundary = |len: usize| {
+                        sql[i + len..]
+                            .chars()
+                            .next()
+                            .map(|nc| !nc.is_ascii_alphanumeric() && nc != '_')
+                            .unwrap_or(true)
+                    };
+                    if rest_upper.starts_with("BEGIN") && is_boundary(5) {
+                        begin_depth += 1;
+                    } else if rest_upper.starts_with("END") && is_boundary(3) {
+                        begin_depth = (begin_depth - 1).max(0);
+                    }
+                }
+                current.push(c);
+                i += 1;
+            }
+        }
+    }
+    let tail = current.trim().to_string();
+    if !tail.trim_matches(';').trim().is_empty() && !is_comment_only(&tail) {
+        out.push(tail);
+    }
+    out.into_iter().filter(|s| !is_comment_only(s)).collect()
+}
+
+/// True when a chunk contains only `--` line comments, `/* */` blocks and
+/// whitespace (no executable SQL). Such chunks are skipped instead of being
+/// sent to SQLite.
+fn is_comment_only(sql: &str) -> bool {
+    let mut rest = sql.trim().trim_matches(';').trim();
+    while !rest.is_empty() {
+        if rest.starts_with("--") {
+            match rest.find('\n') {
+                Some(i) => rest = rest[i + 1..].trim(),
+                None => return true,
+            }
+        } else if rest.starts_with("/*") {
+            match rest.find("*/") {
+                Some(i) => rest = rest[i + 2..].trim(),
+                None => return true,
+            }
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
 fn split_trigger_statements(sql: &str) -> Vec<String> {
-    sql.split("CREATE TRIGGER")
-        .filter(|chunk| !chunk.trim().is_empty())
-        .map(|chunk| format!("CREATE TRIGGER{chunk}"))
-        .collect()
+    split_statements(sql)
 }
 
 async fn repair_checksum(pool: &SqlitePool, version: i32, checksum: &str) -> Result<()> {
@@ -193,6 +408,44 @@ async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> Result<b
     Ok(count > 0)
 }
 
+async fn index_exists(pool: &SqlitePool, index: &str) -> Result<bool> {
+    let exists: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ? LIMIT 1")
+            .bind(index)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+    Ok(exists.is_some())
+}
+
+fn extract_create_indexes(sql: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for stmt in split_statements(sql) {
+        let upper = stmt.trim().to_ascii_uppercase();
+        for prefix in [
+            "CREATE UNIQUE INDEX IF NOT EXISTS ",
+            "CREATE INDEX IF NOT EXISTS ",
+            "CREATE UNIQUE INDEX ",
+            "CREATE INDEX ",
+        ] {
+            if upper.starts_with(prefix) {
+                let rest = stmt.trim()[prefix.len()..].trim();
+                let name = rest
+                    .split(|c: char| c.is_whitespace() || c == '(')
+                    .next()
+                    .unwrap_or_default()
+                    .trim_matches(['"', '`', '[', ']'])
+                    .to_string();
+                if !name.is_empty() && !name.eq_ignore_ascii_case("ON") {
+                    out.push(name);
+                }
+                break;
+            }
+        }
+    }
+    out
+}
+
 async fn migration_effects_present(pool: &SqlitePool, sql: &str) -> Result<bool> {
     for table in extract_create_tables(sql) {
         if !table_exists(pool, &table).await? {
@@ -201,6 +454,13 @@ async fn migration_effects_present(pool: &SqlitePool, sql: &str) -> Result<bool>
     }
     for (table, column) in extract_add_columns(sql) {
         if !column_exists(pool, &table, &column).await? {
+            return Ok(false);
+        }
+    }
+    // Indexes / UNIQUE constraints must also exist, otherwise a drifted
+    // checksum would be repaired while V7-style constraints are missing.
+    for index in extract_create_indexes(sql) {
+        if !index_exists(pool, &index).await? {
             return Ok(false);
         }
     }
@@ -242,18 +502,18 @@ async fn apply_migration(
             }
         }
     } else {
-        for statement in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-            if let Err(e) = sqlx::query(statement).execute(&mut *tx).await {
-                let msg = e.to_string();
-                if statement.to_ascii_uppercase().contains("ADD COLUMN")
-                    && msg.contains("duplicate column name")
-                {
-                    continue;
-                }
+        for statement in split_statements(sql) {
+            if let Err(e) = sqlx::query(&statement).execute(&mut *tx).await {
+                // Fail-closed: no silent swallowing of `duplicate column` /
+                // `no such table`. Idempotent migrations must use
+                // `IF NOT EXISTS` in SQL; backfills must guard with
+                // `SELECT COUNT(*) FROM sqlite_master` checks. Surfacing the
+                // error prevents half-migrated databases from booting.
                 tx.rollback().await.ok();
                 return Err(DeepSeekCodeError::Storage(format!(
-                    "migration V{version} ({}) failed: {e}",
-                    migration.name()
+                    "migration V{version} ({}) failed: {e} [statement: {}]",
+                    migration.name(),
+                    statement.chars().take(200).collect::<String>()
                 )));
             }
         }

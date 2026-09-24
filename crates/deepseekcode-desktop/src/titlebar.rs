@@ -1,3 +1,5 @@
+use crate::ui::button::icon_button_shell;
+use crate::ui::icon::IconName;
 use gpui::*;
 use std::sync::{Arc, LazyLock};
 
@@ -82,27 +84,24 @@ impl TitlebarView {
                                     ),
                             )
                             .child(
-                                div()
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(theme.bg_elevated)
-                                    .border_1()
-                                    .border_color(theme.border_subtle)
-                                    .text_xs()
-                                    .text_color(theme.text_secondary)
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(theme.bg_hover))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.open_settings(
-                                                crate::settings::SettingsSection::General,
-                                                cx,
-                                            );
-                                        }),
-                                    )
-                                    .child("Settings"),
+                                icon_button_shell(
+                                    "titlebar-settings",
+                                    IconName::Settings,
+                                    &theme,
+                                    px(28.),
+                                    false,
+                                    false,
+                                    false,
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.open_settings(
+                                            crate::settings::SettingsSection::General,
+                                            cx,
+                                        );
+                                    }),
+                                ),
                             ),
                     )
                     .child(render_window_controls(window, &theme)),

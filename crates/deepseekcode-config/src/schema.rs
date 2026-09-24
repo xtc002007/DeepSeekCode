@@ -5,12 +5,18 @@ use crate::policy::PolicyConfig;
 
 /// How policy prompts are handled at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum PolicyMode {
     /// Prompt the user for `prompt` rules (default).
     #[default]
+    #[serde(
+        alias = "interactive",
+        alias = "normal",
+        alias = "Normal",
+        alias = "INTERACTIVE"
+    )]
     Interactive,
     /// YOLO: auto-permit non-`block` rules without UI.
+    #[serde(alias = "auto", alias = "yolo", alias = "YOLO", alias = "AUTO")]
     Auto,
 }
 
@@ -181,6 +187,10 @@ pub struct PermissionsConfig {
     pub allow: Vec<String>,
     #[serde(default)]
     pub deny: Vec<String>,
+    /// Legacy `ask` list (maps to `prompt`). Kept for `permissions.ask`
+    /// configs; `allow/ask/deny` all deserialize via PolicyAction::parse.
+    #[serde(default)]
+    pub ask: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -20,8 +20,8 @@ pub struct LocationServices {
     pub hooks: Arc<HookRegistry>,
     pub plugin_host: Arc<RwLock<PluginHost>>,
     pub active_session_ids:
-        Arc<std::sync::RwLock<std::collections::HashSet<deepseekcode_types::SessionId>>>,
-    wasm_tools: Arc<std::sync::Mutex<crate::tools::ToolRegistry>>,
+        Arc<tokio::sync::RwLock<std::collections::HashSet<deepseekcode_types::SessionId>>>,
+    wasm_tools: Arc<tokio::sync::RwLock<crate::tools::ToolRegistry>>,
 }
 
 pub struct LocationMap {
@@ -43,16 +43,30 @@ impl LocationMap {
     }
 
     pub async fn update_config(&self, config: DeepSeekCodeConfig) {
+        // Per-location config: previously a single global config was shared
+        // and providers/mcp/shell/plugins/session_service never refreshed.
+        // Now reload policy (with DB grants) + providers + materialization.
         let project_dirs: Vec<String> = {
             let locations = self.locations.read().await;
             locations.keys().cloned().collect()
         };
         *self.config.write().await = config.clone();
-        for dir in project_dirs {
-            let locations = self.locations.read().await;
-            if let Some(services) = locations.get(&dir) {
+        for dir in &project_dirs {
+            let services_opt = {
+                let locations = self.locations.read().await;
+                locations.get(dir).cloned()
+            };
+            if let Some(services) = services_opt {
                 let _ = services.permissions.reload_policy(&config).await;
+                services.providers.load_from_config(&config.providers).await;
+                // Refresh MCP servers + skill materialization per location.
+                // Session runners pick up new tool definitions on next turn
+                // via reload_materialization below.
             }
+        }
+        // Materialize for all known locations (not just the caller).
+        for dir in &project_dirs {
+            self.reload_materialization(dir).await;
         }
     }
 
@@ -113,7 +127,7 @@ impl LocationMap {
         let plugin_host = Arc::new(RwLock::new(plugin_host));
         let hooks = Arc::new(hooks);
 
-        let wasm_tools = Arc::new(std::sync::Mutex::new(
+        let wasm_tools = Arc::new(tokio::sync::RwLock::new(
             crate::tools::ToolRegistry::with_services_and_shell_env(
                 project_dir.clone(),
                 &config,
@@ -121,23 +135,48 @@ impl LocationMap {
                 shell_env,
             ),
         ));
-        let active_session_ids = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+        let active_session_ids =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
         let proxy_tools = wasm_tools.clone();
         deepseekcode_plugin::set_wasm_tool_proxy(Arc::new(move |tool, args| {
             let args_value: serde_json::Value =
                 serde_json::from_str(args).map_err(|e| format!("invalid tool args json: {e}"))?;
-            let registry = proxy_tools
-                .lock()
-                .map_err(|_| "tool registry lock poisoned".to_string())?;
-            let rt = tokio::runtime::Handle::try_current()
-                .map_err(|_| "no tokio runtime for wasm tool proxy".to_string())?;
-            let session_id = crate::tools::services::current_session_id()
-                .unwrap_or_else(deepseekcode_types::SessionId::new);
-            let message_id = deepseekcode_types::MessageId::new();
-            let call_id = deepseekcode_types::ToolCallId::new();
-            let result = rt.block_on(registry.execute(
-                tool, args_value, session_id, message_id, call_id, "build", None, None,
-            ));
+            // Sync WASM callback: never `block_on` on a current runtime
+            // (deadlock/panic). Run the async execute on a dedicated OS
+            // thread with its own current-thread runtime, using a blocking
+            // read of the registry snapshot (P0-4/P1-9).
+            let proxy = proxy_tools.clone();
+            let tool = tool.to_string();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+                let res = match rt {
+                    Ok(rt) => rt.block_on(async move {
+                        // `blocking_read` avoids holding the async lock across
+                        // the thread boundary; registry `execute(&self)` is sync-safe.
+                        let registry = proxy.blocking_read();
+                        let session_id =
+                            crate::tools::services::current_session_id().unwrap_or_default();
+                        let message_id = deepseekcode_types::MessageId::new();
+                        let call_id = deepseekcode_types::ToolCallId::new();
+                        registry
+                            .execute(
+                                &tool, args_value, session_id, message_id, call_id, "build", None,
+                                None,
+                            )
+                            .await
+                    }),
+                    Err(e) => Err(deepseekcode_types::DeepSeekCodeError::Other(format!(
+                        "no tokio runtime for wasm tool proxy: {e}"
+                    ))),
+                };
+                let _ = tx.send(res);
+            });
+            let result = rx
+                .recv()
+                .map_err(|e| format!("wasm tool proxy hung up: {e}"))?;
             match result {
                 Ok(value) => serde_json::to_string(&value.to_stored()).map_err(|e| e.to_string()),
                 Err(e) => Err(e.to_string()),
@@ -169,13 +208,28 @@ impl LocationMap {
         services
     }
 
+    /// Interrupt all draining sessions across locations (embedded shutdown).
+    pub async fn interrupt_all(&self) {
+        let locations: Vec<Arc<LocationServices>> = {
+            let guard = self.locations.read().await;
+            guard.values().cloned().collect()
+        };
+        for loc in locations {
+            if let Ok(active) = loc.session_service.active().await {
+                for sid in active {
+                    let _ = loc.session_service.interrupt(sid).await;
+                }
+            }
+        }
+    }
+
     /// Re-materialize skill tools and refresh MCP tools on all cached session runners.
     pub async fn reload_materialization(&self, project_dir: &str) {
         let project_dir = normalize_directory_path(project_dir);
         let config = self.config.read().await.clone();
         let locations = self.locations.read().await;
         if let Some(services) = locations.get(&project_dir) {
-            if let Ok(mut tools) = services.wasm_tools.lock() {
+            if let Ok(mut tools) = services.wasm_tools.try_write() {
                 tools.refresh_skill_tool(&config);
             }
             services.session_service.reload_materialization().await;

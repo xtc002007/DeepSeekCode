@@ -24,4 +24,5 @@ anyhow = { workspace = true }
 dirs = "6.0"
 serde_json = { workspace = true }
 futures = { workspace = true }
+reqwest = { workspace = true }
 deepseekcode-server = { workspace = true }

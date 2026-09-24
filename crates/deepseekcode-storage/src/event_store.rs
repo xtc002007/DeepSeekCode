@@ -160,19 +160,95 @@ pub async fn admit_prompt(
     prompt: &str,
     delivery: PromptDelivery,
 ) -> Result<()> {
-    sqlx::query(
-        r#"INSERT OR IGNORE INTO session_input (id, session_id, prompt, delivery, admitted_at, promoted) VALUES (?, ?, ?, ?, ?, 0)"#,
+    // Transactional admit: BEGIN IMMEDIATE serializes concurrent prompts on
+    // the same session so MAX+1 cannot allocate duplicate admitted_seq.
+    // INSERT OR IGNORE is kept for idempotency, but a conflicting row with
+    // different content is surfaced (not silently dropped).
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+    sqlx::query("SELECT 1")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+    let has_seq: bool = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*) FROM pragma_table_info('session_input') WHERE name = 'admitted_seq'"#,
     )
-    .bind(message_id.to_string())
-    .bind(session_id.to_string())
-    .bind(prompt)
-    .bind(match delivery {
+    .fetch_one(&mut *tx)
+    .await
+    .map(|c: i64| c > 0)
+    .unwrap_or(false);
+    let delivery_str = match delivery {
         PromptDelivery::Steer => "steer",
         PromptDelivery::Queue => "queue",
-    })
-    .bind(Utc::now().to_rfc3339())
-    .execute(pool)
-    .await
-    .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+    };
+    if has_seq {
+        let next: i64 = sqlx::query_scalar(
+            r#"SELECT COALESCE(MAX(admitted_seq), 0) + 1 FROM session_input WHERE session_id = ?"#,
+        )
+        .bind(session_id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        let result = sqlx::query(
+            r#"INSERT OR IGNORE INTO session_input (id, session_id, prompt, delivery, admitted_at, promoted, admitted_seq) VALUES (?, ?, ?, ?, ?, 0, ?)"#,
+        )
+        .bind(message_id.to_string())
+        .bind(session_id.to_string())
+        .bind(prompt)
+        .bind(delivery_str)
+        .bind(Utc::now().to_rfc3339())
+        .bind(next)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        // OR IGNORE with 0 rows = id collision: verify content matches.
+        if result.rows_affected() == 0 {
+            let existing: Option<(String, String)> =
+                sqlx::query_as(r#"SELECT prompt, delivery FROM session_input WHERE id = ?"#)
+                    .bind(message_id.to_string())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+            if let Some((ep, ed)) = existing {
+                if ep != prompt || ed != delivery_str {
+                    return Err(DeepSeekCodeError::AlreadyExists(format!(
+                        "prompt id {message_id} already admitted with different content"
+                    )));
+                }
+            }
+        }
+    } else {
+        let result = sqlx::query(
+            r#"INSERT OR IGNORE INTO session_input (id, session_id, prompt, delivery, admitted_at, promoted) VALUES (?, ?, ?, ?, ?, 0)"#,
+        )
+        .bind(message_id.to_string())
+        .bind(session_id.to_string())
+        .bind(prompt)
+        .bind(delivery_str)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        if result.rows_affected() == 0 {
+            let existing: Option<(String, String)> =
+                sqlx::query_as(r#"SELECT prompt, delivery FROM session_input WHERE id = ?"#)
+                    .bind(message_id.to_string())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+            if let Some((ep, ed)) = existing {
+                if ep != prompt || ed != delivery_str {
+                    return Err(DeepSeekCodeError::AlreadyExists(format!(
+                        "prompt id {message_id} already admitted with different content"
+                    )));
+                }
+            }
+        }
+    }
+    tx.commit()
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
     Ok(())
 }

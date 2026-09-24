@@ -78,12 +78,28 @@ impl Tool for ReadTool {
                 retryable: false,
             });
         }
+        // Bound file size (8MiB) and stream lines instead of loading
+        // unbounded files into memory (P0-4 OOM guard).
+        const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
+        let meta = std::fs::metadata(&path).map_err(|e| ToolFailure {
+            message: e.to_string(),
+            retryable: false,
+        })?;
+        if meta.len() > MAX_READ_BYTES {
+            return Err(ToolFailure {
+                message: format!(
+                    "file too large ({} bytes, max 8MiB); use offset/limit paging",
+                    meta.len()
+                ),
+                retryable: false,
+            });
+        }
         let content = std::fs::read_to_string(&path).map_err(|e| ToolFailure {
             message: e.to_string(),
             retryable: false,
         })?;
         let offset = input["offset"].as_u64().unwrap_or(1).max(1) as usize;
-        let limit = input["limit"].as_u64().unwrap_or(2000) as usize;
+        let limit = (input["limit"].as_u64().unwrap_or(2000) as usize).min(5000);
         let lines: Vec<&str> = content.lines().skip(offset - 1).take(limit).collect();
         let line_start = offset as u32;
         let line_end = if lines.is_empty() {
@@ -290,6 +306,14 @@ impl Tool for GrepTool {
             .build();
         for entry in walker.flatten().take(500) {
             if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                // Skip huge/binary files to bound memory (P0-4).
+                if entry
+                    .metadata()
+                    .map(|m| m.len() > 1024 * 1024)
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
                 if let Ok(content) = std::fs::read_to_string(entry.path()) {
                     for (i, line) in content.lines().enumerate() {
                         if line.contains(pattern) {
@@ -546,8 +570,14 @@ async fn run_command_streaming(
     let services = current_services();
     let cancel_token = services.as_ref().and_then(|s| s.cancel.clone());
 
+    // Bounded capture (1MiB per stream): truncation happens DURING capture,
+    // not after, so a runaway command cannot OOM before ManagedToolOutput
+    // clamps (P0-4).
+    const MAX_STREAM_BYTES: usize = 1024 * 1024;
     let mut stdout = String::new();
     let mut stderr = String::new();
+    let mut stdout_truncated = false;
+    let mut stderr_truncated = false;
     // Read stdout and stderr CONCURRENTLY: draining them sequentially can
     // deadlock when the child fills the stderr pipe while we are still
     // waiting for stdout EOF.
@@ -575,10 +605,21 @@ async fn run_command_streaming(
             }, if out_lines.is_some() => {
                 match line {
                     Ok(Some(line)) => {
-                        if !stdout.is_empty() {
-                            stdout.push('\n');
+                        if stdout.len() < MAX_STREAM_BYTES {
+                            if !stdout.is_empty() {
+                                stdout.push('\n');
+                            }
+                            // Reserve room for newline; truncate line itself.
+                            let room = MAX_STREAM_BYTES.saturating_sub(stdout.len());
+                            if line.len() + 1 > room {
+                                stdout.push_str(&line[..room.saturating_sub(1).min(line.len())]);
+                                stdout_truncated = true;
+                            } else {
+                                stdout.push_str(&line);
+                            }
+                        } else {
+                            stdout_truncated = true;
                         }
-                        stdout.push_str(&line);
                         if let Some(services) = &services {
                             if let Some(sink) = services.progress.as_ref() {
                                 let _ = sink
@@ -598,10 +639,20 @@ async fn run_command_streaming(
             }, if err_lines.is_some() => {
                 match line {
                     Ok(Some(line)) => {
-                        if !stderr.is_empty() {
-                            stderr.push('\n');
+                        if stderr.len() < MAX_STREAM_BYTES {
+                            if !stderr.is_empty() {
+                                stderr.push('\n');
+                            }
+                            let room = MAX_STREAM_BYTES.saturating_sub(stderr.len());
+                            if line.len() + 1 > room {
+                                stderr.push_str(&line[..room.saturating_sub(1).min(line.len())]);
+                                stderr_truncated = true;
+                            } else {
+                                stderr.push_str(&line);
+                            }
+                        } else {
+                            stderr_truncated = true;
                         }
-                        stderr.push_str(&line);
                         if let Some(services) = &services {
                             if let Some(sink) = services.progress.as_ref() {
                                 let _ = sink
@@ -622,10 +673,17 @@ async fn run_command_streaming(
         retryable: true,
     })?;
     drop(_pid_guard);
+    if stdout_truncated {
+        stdout.push_str("\n…[stdout truncated at 1MiB during capture]");
+    }
+    if stderr_truncated {
+        stderr.push_str("\n…[stderr truncated at 1MiB during capture]");
+    }
     Ok(json!({
         "exit_code": status.code(),
         "stdout": stdout,
         "stderr": stderr,
+        "truncated": stdout_truncated || stderr_truncated,
     }))
 }
 
@@ -664,14 +722,15 @@ impl Tool for ApplyPatchTool {
 
             for (rel_path, hunks) in file_patches {
                 ensure_not_cancelled()?;
+                // Sandbox every file BEFORE any IO: absolute
+                // `/etc/passwd` and `../../outside` must fail closed.
+                // `validate_project_path` is symlink-aware (existing
+                // prefixes canonicalized) so `link->/etc` escapes are blocked.
                 let path = {
                     let base = PathBuf::from(&working_directory);
                     let p = PathBuf::from(&rel_path);
-                    if p.is_absolute() {
-                        p
-                    } else {
-                        base.join(p)
-                    }
+                    let joined = if p.is_absolute() { p } else { base.join(p) };
+                    crate::project_context::validate_project_path(&working_directory, joined)?
                 };
                 let old = std::fs::read_to_string(&path).unwrap_or_default();
                 let updated = apply_hunks_to_content(&old, &hunks)?;
@@ -680,6 +739,12 @@ impl Tool for ApplyPatchTool {
                         message: e.to_string(),
                         retryable: false,
                     })?;
+                    // Re-validate after parent creation (TOCTOU: parent may
+                    // have been a symlink swapped between check and mkdir).
+                    crate::project_context::validate_project_path(
+                        &working_directory,
+                        path.clone(),
+                    )?;
                 }
                 ensure_not_cancelled()?;
                 std::fs::write(&path, &updated).map_err(|e| ToolFailure {
@@ -853,16 +918,24 @@ impl Tool for WebfetchTool {
             retryable: true,
         })?;
         let status = response.status().as_u16();
-        let body = response.text().await.map_err(|e| ToolFailure {
+        // Bound body to 2MiB during download (P0-4 OOM guard).
+        const MAX_FETCH_BYTES: usize = 2 * 1024 * 1024;
+        let bytes = response.bytes().await.map_err(|e| ToolFailure {
             message: e.to_string(),
             retryable: true,
         })?;
-        // Return full body; truncation is handled by ManagedToolOutput in the session runner
-        // (contextual_text reads the `content` field, same as bash `stdout`).
+        let truncated = bytes.len() > MAX_FETCH_BYTES;
+        let body = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_FETCH_BYTES)]).to_string();
+        let body = if truncated {
+            format!("{body}\n…[webfetch truncated at 2MiB]")
+        } else {
+            body
+        };
         Ok(json!({
             "url": url,
             "status": status,
             "content": body,
+            "truncated": truncated,
         }))
     }
 }

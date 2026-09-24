@@ -26,6 +26,7 @@ mod plan_session_strip;
 mod preferences;
 mod revert;
 mod right_panel;
+pub(crate) mod selectable_text;
 mod session;
 mod session_activity;
 mod session_header;

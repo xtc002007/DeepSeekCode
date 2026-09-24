@@ -1,10 +1,23 @@
+use crate::selectable_text::{selectable_text, SelectableStyle, SelectableText};
 use crate::theme::ThemeTokens;
-use crate::ui::multiline_text::render_multiline;
+use crate::workspace::WorkspaceView;
 use gpui::*;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-pub fn render_markdown(source: &str, theme: &ThemeTokens) -> impl IntoElement {
-    let blocks = parse_blocks(source, theme);
+/// Render markdown source into GPUI elements.
+///
+/// `salt` scopes scroll-container element ids (code blocks, tables) so
+/// repeated renders (one per timeline message) never collide. Pass a stable
+/// per-message key (leaf id / detail key) to keep scroll positions stable.
+/// `view` backs drag-selectable text blocks.
+pub fn render_markdown(
+    source: &str,
+    theme: &ThemeTokens,
+    salt: &str,
+    view: &Entity<WorkspaceView>,
+) -> impl IntoElement {
+    let parsed = parse_blocks(source);
+    let blocks = BlockRenderer::new(theme, salt, view).render(parsed);
     let leading = crate::theme::leading_relaxed(theme);
     let mut container = div()
         .w_full()
@@ -12,20 +25,36 @@ pub fn render_markdown(source: &str, theme: &ThemeTokens) -> impl IntoElement {
         .flex_col()
         .gap(px(6.))
         .line_height(leading);
-    for block in blocks {
-        container = container.child(block);
+    for (index, block) in blocks.into_iter().enumerate() {
+        match block {
+            // Headings breathe: top padding unless first block.
+            Block::Heading(el) if index > 0 => {
+                container = container.child(div().w_full().flex().flex_col().pt_2().child(el));
+            }
+            Block::Heading(el) | Block::Body(el) => {
+                container = container.child(el);
+            }
+        }
     }
     container
 }
 
-fn parse_blocks(source: &str, theme: &ThemeTokens) -> Vec<AnyElement> {
+/// Top-level block with heading flag (headings get extra top spacing).
+enum Block {
+    Heading(AnyElement),
+    Body(AnyElement),
+}
+
+/// Pure parse: markdown source → data tree (no theme, view, or elements).
+/// Fully unit-testable, including block content.
+fn parse_blocks(source: &str) -> Vec<ParsedBlock> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
 
     let parser = Parser::new_ext(source, options);
-    let mut ctx = ParseContext::new(theme);
+    let mut ctx = ParseContext::new();
 
     for event in parser {
         ctx.handle(event);
@@ -33,54 +62,111 @@ fn parse_blocks(source: &str, theme: &ThemeTokens) -> Vec<AnyElement> {
     ctx.finish()
 }
 
-struct ParseContext<'a> {
-    theme: &'a ThemeTokens,
-    blocks: Vec<AnyElement>,
+/// Parsed markdown tree. Every variant carries raw runs/text; rendering
+/// (which needs theme + view) happens in [`BlockRenderer`].
+#[derive(Clone, Debug)]
+pub(crate) enum ParsedBlock {
+    Heading {
+        level: u8,
+        runs: Vec<InlineRun>,
+    },
+    Paragraph(Vec<InlineRun>),
+    Code {
+        lang: String,
+        source: String,
+    },
+    List {
+        items: Vec<Vec<ParsedBlock>>,
+        ordered: bool,
+        start: u64,
+    },
+    Quote(Vec<ParsedBlock>),
+    Table {
+        header: Vec<Vec<InlineRun>>,
+        rows: Vec<Vec<Vec<InlineRun>>>,
+        alignments: Vec<Alignment>,
+    },
+    Rule,
+}
+
+/// One nesting container: lists and quotes stack so nested structures keep
+/// their parent instead of leaking to the top level.
+enum Container {
+    List(ListFrame),
+    Quote(QuoteFrame),
+}
+
+struct ListFrame {
+    ordered: bool,
+    start: u64,
+    items: Vec<Vec<ParsedBlock>>,
+    current: Vec<ParsedBlock>,
+}
+
+struct QuoteFrame {
+    blocks: Vec<ParsedBlock>,
+}
+
+/// Alt-text capture for `![alt](url)` (issue #7).
+struct ImageCapture {
+    url: String,
+    alt: String,
+}
+
+/// Pure parse state: accumulators only, no theme/view/elements.
+struct ParseContext {
+    blocks: Vec<ParsedBlock>,
     inlines: Vec<InlineRun>,
     inline_stack: Vec<InlineStyle>,
+    link_stack: Vec<String>,
+    image_stack: Vec<ImageCapture>,
     heading_level: Option<u8>,
     in_code_block: bool,
     code_lang: String,
     code_lines: String,
-    list_items: Vec<Vec<InlineRun>>,
-    current_item: Vec<InlineRun>,
-    list_ordered: bool,
-    in_list: bool,
-    in_blockquote: bool,
-    blockquote_lines: Vec<Vec<InlineRun>>,
-    table_header: Vec<String>,
-    table_rows: Vec<Vec<String>>,
-    table_row: Vec<String>,
-    table_cell: String,
+    container_stack: Vec<Container>,
+    in_html_block: bool,
+    html_lines: String,
+    table_header: Vec<Vec<InlineRun>>,
+    table_rows: Vec<Vec<Vec<InlineRun>>>,
+    table_row: Vec<Vec<InlineRun>>,
+    table_cell: Vec<InlineRun>,
     in_table: bool,
     in_table_head: bool,
     table_alignments: Vec<Alignment>,
 }
 
-impl<'a> ParseContext<'a> {
-    fn new(theme: &'a ThemeTokens) -> Self {
+impl ParseContext {
+    fn new() -> Self {
         Self {
-            theme,
             blocks: Vec::new(),
             inlines: Vec::new(),
             inline_stack: Vec::new(),
+            link_stack: Vec::new(),
+            image_stack: Vec::new(),
             heading_level: None,
             in_code_block: false,
             code_lang: String::new(),
             code_lines: String::new(),
-            list_items: Vec::new(),
-            current_item: Vec::new(),
-            list_ordered: false,
-            in_list: false,
-            in_blockquote: false,
-            blockquote_lines: Vec::new(),
+            container_stack: Vec::new(),
+            in_html_block: false,
+            html_lines: String::new(),
             table_header: Vec::new(),
             table_rows: Vec::new(),
             table_row: Vec::new(),
-            table_cell: String::new(),
+            table_cell: Vec::new(),
             in_table: false,
             in_table_head: false,
             table_alignments: Vec::new(),
+        }
+    }
+
+    /// Deliver a finished block to the innermost container (or top level).
+    fn emit_block(&mut self, block: ParsedBlock) {
+        match self.container_stack.last_mut() {
+            Some(Container::List(frame)) => frame.current.push(block),
+            Some(Container::Quote(frame)) => frame.blocks.push(block),
+            None => self.blocks.push(block),
         }
     }
 
@@ -90,40 +176,41 @@ impl<'a> ParseContext<'a> {
         }
         let runs = std::mem::take(&mut self.inlines);
         if let Some(level) = self.heading_level.take() {
-            self.blocks.push(render_heading(level, runs, self.theme));
-        } else if self.in_list {
-            self.current_item = runs;
-        } else if self.in_blockquote {
-            self.blockquote_lines.push(runs);
-        } else {
-            self.blocks.push(render_paragraph(runs, self.theme));
+            self.emit_block(ParsedBlock::Heading { level, runs });
+            return;
         }
+        self.emit_block(ParsedBlock::Paragraph(runs));
     }
 
     fn push_text(&mut self, text: &str) {
+        // Image alt capture (issue #7): alt text must not leak into the flow.
+        if let Some(capture) = self.image_stack.last_mut() {
+            capture.alt.push_str(text);
+            return;
+        }
         if self.in_code_block {
             self.code_lines.push_str(text);
             return;
         }
         if self.in_table {
-            self.table_cell.push_str(text);
+            let styles = self.active_styles();
+            let url = self.link_stack.last().cloned();
+            push_run_into(&mut self.table_cell, styles, url, text);
             return;
         }
-        let style = self
-            .inline_stack
-            .last()
-            .copied()
-            .unwrap_or(InlineStyle::Normal);
-        if let Some(last) = self.inlines.last_mut() {
-            if last.style == style {
-                last.text.push_str(text);
-                return;
-            }
+        let styles = self.active_styles();
+        let url = self.link_stack.last().cloned();
+        push_run_into(&mut self.inlines, styles, url, text);
+    }
+
+    /// Current nesting as a run style set (empty stack = explicit Normal so
+    /// every run carries a complete, comparable style).
+    fn active_styles(&self) -> Vec<InlineStyle> {
+        if self.inline_stack.is_empty() {
+            vec![InlineStyle::Normal]
+        } else {
+            self.inline_stack.clone()
         }
-        self.inlines.push(InlineRun {
-            style,
-            text: text.to_string(),
-        });
     }
 
     fn handle(&mut self, event: Event<'_>) {
@@ -136,14 +223,17 @@ impl<'a> ParseContext<'a> {
                 Tag::Paragraph => self.flush_inlines(),
                 Tag::List(start) => {
                     self.flush_inlines();
-                    self.in_list = true;
-                    self.list_ordered = start.is_some();
-                    self.list_items.clear();
-                    self.current_item.clear();
+                    self.container_stack.push(Container::List(ListFrame {
+                        ordered: start.is_some(),
+                        start: start.unwrap_or(1),
+                        items: Vec::new(),
+                        current: Vec::new(),
+                    }));
                 }
                 Tag::Item => {
+                    // Current item was sealed at the previous `TagEnd::Item`;
+                    // just flush strays (balanced parsers leave none).
                     self.flush_inlines();
-                    self.current_item.clear();
                 }
                 Tag::CodeBlock(kind) => {
                     self.flush_inlines();
@@ -156,8 +246,13 @@ impl<'a> ParseContext<'a> {
                 }
                 Tag::BlockQuote(_) => {
                     self.flush_inlines();
-                    self.in_blockquote = true;
-                    self.blockquote_lines.clear();
+                    self.container_stack
+                        .push(Container::Quote(QuoteFrame { blocks: Vec::new() }));
+                }
+                Tag::HtmlBlock => {
+                    self.flush_inlines();
+                    self.in_html_block = true;
+                    self.html_lines.clear();
                 }
                 Tag::Table(alignments) => {
                     self.flush_inlines();
@@ -178,7 +273,17 @@ impl<'a> ParseContext<'a> {
                 Tag::Emphasis => self.inline_stack.push(InlineStyle::Emphasis),
                 Tag::Strong => self.inline_stack.push(InlineStyle::Strong),
                 Tag::Strikethrough => self.inline_stack.push(InlineStyle::Strike),
-                Tag::Link { .. } => self.inline_stack.push(InlineStyle::Link),
+                Tag::Link { dest_url, .. } => {
+                    self.inline_stack.push(InlineStyle::Link);
+                    self.link_stack.push(dest_url.to_string());
+                }
+                Tag::Image { dest_url, .. } => {
+                    self.flush_inlines();
+                    self.image_stack.push(ImageCapture {
+                        url: dest_url.to_string(),
+                        alt: String::new(),
+                    });
+                }
                 _ => {}
             },
             Event::End(tag_end) => match tag_end {
@@ -190,40 +295,55 @@ impl<'a> ParseContext<'a> {
                 TagEnd::Paragraph => self.flush_inlines(),
                 TagEnd::Item => {
                     self.flush_inlines();
-                    self.list_items.push(std::mem::take(&mut self.current_item));
+                    if let Some(Container::List(frame)) = self.container_stack.last_mut() {
+                        frame.items.push(std::mem::take(&mut frame.current));
+                    }
                 }
                 TagEnd::List(_) => {
-                    self.in_list = false;
-                    let items = std::mem::take(&mut self.list_items);
-                    self.blocks
-                        .push(render_list(items, self.list_ordered, self.theme));
+                    self.flush_inlines();
+                    if let Some(Container::List(frame)) = self.container_stack.pop() {
+                        self.emit_block(ParsedBlock::List {
+                            items: frame.items,
+                            ordered: frame.ordered,
+                            start: frame.start,
+                        });
+                    }
                 }
                 TagEnd::CodeBlock => {
                     self.in_code_block = false;
-                    self.blocks.push(render_code_block(
-                        &self.code_lines,
-                        &self.code_lang,
-                        self.theme,
-                    ));
-                    self.code_lines.clear();
-                    self.code_lang.clear();
+                    let lang = std::mem::take(&mut self.code_lang);
+                    let source = std::mem::take(&mut self.code_lines);
+                    self.emit_block(ParsedBlock::Code { lang, source });
                 }
                 TagEnd::BlockQuote(_) => {
                     self.flush_inlines();
-                    self.in_blockquote = false;
-                    let lines = std::mem::take(&mut self.blockquote_lines);
-                    self.blocks.push(render_blockquote(lines, self.theme));
+                    if let Some(Container::Quote(frame)) = self.container_stack.pop() {
+                        self.emit_block(ParsedBlock::Quote(frame.blocks));
+                    }
+                }
+                TagEnd::HtmlBlock => {
+                    self.in_html_block = false;
+                    let text = strip_html_tags(&self.html_lines).trim().to_string();
+                    self.html_lines.clear();
+                    if !text.is_empty() {
+                        let runs = vec![InlineRun {
+                            styles: Vec::new(),
+                            text,
+                            url: None,
+                        }];
+                        self.emit_block(ParsedBlock::Paragraph(runs));
+                    }
                 }
                 TagEnd::Table => {
                     self.in_table = false;
-                    self.blocks.push(render_table(
-                        &self.table_header,
-                        &self.table_rows,
-                        &self.table_alignments,
-                        self.theme,
-                    ));
-                    self.table_header.clear();
-                    self.table_rows.clear();
+                    let header = std::mem::take(&mut self.table_header);
+                    let rows = std::mem::take(&mut self.table_rows);
+                    let alignments = std::mem::take(&mut self.table_alignments);
+                    self.emit_block(ParsedBlock::Table {
+                        header,
+                        rows,
+                        alignments,
+                    });
                 }
                 TagEnd::TableHead => self.in_table_head = false,
                 TagEnd::TableRow => {
@@ -235,31 +355,85 @@ impl<'a> ParseContext<'a> {
                     self.table_row.clear();
                 }
                 TagEnd::TableCell => {
-                    self.table_row.push(self.table_cell.trim().to_string());
-                    self.table_cell.clear();
+                    trim_cell_runs(&mut self.table_cell);
+                    self.table_row.push(std::mem::take(&mut self.table_cell));
                 }
-                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => {
+                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
                     self.inline_stack.pop();
+                }
+                TagEnd::Link => {
+                    self.inline_stack.pop();
+                    self.link_stack.pop();
+                }
+                TagEnd::Image => {
+                    if let Some(capture) = self.image_stack.pop() {
+                        let text = if capture.alt.trim().is_empty() {
+                            capture.url.clone()
+                        } else {
+                            format!("🖼 {}", capture.alt.trim())
+                        };
+                        // Route like normal text: images inside table cells
+                        // must stay in the cell, not escape to `inlines`.
+                        if self.in_table {
+                            push_run_into(
+                                &mut self.table_cell,
+                                vec![InlineStyle::Image],
+                                Some(capture.url),
+                                &text,
+                            );
+                        } else {
+                            push_run_into(
+                                &mut self.inlines,
+                                vec![InlineStyle::Image],
+                                Some(capture.url),
+                                &text,
+                            );
+                        }
+                    }
                 }
                 _ => {}
             },
             Event::Text(text) => self.push_text(&text),
             Event::Code(text) => {
+                if let Some(capture) = self.image_stack.last_mut() {
+                    capture.alt.push_str(&text);
+                    return;
+                }
                 self.inline_stack.push(InlineStyle::Code);
                 self.push_text(&text);
                 self.inline_stack.pop();
             }
-            Event::SoftBreak => self.push_text(" "),
-            Event::HardBreak => self.push_text("\n"),
+            Event::SoftBreak => {
+                if let Some(capture) = self.image_stack.last_mut() {
+                    capture.alt.push(' ');
+                } else {
+                    self.push_text(" ");
+                }
+            }
+            Event::HardBreak => {
+                if let Some(capture) = self.image_stack.last_mut() {
+                    capture.alt.push(' ');
+                } else {
+                    self.push_text("\n");
+                }
+            }
+            Event::Html(text) | Event::InlineHtml(text) => {
+                if self.in_html_block {
+                    self.html_lines.push_str(&text);
+                    self.html_lines.push('\n');
+                } else if is_line_break_html(&text) {
+                    if let Some(capture) = self.image_stack.last_mut() {
+                        capture.alt.push(' ');
+                    } else {
+                        // `<br/>` becomes a hard break (split into lines).
+                        self.push_text("\n");
+                    }
+                }
+                // Other inline tags (`<kbd>`, …) carry no text of their own.
+            }
             Event::Rule => {
                 self.flush_inlines();
-                self.blocks.push(
-                    div()
-                        .w_full()
-                        .h(px(1.))
-                        .bg(self.theme.markdown.border)
-                        .into_any_element(),
-                );
+                self.emit_block(ParsedBlock::Rule);
             }
             Event::TaskListMarker(checked) => {
                 self.push_text(if checked { "☑ " } else { "☐ " });
@@ -268,55 +442,241 @@ impl<'a> ParseContext<'a> {
         }
     }
 
-    fn finish(mut self) -> Vec<AnyElement> {
+    fn finish(mut self) -> Vec<ParsedBlock> {
         self.flush_inlines();
         self.blocks
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum InlineStyle {
+/// `<br>`, `<br/>`, `<br />` (any case). Byte-safe: never slices into a
+/// multibyte char boundary.
+fn is_line_break_html(html: &str) -> bool {
+    let trimmed = html.trim_start();
+    trimmed
+        .get(..3)
+        .map(|head| head.eq_ignore_ascii_case("<br"))
+        .unwrap_or(false)
+}
+
+/// Tag stripper for HTML-block fallback: drops `<…>` spans. A bare `<` not
+/// followed by a tag-start char (e.g. `a < b`) is kept as literal text.
+fn strip_html_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut chars = html.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '<' && matches!(chars.peek(), Some('a'..='z' | 'A'..='Z' | '/' | '!' | '?')) {
+            for ch in chars.by_ref() {
+                if ch == '>' {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum InlineStyle {
     Normal,
     Strong,
     Emphasis,
     Code,
     Link,
     Strike,
+    Image,
 }
 
-struct InlineRun {
-    style: InlineStyle,
-    text: String,
+#[derive(Clone, Debug)]
+pub(crate) struct InlineRun {
+    /// Full nesting stack (issue #13: `***x***` keeps both styles).
+    pub(crate) styles: Vec<InlineStyle>,
+    pub(crate) text: String,
+    /// Link/image destination (issue #9: clickable when browsable).
+    pub(crate) url: Option<String>,
 }
 
-fn render_heading(level: u8, runs: Vec<InlineRun>, theme: &ThemeTokens) -> AnyElement {
-    let md = &theme.markdown;
-    let mut el = div()
-        .w_full()
-        .font_weight(FontWeight::BOLD)
-        .text_color(md.text);
-    el = match level {
-        1 => el.text_lg(),
-        2 => el.text_base(),
-        _ => el.text_sm(),
-    };
-    render_runs_into(el, runs, theme).into_any_element()
-}
-
-fn render_paragraph(runs: Vec<InlineRun>, theme: &ThemeTokens) -> AnyElement {
-    let md = &theme.markdown;
-    let mut column = div()
-        .w_full()
-        .flex()
-        .flex_col()
-        .gap_0p5()
-        .text_xs()
-        .line_height(crate::theme::leading_relaxed(theme))
-        .text_color(md.text);
-    for line_runs in split_runs_on_newlines(runs) {
-        column = column.child(render_inline_line(line_runs, theme));
+/// Append text, merging into the previous run when style+url match.
+fn push_run_into(
+    target: &mut Vec<InlineRun>,
+    styles: Vec<InlineStyle>,
+    url: Option<String>,
+    text: &str,
+) {
+    if let Some(last) = target.last_mut() {
+        if last.styles == styles && last.url == url {
+            last.text.push_str(text);
+            return;
+        }
     }
-    column.into_any_element()
+    target.push(InlineRun {
+        styles,
+        text: text.to_string(),
+        url,
+    });
+}
+
+/// Trim edge whitespace of a table cell's run list.
+fn trim_cell_runs(cell: &mut Vec<InlineRun>) {
+    while cell.len() > 1 && cell[0].text.trim_start().is_empty() {
+        cell.remove(0);
+    }
+    if let Some(first) = cell.first_mut() {
+        first.text = first.text.trim_start().to_string();
+    }
+    while cell.len() > 1 && cell[cell.len() - 1].text.trim_end().is_empty() {
+        cell.pop();
+    }
+    if let Some(last) = cell.last_mut() {
+        last.text = last.text.trim_end().to_string();
+    }
+}
+
+/// Render pass: parsed data tree → elements (needs theme + view).
+struct BlockRenderer<'a> {
+    theme: &'a ThemeTokens,
+    view: Entity<WorkspaceView>,
+    salt: String,
+    scroll_seq: usize,
+    text_seq: usize,
+}
+
+impl<'a> BlockRenderer<'a> {
+    fn new(theme: &'a ThemeTokens, salt: &str, view: &Entity<WorkspaceView>) -> Self {
+        Self {
+            theme,
+            view: view.clone(),
+            salt: salt.to_string(),
+            scroll_seq: 0,
+            text_seq: 0,
+        }
+    }
+
+    /// Unique scroll-container id, stable per message (`salt`).
+    fn next_scroll_id(&mut self, kind: &str) -> String {
+        let id = format!("md-{}-{kind}-{}", self.salt, self.scroll_seq);
+        self.scroll_seq += 1;
+        id
+    }
+
+    /// Stable per-block key for selectable text (`salt` + document order).
+    fn next_text_key(&mut self) -> String {
+        let key = format!("{}#t{}", self.salt, self.text_seq);
+        self.text_seq += 1;
+        key
+    }
+
+    fn ui_family(&self) -> SharedString {
+        crate::theme::font_ui(self.theme)
+    }
+
+    fn body_style(&self) -> SelectableStyle {
+        SelectableStyle {
+            size: self.theme.typography.text_xs,
+            line_height: crate::theme::leading_relaxed(self.theme),
+            color: self.theme.markdown.text,
+            weight: FontWeight::NORMAL,
+            italic: false,
+            family: self.ui_family(),
+            align: TextAlign::Left,
+        }
+    }
+
+    /// Drag-selectable inline line (quote lines, table cells).
+    fn inline_text(
+        &mut self,
+        runs: Vec<InlineRun>,
+        style: SelectableStyle,
+        wrap: bool,
+    ) -> SelectableText {
+        let key = self.next_text_key();
+        selectable_text(&self.view, key, &runs, self.theme, &style, wrap)
+    }
+
+    fn render(&mut self, blocks: Vec<ParsedBlock>) -> Vec<Block> {
+        blocks
+            .into_iter()
+            .map(|block| match block {
+                ParsedBlock::Heading { level, runs } => {
+                    Block::Heading(self.render_heading(level, runs))
+                }
+                other => Block::Body(self.render_parsed(other)),
+            })
+            .collect()
+    }
+
+    fn render_parsed(&mut self, block: ParsedBlock) -> AnyElement {
+        match block {
+            ParsedBlock::Heading { level, runs } => self.render_heading(level, runs),
+            ParsedBlock::Paragraph(runs) => self.render_paragraph(runs),
+            ParsedBlock::Code { lang, source } => self.render_code(&lang, &source),
+            ParsedBlock::List {
+                items,
+                ordered,
+                start,
+            } => self.render_list(items, ordered, start),
+            ParsedBlock::Quote(blocks) => self.render_quote(blocks),
+            ParsedBlock::Table {
+                header,
+                rows,
+                alignments,
+            } => self.render_table(&header, &rows, &alignments),
+            ParsedBlock::Rule => div()
+                .w_full()
+                .h(px(1.))
+                .bg(self.theme.markdown.border)
+                .into_any_element(),
+        }
+    }
+
+    fn heading_style(&self, level: u8) -> (SelectableStyle, bool) {
+        let md = &self.theme.markdown;
+        let typo = &self.theme.typography;
+        let size = match level {
+            1 => typo.text_lg,
+            2 => typo.text_base,
+            _ => typo.text_sm,
+        };
+        (
+            SelectableStyle {
+                size,
+                line_height: crate::theme::leading_relaxed(self.theme),
+                color: md.text,
+                weight: FontWeight::BOLD,
+                italic: false,
+                family: crate::theme::font_ui(self.theme),
+                align: TextAlign::Left,
+            },
+            level == 1,
+        )
+    }
+
+    fn render_heading(&mut self, level: u8, runs: Vec<InlineRun>) -> AnyElement {
+        let md_border: Rgba = self.theme.markdown.border;
+        let (style, underline) = self.heading_style(level);
+        let mut el = div().w_full().cursor(CursorStyle::IBeam);
+        if underline {
+            el = el.border_b_1().border_color(md_border).pb_1();
+        }
+        // Issue #1: one selectable element wraps all runs, so mixed styles
+        // (text + code + link) stay on one logical line and stay selectable.
+        let key = self.next_text_key();
+        el.child(selectable_text(
+            &self.view, key, &runs, self.theme, &style, true,
+        ))
+        .into_any_element()
+    }
+
+    fn render_paragraph(&mut self, runs: Vec<InlineRun>) -> AnyElement {
+        let mut column = div().w_full().flex().flex_col().gap_0p5();
+        for line_runs in split_runs_on_newlines(runs) {
+            let body = self.body_style();
+            let el = self.inline_text(line_runs, body, true);
+            column = column.child(div().cursor(CursorStyle::IBeam).child(el));
+        }
+        column.into_any_element()
+    }
 }
 
 /// Split inline runs at hard line breaks while preserving style per segment.
@@ -338,7 +698,8 @@ fn split_runs_on_newlines(runs: Vec<InlineRun>) -> Vec<Vec<InlineRun>> {
                 .expect("line vector non-empty")
                 .push(InlineRun {
                     text: segment.to_string(),
-                    style: run.style,
+                    styles: run.styles.clone(),
+                    url: run.url.clone(),
                 });
         }
     }
@@ -349,171 +710,594 @@ fn split_runs_on_newlines(runs: Vec<InlineRun>) -> Vec<Vec<InlineRun>> {
     lines
 }
 
-fn render_inline_line(runs: Vec<InlineRun>, theme: &ThemeTokens) -> Div {
-    render_runs_into(
-        div()
+impl<'a> BlockRenderer<'a> {
+    fn render_quote(&mut self, blocks: Vec<ParsedBlock>) -> AnyElement {
+        let border: Rgba = self.theme.markdown.blockquote_border;
+        let mut body = div()
             .w_full()
+            .pl_3()
+            .border_l_2()
+            .border_color(border)
             .flex()
-            .flex_row()
-            .flex_wrap()
-            .items_baseline(),
-        runs,
-        theme,
-    )
-}
-
-fn render_blockquote(lines: Vec<Vec<InlineRun>>, theme: &ThemeTokens) -> AnyElement {
-    let md = &theme.markdown;
-    let mut body = div()
-        .w_full()
-        .pl_3()
-        .border_l_2()
-        .border_color(md.blockquote_border)
-        .flex()
-        .flex_col()
-        .gap_1();
-    for line in lines {
-        body = body.child(
-            render_inline_line(line, theme)
-                .text_sm()
-                .text_color(md.muted)
-                .italic(),
-        );
-    }
-    body.into_any_element()
-}
-
-fn render_runs_into(mut container: Div, runs: Vec<InlineRun>, theme: &ThemeTokens) -> Div {
-    let md = &theme.markdown;
-    for run in runs {
-        if run.text.is_empty() {
-            continue;
+            .flex_col()
+            .gap_1();
+        for block in blocks {
+            match block {
+                ParsedBlock::Paragraph(runs) => {
+                    let muted: Rgba = self.theme.markdown.muted;
+                    let style = SelectableStyle {
+                        size: self.theme.typography.text_sm,
+                        line_height: crate::theme::leading_relaxed(self.theme),
+                        color: muted,
+                        weight: FontWeight::NORMAL,
+                        italic: true,
+                        family: self.ui_family(),
+                        align: TextAlign::Left,
+                    };
+                    let el = self.inline_text(runs, style, true);
+                    body = body.child(div().cursor(CursorStyle::IBeam).child(el));
+                }
+                other => {
+                    body = body.child(self.render_parsed(other));
+                }
+            }
         }
-        let mut span = div().flex_shrink_0().child(run.text.clone());
-        span = match run.style {
-            InlineStyle::Normal => span,
-            InlineStyle::Strong => span.font_weight(FontWeight::SEMIBOLD),
-            InlineStyle::Emphasis => span.italic(),
-            InlineStyle::Code => span
-                .px_1()
-                .rounded_sm()
-                .bg(md.code_bg)
-                .font_family(crate::theme::font_mono(theme))
-                .text_xs()
-                .text_color(md.text),
-            InlineStyle::Link => span.text_color(md.link).underline(),
-            InlineStyle::Strike => span.line_through(),
-        };
-        container = container.child(span);
+        body.into_any_element()
     }
-    container
 }
 
-fn render_code_block(source: &str, lang: &str, theme: &ThemeTokens) -> AnyElement {
-    let md = &theme.markdown;
-    let mut block = div()
-        .w_full()
-        .p_2()
-        .rounded_md()
-        .bg(md.code_bg)
-        .border_1()
-        .border_color(md.border)
-        .flex()
-        .flex_col()
-        .gap_1();
+impl<'a> BlockRenderer<'a> {
+    fn render_code(&mut self, lang: &str, source: &str) -> AnyElement {
+        use crate::ui::multiline_text::split_display_lines;
+        let code_bg: Rgba = self.theme.markdown.code_bg;
+        let border: Rgba = self.theme.markdown.border;
+        let muted: Rgba = self.theme.markdown.muted;
+        let text_color: Rgba = self.theme.markdown.text;
+        let mono = crate::theme::font_mono(self.theme);
+        let scroll_id = self.next_scroll_id("code");
+        let mut outer = div()
+            .id(ElementId::Name(scroll_id.into()))
+            .w_full()
+            .rounded_md()
+            .bg(code_bg)
+            .border_1()
+            .border_color(border)
+            .overflow_x_scroll()
+            .flex()
+            .flex_col();
 
-    if !lang.is_empty() {
-        block = block.child(
-            div()
-                .text_xs()
-                .text_color(md.muted)
-                .font_weight(FontWeight::MEDIUM)
-                .child(lang.to_string()),
-        );
-    }
-
-    let mono = crate::theme::font_mono(theme);
-    block
-        .child(render_multiline(source.trim_end(), move |el| {
-            el.text_xs().font_family(mono.clone()).text_color(md.text)
-        }))
-        .into_any_element()
-}
-
-fn render_list(items: Vec<Vec<InlineRun>>, ordered: bool, theme: &ThemeTokens) -> AnyElement {
-    let md = &theme.markdown;
-    let mut list = div().w_full().flex().flex_col().gap_1().pl_2();
-    for (index, item) in items.into_iter().enumerate() {
-        let marker = if ordered {
-            format!("{}. ", index + 1)
-        } else {
-            "• ".to_string()
-        };
-        list = list.child(
-            div()
-                .flex()
-                .gap_1()
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_sm()
-                        .text_color(md.muted)
-                        .child(marker),
-                )
-                .child(render_paragraph(item, theme)),
-        );
-    }
-    list.into_any_element()
-}
-
-fn render_table(
-    header: &[String],
-    rows: &[Vec<String>],
-    alignments: &[Alignment],
-    theme: &ThemeTokens,
-) -> AnyElement {
-    let md = &theme.markdown;
-    let mut table = div()
-        .w_full()
-        .rounded_md()
-        .border_1()
-        .border_color(md.border)
-        .overflow_hidden();
-
-    if !header.is_empty() {
-        table = table.child(render_table_row(header, alignments, true, theme));
-    }
-    for row in rows {
-        table = table.child(render_table_row(row, alignments, false, theme));
-    }
-    table.into_any_element()
-}
-
-fn render_table_row(
-    cells: &[String],
-    alignments: &[Alignment],
-    header: bool,
-    theme: &ThemeTokens,
-) -> impl IntoElement {
-    let md = &theme.markdown;
-    let mut row = div().w_full().flex().border_b_1().border_color(md.border);
-    for (index, cell) in cells.iter().enumerate() {
-        let align = alignments.get(index).copied().unwrap_or(Alignment::None);
-        let mut cell_el = div()
-            .flex_1()
-            .px_2()
-            .py_1()
-            .text_xs()
-            .text_color(if header { md.text } else { md.muted });
-        if header {
-            cell_el = cell_el.font_weight(FontWeight::SEMIBOLD).bg(md.code_bg);
+        if !lang.is_empty() {
+            outer = outer.child(
+                div()
+                    .px_2()
+                    .pt_2()
+                    .text_xs()
+                    .text_color(muted)
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(lang.to_string()),
+            );
         }
-        cell_el = match align {
-            Alignment::Center => cell_el.text_center(),
-            Alignment::Right => cell_el.text_right(),
-            _ => cell_el,
-        };
-        row = row.child(cell_el.child(cell.clone()));
+
+        // Selectable lines (no wrap: the scroll container handles overflow).
+        // `items_start` keeps short code visually identical to before.
+        let mut content = div().flex().flex_col().items_start().gap_1().p_2();
+        for line in split_display_lines(source.trim_end()) {
+            let style = SelectableStyle {
+                size: self.theme.typography.text_xs,
+                line_height: crate::theme::leading_relaxed(self.theme),
+                color: text_color,
+                weight: FontWeight::NORMAL,
+                italic: false,
+                family: mono.clone(),
+                align: TextAlign::Left,
+            };
+            let key = self.next_text_key();
+            content = content.child(div().cursor(CursorStyle::IBeam).child(selectable_text(
+                &self.view,
+                key,
+                &[InlineRun {
+                    styles: vec![InlineStyle::Normal],
+                    text: line,
+                    url: None,
+                }],
+                self.theme,
+                &style,
+                false,
+            )));
+        }
+        outer.child(content).into_any_element()
     }
-    row
+}
+
+impl<'a> BlockRenderer<'a> {
+    fn render_list(
+        &mut self,
+        items: Vec<Vec<ParsedBlock>>,
+        ordered: bool,
+        start: u64,
+    ) -> AnyElement {
+        let muted: Rgba = self.theme.markdown.muted;
+        let mut list = div().w_full().flex().flex_col().gap_1().pl_2();
+        for (index, blocks) in items.into_iter().enumerate() {
+            let marker = if ordered {
+                format!("{}. ", start + index as u64)
+            } else {
+                "• ".to_string()
+            };
+            let mut content = div().flex_1().min_w(px(0.)).flex().flex_col().gap_1();
+            for block in blocks {
+                content = content.child(self.render_parsed(block));
+            }
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(marker),
+                    )
+                    .child(content),
+            );
+        }
+        list.into_any_element()
+    }
+}
+
+impl<'a> BlockRenderer<'a> {
+    fn render_table(
+        &mut self,
+        header: &[Vec<InlineRun>],
+        rows: &[Vec<Vec<InlineRun>>],
+        alignments: &[Alignment],
+    ) -> AnyElement {
+        let border: Rgba = self.theme.markdown.border;
+        let scroll_id = self.next_scroll_id("table");
+        let mut inner = div().w_full().rounded_md().border_1().border_color(border);
+        // NOTE: no `overflow_hidden` here — it would clip unbreakable content
+        // inside and starve the outer horizontal scroll.
+
+        if !header.is_empty() {
+            inner = inner.child(self.render_table_row(header, alignments, true, true));
+        }
+        let last = rows.len().saturating_sub(1);
+        for (index, row) in rows.iter().enumerate() {
+            let is_last = index == last;
+            inner = inner.child(self.render_table_row(row, alignments, false, is_last));
+        }
+        // Issue #11: horizontal scroll engages only when unbreakable content
+        // overflows; fitting tables render exactly as before.
+        div()
+            .id(ElementId::Name(scroll_id.into()))
+            .w_full()
+            .overflow_x_scroll()
+            .child(inner)
+            .into_any_element()
+    }
+}
+
+impl<'a> BlockRenderer<'a> {
+    fn render_table_row(
+        &mut self,
+        cells: &[Vec<InlineRun>],
+        alignments: &[Alignment],
+        header: bool,
+        is_last: bool,
+    ) -> Div {
+        let md_text: Rgba = self.theme.markdown.text;
+        let md_muted: Rgba = self.theme.markdown.muted;
+        let md_code_bg: Rgba = self.theme.markdown.code_bg;
+        let md_border: Rgba = self.theme.markdown.border;
+        let mut row = div().w_full().flex().flex_row().border_color(md_border);
+        if !is_last {
+            row = row.border_b_1();
+        }
+        for (index, cell) in cells.iter().enumerate() {
+            let align = alignments.get(index).copied().unwrap_or(Alignment::None);
+            let g_align = match align {
+                Alignment::Center => TextAlign::Center,
+                Alignment::Right => TextAlign::Right,
+                _ => TextAlign::Left,
+            };
+            let mut cell_el = div()
+                .flex_1()
+                .min_w(px(0.))
+                .px_2()
+                .py_1()
+                .cursor(CursorStyle::IBeam);
+            if header {
+                cell_el = cell_el.bg(md_code_bg);
+            }
+            // Issue #6: cells render inline runs (bold/code/links), not raw
+            // text — now drag-selectable with alignment preserved.
+            let mut style = SelectableStyle {
+                size: self.theme.typography.text_xs,
+                line_height: crate::theme::leading_relaxed(self.theme),
+                color: if header { md_text } else { md_muted },
+                weight: FontWeight::NORMAL,
+                italic: false,
+                family: self.ui_family(),
+                align: g_align,
+            };
+            if header {
+                style.weight = FontWeight::SEMIBOLD;
+            }
+            let key = self.next_text_key();
+            let el = selectable_text(&self.view, key, cell, self.theme, &style, true);
+            row = row.child(cell_el.child(el));
+        }
+        row
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // NOTE: never `use super::*` here — the parent's `use gpui::*` would pull
+    // gpui's `test` module into scope and break `#[test]` resolution.
+    use super::{
+        is_line_break_html, push_run_into, split_runs_on_newlines, strip_html_tags, trim_cell_runs,
+        InlineRun, InlineStyle, ParseContext, ParsedBlock,
+    };
+    use crate::selectable_text::is_browsable_url;
+    use crate::theme::themes::dark::dark_tokens;
+    use crate::theme::ThemeTokens;
+    use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
+
+    fn test_theme() -> ThemeTokens {
+        dark_tokens()
+    }
+
+    /// Drive the pure parser, returning the data tree (no theme/view needed).
+    fn parse(source: &str) -> Vec<ParsedBlock> {
+        let mut options = Options::empty();
+        options.insert(Options::ENABLE_TABLES);
+        options.insert(Options::ENABLE_STRIKETHROUGH);
+        options.insert(Options::ENABLE_TASKLISTS);
+        let mut ctx = ParseContext::new();
+        for event in Parser::new_ext(source, options) {
+            ctx.handle(event);
+        }
+        ctx.finish()
+    }
+
+    fn is_heading(block: &ParsedBlock) -> bool {
+        matches!(block, ParsedBlock::Heading { .. })
+    }
+
+    fn paragraph_text(block: &ParsedBlock) -> String {
+        match block {
+            ParsedBlock::Paragraph(runs) => runs.iter().map(|r| r.text.as_str()).collect(),
+            _ => panic!("expected paragraph, got {block:?}"),
+        }
+    }
+
+    #[test]
+    fn heading_with_mixed_styles_stays_one_block() {
+        // Issue #1: `### 1. 教学主循环（`teaching-loop.ts`）` must not split.
+        let blocks = parse("### 1. 教学主循环（`teaching-loop.ts`）\n");
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ParsedBlock::Heading { level, runs } => {
+                assert_eq!(*level, 3);
+                let text: String = runs.iter().map(|r| r.text.as_str()).collect();
+                assert!(text.contains("teaching-loop.ts"));
+                assert!(runs.iter().any(|r| r.styles.contains(&InlineStyle::Code)));
+            }
+            other => panic!("expected heading, got {other:?}"),
+        }
+        assert!(is_heading(&blocks[0]));
+    }
+
+    #[test]
+    fn nested_list_stays_single_block() {
+        // Issue #3: inner list must not wipe outer items or escape.
+        let blocks = parse("- a\n  - b\n  - c\n- d\n");
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ParsedBlock::List { items, .. } => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(paragraph_text(&items[0][0]), "a");
+                assert_eq!(paragraph_text(&items[1][0]), "d");
+                // Nested list is the second block of the first item.
+                assert_eq!(items[0].len(), 2);
+                match &items[0][1] {
+                    ParsedBlock::List { items: inner, .. } => {
+                        assert_eq!(inner.len(), 2);
+                        assert_eq!(paragraph_text(&inner[0][0]), "b");
+                        assert_eq!(paragraph_text(&inner[1][0]), "c");
+                    }
+                    other => panic!("expected nested list, got {other:?}"),
+                }
+            }
+            other => panic!("expected list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multi_paragraph_item_keeps_both_paragraphs() {
+        // Issue #4: both paragraphs survive with content (old code dropped
+        // the first via overwrite).
+        let blocks = parse("- first\n\n  continued\n");
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ParsedBlock::List { items, .. } => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].len(), 2);
+                assert_eq!(paragraph_text(&items[0][0]), "first");
+                assert_eq!(paragraph_text(&items[0][1]), "continued");
+            }
+            other => panic!("expected list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn code_block_inside_list_item_does_not_escape() {
+        // Issue #5: code keeps language + source inside the item.
+        let blocks = parse("- item\n\n  ```rust\n  let x = 1;\n  ```\n");
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ParsedBlock::List { items, .. } => {
+                assert_eq!(items[0].len(), 2);
+                match &items[0][1] {
+                    ParsedBlock::Code { lang, source } => {
+                        assert_eq!(lang, "rust");
+                        assert!(source.contains("let x = 1;"));
+                    }
+                    other => panic!("expected code, got {other:?}"),
+                }
+            }
+            other => panic!("expected list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn table_inside_list_item_does_not_escape() {
+        // Issue #5.
+        let blocks = parse("- item\n\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n");
+        assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn list_inside_blockquote_stays_single_block() {
+        let blocks = parse("> quote\n>\n> - a\n> - b\n");
+        assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn image_becomes_clickable_placeholder_run() {
+        // Issue #7: alt captured, url attached, nothing leaks as bare text.
+        let mut ctx = ParseContext::new();
+        ctx.handle(Event::Start(Tag::Paragraph));
+        ctx.handle(Event::Start(Tag::Image {
+            link_type: pulldown_cmark::LinkType::Inline,
+            dest_url: "https://x.test/i.png".into(),
+            title: "".into(),
+            id: "".into(),
+        }));
+        ctx.handle(Event::Text("diagram".into()));
+        ctx.handle(Event::End(TagEnd::Image));
+        assert!(ctx.image_stack.is_empty());
+        assert_eq!(ctx.inlines.len(), 1);
+        let run = &ctx.inlines[0];
+        assert_eq!(run.styles, vec![InlineStyle::Image]);
+        assert_eq!(run.url.as_deref(), Some("https://x.test/i.png"));
+        assert!(run.text.contains("diagram"));
+        ctx.handle(Event::End(TagEnd::Paragraph));
+    }
+
+    #[test]
+    fn br_html_becomes_hard_break() {
+        // Issue #8.
+        let mut ctx = ParseContext::new();
+        ctx.handle(Event::Start(Tag::Paragraph));
+        ctx.handle(Event::Text("a".into()));
+        ctx.handle(Event::InlineHtml("<br/>".into()));
+        ctx.handle(Event::Text("b".into()));
+        assert_eq!(ctx.inlines.len(), 1);
+        assert_eq!(ctx.inlines[0].text, "a\nb");
+    }
+
+    #[test]
+    fn link_runs_carry_url_and_plain_text_does_not() {
+        let mut ctx = ParseContext::new();
+        ctx.handle(Event::Start(Tag::Paragraph));
+        ctx.handle(Event::Text("see ".into()));
+        ctx.handle(Event::Start(Tag::Link {
+            link_type: pulldown_cmark::LinkType::Inline,
+            dest_url: "https://x.test".into(),
+            title: "".into(),
+            id: "".into(),
+        }));
+        ctx.handle(Event::Text("docs".into()));
+        ctx.handle(Event::End(TagEnd::Link));
+        assert_eq!(ctx.inlines.len(), 2);
+        assert_eq!(ctx.inlines[0].url, None);
+        assert_eq!(ctx.inlines[1].url.as_deref(), Some("https://x.test"));
+        assert!(ctx.inlines[1].styles.contains(&InlineStyle::Link));
+    }
+
+    #[test]
+    fn nested_emphasis_keeps_whole_stack() {
+        // Issue #13: `***x***` keeps both Emphasis and Strong.
+        let mut ctx = ParseContext::new();
+        ctx.handle(Event::Start(Tag::Paragraph));
+        ctx.handle(Event::Start(Tag::Emphasis));
+        ctx.handle(Event::Start(Tag::Strong));
+        ctx.handle(Event::Text("x".into()));
+        assert_eq!(
+            ctx.inlines[0].styles,
+            vec![InlineStyle::Emphasis, InlineStyle::Strong]
+        );
+    }
+
+    #[test]
+    fn table_cells_keep_inline_styles() {
+        // Issue #6: `**b**` in a cell parses to a Strong run, not raw text.
+        let mut ctx = ParseContext::new();
+        ctx.handle(Event::Start(Tag::Table(vec![Alignment::None])));
+        ctx.handle(Event::Start(Tag::TableHead));
+        ctx.handle(Event::Start(Tag::TableRow));
+        ctx.handle(Event::Start(Tag::TableCell));
+        ctx.handle(Event::Text("h".into()));
+        ctx.handle(Event::End(TagEnd::TableCell));
+        ctx.handle(Event::End(TagEnd::TableRow));
+        ctx.handle(Event::End(TagEnd::TableHead));
+        ctx.handle(Event::Start(Tag::TableRow));
+        ctx.handle(Event::Start(Tag::TableCell));
+        ctx.handle(Event::Start(Tag::Strong));
+        ctx.handle(Event::Text("b".into()));
+        ctx.handle(Event::End(TagEnd::Strong));
+        ctx.handle(Event::End(TagEnd::TableCell));
+        ctx.handle(Event::End(TagEnd::TableRow));
+        assert_eq!(ctx.table_rows.len(), 1);
+        let cell = &ctx.table_rows[0][0];
+        assert!(cell.iter().any(|r| r.styles.contains(&InlineStyle::Strong)));
+        assert!(cell.iter().all(|r| !r.text.contains("**")));
+        ctx.handle(Event::End(TagEnd::Table));
+        assert!(ctx.table_rows.is_empty());
+    }
+
+    #[test]
+    fn line_break_html_detection() {
+        assert!(is_line_break_html("<br>"));
+        assert!(is_line_break_html("<BR/>"));
+        assert!(is_line_break_html("  <br />"));
+        assert!(!is_line_break_html("<b>"));
+        assert!(!is_line_break_html("<blockquote>"));
+        assert!(!is_line_break_html("br"));
+    }
+
+    #[test]
+    fn strip_html_tags_drops_tags_keeps_text() {
+        assert_eq!(strip_html_tags("<div>hi</div>").trim(), "hi");
+        assert_eq!(strip_html_tags("<br/>"), "");
+    }
+
+    #[test]
+    fn browsable_url_gate() {
+        assert!(is_browsable_url("https://x.test/a"));
+        assert!(is_browsable_url("http://x.test"));
+        assert!(!is_browsable_url("javascript:alert(1)"));
+        assert!(!is_browsable_url("ftp://x.test"));
+        assert!(!is_browsable_url(""));
+    }
+
+    #[test]
+    fn push_run_merges_identical_neighbors() {
+        let mut runs = Vec::new();
+        push_run_into(&mut runs, vec![InlineStyle::Normal], None, "a");
+        push_run_into(&mut runs, vec![InlineStyle::Normal], None, "b");
+        push_run_into(&mut runs, vec![InlineStyle::Strong], None, "c");
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].text, "ab");
+    }
+
+    #[test]
+    fn split_runs_preserves_styles_and_urls() {
+        let runs = vec![InlineRun {
+            styles: vec![InlineStyle::Strong, InlineStyle::Link],
+            text: "a\nb".into(),
+            url: Some("https://x.test".into()),
+        }];
+        let lines = split_runs_on_newlines(runs);
+        assert_eq!(lines.len(), 2);
+        for line in &lines {
+            assert_eq!(line[0].styles, vec![InlineStyle::Strong, InlineStyle::Link]);
+            assert_eq!(line[0].url.as_deref(), Some("https://x.test"));
+        }
+    }
+
+    #[test]
+    fn trim_cell_runs_trims_edges_only() {
+        let mut cell = vec![
+            InlineRun {
+                styles: vec![InlineStyle::Normal],
+                text: "  ".into(),
+                url: None,
+            },
+            InlineRun {
+                styles: vec![InlineStyle::Normal],
+                text: "x".into(),
+                url: None,
+            },
+            InlineRun {
+                styles: vec![InlineStyle::Normal],
+                text: "  ".into(),
+                url: None,
+            },
+        ];
+        trim_cell_runs(&mut cell);
+        assert_eq!(cell.len(), 1);
+        assert_eq!(cell[0].text, "x");
+    }
+
+    #[test]
+    fn composite_document_yields_exact_top_blocks() {
+        // Heading + paragraph + nested list + code + table + quote = 6.
+        // Any escape/duplication across structural paths changes the count.
+        let blocks = parse(
+            "# Title\n\nIntro para.\n\n- one\n- two\n  - nested\n\n```rust\nlet x = 1;\n```\n\n| h1 | h2 |\n|---|---|\n| a | b |\n\n> quoted\n",
+        );
+        assert_eq!(blocks.len(), 6);
+        assert!(is_heading(&blocks[0]));
+    }
+
+    #[test]
+    fn image_inside_table_cell_stays_in_cell() {
+        let mut ctx = ParseContext::new();
+        ctx.handle(Event::Start(Tag::Table(vec![Alignment::None])));
+        ctx.handle(Event::Start(Tag::TableRow));
+        ctx.handle(Event::Start(Tag::TableCell));
+        ctx.handle(Event::Start(Tag::Image {
+            link_type: pulldown_cmark::LinkType::Inline,
+            dest_url: "https://x.test/i.png".into(),
+            title: "".into(),
+            id: "".into(),
+        }));
+        ctx.handle(Event::Text("pic".into()));
+        ctx.handle(Event::End(TagEnd::Image));
+        ctx.handle(Event::End(TagEnd::TableCell));
+        assert!(ctx.inlines.is_empty());
+        let cell = &ctx.table_row[0];
+        assert!(cell.iter().any(|r| r.styles == vec![InlineStyle::Image]));
+    }
+
+    #[test]
+    fn build_runs_maps_styles_to_fonts_and_links() {
+        use crate::selectable_text::{build_runs, SelectableStyle};
+        use gpui::{FontWeight, SharedString, TextAlign};
+        let theme = test_theme();
+        let style = SelectableStyle {
+            size: theme.typography.text_xs,
+            line_height: crate::theme::leading_relaxed(&theme),
+            color: theme.markdown.text,
+            weight: FontWeight::NORMAL,
+            italic: false,
+            family: SharedString::from("ui"),
+            align: TextAlign::Left,
+        };
+        let inline = vec![
+            InlineRun {
+                styles: vec![InlineStyle::Strong, InlineStyle::Link],
+                text: "docs".into(),
+                url: Some("https://x.test".into()),
+            },
+            InlineRun {
+                styles: vec![InlineStyle::Code],
+                text: "x".into(),
+                url: None,
+            },
+        ];
+        let (text, runs) = build_runs(&inline, &theme, &style);
+        assert_eq!(text, "docsx");
+        assert_eq!(runs[0].font.weight, FontWeight::SEMIBOLD);
+        assert!(runs[0].underline);
+        assert_eq!(runs[0].link.as_deref(), Some("https://x.test"));
+        assert!(runs[1].background.is_some());
+        assert!(!runs[1].underline);
+    }
 }

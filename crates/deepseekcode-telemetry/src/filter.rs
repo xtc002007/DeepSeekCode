@@ -14,15 +14,15 @@ pub fn build_filter_string(config: &LoggingConfig) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| config.level.clone());
 
+    // P1-13: real targets use `::` (`deepseekcode::app`), not crate
+    // underscores. Emit both the top-level prefix and the actual module
+    // targets so per-module tuning works.
     let mut parts = vec![
         format!("deepseekcode={level}"),
-        format!("deepseekcode_core={level}"),
-        format!("deepseekcode_server={level}"),
-        format!("deepseekcode_llm={level}"),
-        format!("deepseekcode_storage={level}"),
-        format!("deepseekcode_sdk={level}"),
-        format!("deepseekcode_desktop={level}"),
-        format!("deepseekcode_telemetry={level}"),
+        format!("deepseekcode::app={level}"),
+        format!("deepseekcode::session={level}"),
+        format!("deepseekcode::tool={level}"),
+        format!("deepseekcode::audit={level}"),
     ];
 
     for (module, module_level) in &config.modules {

@@ -165,7 +165,7 @@ impl SidebarView {
             .child(
                 div()
                     .px_3()
-                    .py_1p5()
+                    .h(px(40.))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -178,7 +178,7 @@ impl SidebarView {
                             .line_height(crate::theme::leading_xs(&theme))
                             .font_weight(FontWeight::BOLD)
                             .text_color(theme.text_secondary)
-                            .child("PROJECTS"),
+                            .child("Projects"),
                     )
                     .child(
                         icon_button_shell(

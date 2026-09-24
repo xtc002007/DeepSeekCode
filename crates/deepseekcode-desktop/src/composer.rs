@@ -1,6 +1,5 @@
 use crate::context_usage::ContextUsageState;
 use crate::theme::ThemeTokens;
-use crate::ui::badge::badge_shell;
 use crate::ui::button::{button_shell, icon_button_shell, ButtonSize, ButtonVariant};
 use crate::ui::dropdown::DropdownOption;
 use crate::ui::icon::{render_icon_rgba, IconName};
@@ -1205,6 +1204,7 @@ impl ComposerView {
                                             }),
                                         ),
                                     )
+                                    .child(agent_picker_pill(cx, agent_label, agent_open, &theme))
                                     .child(model_picker_pill(cx, model_label, model_open, &theme)),
                             )
                             .child(
@@ -1238,12 +1238,9 @@ impl ComposerView {
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
+                    .justify_end()
                     .gap(px(6.))
                     .flex_wrap()
-                    .child(div().flex().items_center().gap(px(6.)).flex_wrap().child(
-                        badge_dropdown(cx, "agent", agent_label, agent_open, &theme, IconName::Bot),
-                    ))
                     .children(if has_session {
                         vec![div()
                             .relative()
@@ -1326,6 +1323,52 @@ impl ComposerView {
     }
 }
 
+/// Agent pill (`build` / `plan` / `general`) — same density as the model pill.
+fn agent_picker_pill(
+    cx: &mut Context<crate::workspace::WorkspaceView>,
+    label: &str,
+    open: bool,
+    theme: &ThemeTokens,
+) -> impl IntoElement {
+    div()
+        .id("composer-agent-pill")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.))
+        .px_2()
+        .py_0p5()
+        .rounded_md()
+        .text_xs()
+        .line_height(crate::theme::leading_xs(theme))
+        .text_color(theme.text_secondary)
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.bg_hover))
+        .when(open, |s| s.bg(theme.bg_active))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                this.toggle_composer_dropdown("agent", event.position, cx);
+            }),
+        )
+        .child(render_icon_rgba(IconName::Bot, px(12.), theme.text_muted))
+        .child(
+            div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(label.to_string()),
+        )
+        .child(render_icon_rgba(
+            if open {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronUp
+            },
+            px(12.),
+            theme.text_muted,
+        ))
+}
+
 /// Screenshot-style model pill: `<model label> ^`, opens the model dropdown.
 fn model_picker_pill(
     cx: &mut Context<crate::workspace::WorkspaceView>,
@@ -1342,7 +1385,8 @@ fn model_picker_pill(
         .px_2()
         .py_0p5()
         .rounded_md()
-        .text_sm()
+        .text_xs()
+        .line_height(crate::theme::leading_xs(theme))
         .text_color(theme.text_secondary)
         .cursor_pointer()
         .hover(|s| s.bg(theme.bg_hover))
@@ -1369,29 +1413,6 @@ fn model_picker_pill(
             px(12.),
             theme.text_muted,
         ))
-}
-
-fn badge_dropdown(
-    cx: &mut Context<crate::workspace::WorkspaceView>,
-    kind: &'static str,
-    label: &str,
-    open: bool,
-    theme: &ThemeTokens,
-    icon: IconName,
-) -> impl IntoElement {
-    badge_shell(
-        ElementId::Name(SharedString::from(format!("composer-{kind}"))),
-        label.to_string(),
-        theme,
-        Some(icon),
-        open,
-        true,
-    )
-    .on_mouse_down(MouseButton::Left, {
-        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-            this.toggle_composer_dropdown(kind, event.position, cx);
-        })
-    })
 }
 
 pub fn agent_dropdown_options() -> Vec<DropdownOption> {
@@ -1435,6 +1456,7 @@ pub fn composer_dropdown_selected_id(
 }
 
 pub fn bind_prompt_keys(cx: &mut App) {
+    use crate::selectable_text::{CopyTimelineSelection, TIMELINE_TEXT_CONTEXT};
     cx.bind_keys([
         KeyBinding::new("backspace", PromptBackspace, Some("PromptInput")),
         KeyBinding::new("delete", PromptDelete, Some("PromptInput")),
@@ -1453,5 +1475,6 @@ pub fn bind_prompt_keys(cx: &mut App) {
         KeyBinding::new("enter", PromptSubmit, Some("PromptInput")),
         KeyBinding::new("enter", SessionTitleSave, Some("SessionTitleInput")),
         KeyBinding::new("escape", SessionTitleCancel, Some("SessionTitleInput")),
+        KeyBinding::new("ctrl-c", CopyTimelineSelection, Some(TIMELINE_TEXT_CONTEXT)),
     ]);
 }

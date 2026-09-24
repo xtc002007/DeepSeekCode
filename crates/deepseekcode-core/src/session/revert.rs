@@ -197,19 +197,42 @@ impl RevertManager {
             .delete_pending_inputs_after_seq_tx(&mut tx, session_id, boundary_seq)
             .await?;
 
-        sqlx::query(
-            r#"DELETE FROM events
-               WHERE session_id = ?
-                 AND created_at > (
-                     SELECT created_at FROM messages WHERE session_id = ? AND seq = ?
-                 )"#,
+        // Delete events strictly by seq: prefer the Prompted event carrying
+        // this message_id (pure seq, no wall-clock). Fallback to created_at
+        // mapping only when the Prompted marker is absent (legacy histories).
+        let prompted_seq: Option<i64> = sqlx::query_scalar(
+            r#"SELECT seq FROM events WHERE session_id = ? AND kind = 'prompted' AND payload LIKE ? ORDER BY seq DESC LIMIT 1"#,
         )
         .bind(session_id.to_string())
-        .bind(session_id.to_string())
-        .bind(boundary_seq)
-        .execute(&mut *tx)
+        .bind(format!("%{}%", state.staged_message_id))
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        let cutoff = if let Some(s) = prompted_seq {
+            s
+        } else {
+            sqlx::query_scalar::<_, Option<i64>>(
+                r#"SELECT COALESCE(MAX(seq), 0) FROM events
+                   WHERE session_id = ?
+                     AND created_at <= (
+                         SELECT created_at FROM messages WHERE session_id = ? AND seq = ?
+                     )"#,
+            )
+            .bind(session_id.to_string())
+            .bind(session_id.to_string())
+            .bind(boundary_seq)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?
+            .flatten()
+            .unwrap_or(0)
+        };
+        sqlx::query(r#"DELETE FROM events WHERE session_id = ? AND seq > ?"#)
+            .bind(session_id.to_string())
+            .bind(cutoff)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
 
         // Drop the context epoch entirely: keeping the old baseline would keep
         // feeding summaries of the now-deleted messages to the model. The next
@@ -250,18 +273,30 @@ impl RevertManager {
         session_id: SessionId,
         boundary_seq: i64,
     ) -> Result<bool> {
-        let rows: Vec<String> = sqlx::query_scalar(
-            r#"SELECT payload FROM events
+        // Resolve boundary event seq first, then filter by seq (not wall-clock).
+        let cutoff: Option<i64> = sqlx::query_scalar(
+            r#"SELECT COALESCE(MAX(seq), 0) FROM events
                WHERE session_id = ?
-                 AND kind = 'tool.completed'
-                 AND created_at > (
+                 AND created_at <= (
                      SELECT created_at FROM messages WHERE session_id = ? AND seq = ?
-                 )
-               ORDER BY seq ASC"#,
+                 )"#,
         )
         .bind(session_id.to_string())
         .bind(session_id.to_string())
         .bind(boundary_seq)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        let cutoff = cutoff.unwrap_or(0);
+        let rows: Vec<String> = sqlx::query_scalar(
+            r#"SELECT payload FROM events
+               WHERE session_id = ?
+                 AND kind = 'tool.completed'
+                 AND seq > ?
+               ORDER BY seq ASC"#,
+        )
+        .bind(session_id.to_string())
+        .bind(cutoff)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;

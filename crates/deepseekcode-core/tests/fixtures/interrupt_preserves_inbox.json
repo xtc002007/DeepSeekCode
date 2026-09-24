@@ -13,6 +13,6 @@
   "then": {
     "inbox_count": 1,
     "history_count": 0,
-    "events": ["session.interrupted"]
+    "events": []
   }
 }

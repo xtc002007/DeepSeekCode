@@ -15,3 +15,11 @@ pub enum LlmEvent {
     Completed,
     Error(String),
 }
+
+impl LlmEvent {
+    /// Sanitized display for SSE/logs: caps length and redacts key-like
+    /// fragments so provider error text never leaks credentials (P0-5).
+    pub fn sanitized_error(raw: &str) -> String {
+        crate::axis::framing::sanitize_llm_error(raw)
+    }
+}

@@ -150,22 +150,53 @@ fn load_instruction_glob(project_dir: &str, pattern: &str, texts: &mut Vec<Strin
     }
 }
 
-/// Sync blocking GET that never parks the async executor. Source loaders run
-/// inside async runner tasks; a 5s remote hang on an executor thread would
-/// stall turns. Outside a multi-thread runtime (tests/CLI bootstrap) it runs
-/// inline. Shared by instruction URLs and the skills index so both stay
-/// bounded the same way.
-pub(crate) fn blocking_http_get(
-    client: &reqwest::blocking::Client,
-    url: &str,
-) -> Result<reqwest::blocking::Response, reqwest::Error> {
-    let in_multi_thread = tokio::runtime::Handle::try_current()
-        .map(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
-        .unwrap_or(false);
-    if in_multi_thread {
-        tokio::task::block_in_place(|| client.get(url).send())
-    } else {
-        client.get(url).send()
+/// Async GET with 5s timeout that never parks the executor. Source loaders
+/// run inside async runner tasks; P1-9 removed the `blocking` reqwest
+/// feature (deadlock risk), so all fetches go through the async client via
+/// `block_in_place` when called from sync contexts.
+pub(crate) fn blocking_http_get(url: &str) -> Result<String, String> {
+    let build_client = || {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(|e| e.to_string())
+    };
+    let rt_handle = tokio::runtime::Handle::try_current().ok();
+    match rt_handle {
+        Some(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| {
+                h.block_on(async {
+                    let client = build_client()?;
+                    let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
+                    if !resp.status().is_success() {
+                        return Err(format!("http {}", resp.status()));
+                    }
+                    resp.text().await.map_err(|e| e.to_string())
+                })
+            })
+        }
+        Some(h) => h.block_on(async {
+            let client = build_client()?;
+            let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
+            if !resp.status().is_success() {
+                return Err(format!("http {}", resp.status()));
+            }
+            resp.text().await.map_err(|e| e.to_string())
+        }),
+        None => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            rt.block_on(async {
+                let client = build_client()?;
+                let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
+                if !resp.status().is_success() {
+                    return Err(format!("http {}", resp.status()));
+                }
+                resp.text().await.map_err(|e| e.to_string())
+            })
+        }
     }
 }
 
@@ -173,11 +204,7 @@ fn load_instruction_url(url: &str, texts: &mut Vec<String>) {
     // Issue-8: 5s timeout + failure preserves old prefix. A hanging or
     // flapping URL must never block `drain` nor rewrite the system prefix
     // every turn (each rewrite = full DeepSeek miss).
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build();
-    let Ok(client) = client else { return };
-    let Ok(response) = blocking_http_get(&client, url) else {
+    let Ok(content) = blocking_http_get(url) else {
         tracing::warn!(
             target: deepseekcode_telemetry::APP,
             url = %url,
@@ -185,15 +212,11 @@ fn load_instruction_url(url: &str, texts: &mut Vec<String>) {
         );
         return;
     };
-    if response.status().is_success() {
-        if let Ok(content) = response.text() {
-            // Bound single remote doc so one huge wiki cannot blow the prefix.
-            const MAX_REMOTE_CHARS: usize = 8_000;
-            let bounded: String = content.chars().take(MAX_REMOTE_CHARS).collect();
-            if !bounded.is_empty() {
-                texts.push(bounded);
-            }
-        }
+    // Bound single remote doc so one huge wiki cannot blow the prefix.
+    const MAX_REMOTE_CHARS: usize = 8_000;
+    let bounded: String = content.chars().take(MAX_REMOTE_CHARS).collect();
+    if !bounded.is_empty() {
+        texts.push(bounded);
     }
 }
 

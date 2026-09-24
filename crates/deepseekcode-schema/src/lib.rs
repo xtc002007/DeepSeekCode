@@ -1,5 +1,6 @@
 pub mod activity;
 pub mod agent;
+pub mod api;
 pub mod event;
 pub mod message;
 pub mod permission;
@@ -13,6 +14,7 @@ pub mod tool;
 
 pub use activity::*;
 pub use agent::*;
+pub use api::*;
 pub use event::*;
 pub use message::*;
 pub use permission::*;

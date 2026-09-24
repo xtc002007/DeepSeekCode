@@ -26,7 +26,9 @@ impl LocalMcpClient {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // Piped (not null) so child errors are not silently lost; the
+            // handle is drained on Drop to avoid pipe-buffer deadlock.
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| DeepSeekCodeError::Other(format!("mcp spawn failed: {e}")))?;
 
@@ -103,6 +105,7 @@ impl LocalMcpClient {
     }
 
     fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        use std::time::{Duration, Instant};
         let id = self.next_id;
         self.next_id += 1;
         let request = serde_json::json!({
@@ -114,21 +117,57 @@ impl LocalMcpClient {
         writeln!(self.stdin, "{request}").map_err(DeepSeekCodeError::Io)?;
         self.stdin.flush().map_err(DeepSeekCodeError::Io)?;
 
-        for _ in 0..50 {
+        // Wall deadline + notification skipping: lines without matching `id`
+        // no longer consume a fixed 50-line budget, and EOF (child exit) is
+        // distinguished from timeout (P0-4). NOTE: `read_line` blocks; the
+        // deadline is enforced between lines and via child-exit detection.
+        // A fully silent server is additionally bounded by `connect` timeout
+        // (15s) and the drain watchdog.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut skipped_notifications = 0u32;
+        loop {
+            if Instant::now() > deadline {
+                return Err(DeepSeekCodeError::Other(format!(
+                    "mcp request timed out after 30s: {method}"
+                )));
+            }
             let mut line = String::new();
             let read = self
                 .stdout
                 .read_line(&mut line)
                 .map_err(DeepSeekCodeError::Io)?;
             if read == 0 {
-                break;
+                // EOF: child exited or closed stdout.
+                match self.child.try_wait() {
+                    Ok(Some(status)) => {
+                        return Err(DeepSeekCodeError::Other(format!(
+                            "mcp server exited ({status}) before responding: {method}"
+                        )))
+                    }
+                    _ => {
+                        return Err(DeepSeekCodeError::Other(format!(
+                            "mcp request EOF without response: {method}"
+                        )))
+                    }
+                }
             }
-            let line = line.trim();
-            if line.is_empty() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
                 continue;
             }
-            let value: Value =
-                serde_json::from_str(line).map_err(|e| DeepSeekCodeError::Other(e.to_string()))?;
+            let value: Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(_) => {
+                    // Non-JSON log line from the server: skip, do not count.
+                    skipped_notifications += 1;
+                    if skipped_notifications > 1000 {
+                        return Err(DeepSeekCodeError::Other(format!(
+                            "mcp server sent too many non-JSON lines: {method}"
+                        )));
+                    }
+                    continue;
+                }
+            };
             if value.get("id").and_then(|v| v.as_u64()) == Some(id) {
                 if let Some(error) = value.get("error") {
                     return Err(DeepSeekCodeError::Other(format!("mcp error: {error}")));
@@ -138,15 +177,20 @@ impl LocalMcpClient {
                     .cloned()
                     .ok_or_else(|| DeepSeekCodeError::Other("mcp response missing result".into()));
             }
+            // Notification / log without matching id: skip without budget.
+            skipped_notifications += 1;
+            if skipped_notifications > 1000 {
+                return Err(DeepSeekCodeError::Other(format!(
+                    "mcp server sent too many notifications without response: {method}"
+                )));
+            }
         }
-        Err(DeepSeekCodeError::Other(format!(
-            "mcp request timed out: {method}"
-        )))
     }
 }
 
 impl Drop for LocalMcpClient {
     fn drop(&mut self) {
         let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }

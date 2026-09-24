@@ -51,7 +51,10 @@ impl ProviderCatalog {
                     .insert(id.clone(), key.clone());
             }
             if let Some(url) = &cfg.base_url {
-                self.base_urls.write().await.insert(id.clone(), url.clone());
+                self.base_urls
+                    .write()
+                    .await
+                    .insert(id.clone(), normalize_base_url(id, url));
             } else if id == "deepseek" {
                 self.base_urls
                     .write()
@@ -92,11 +95,12 @@ impl ProviderCatalog {
             .write()
             .await
             .insert(provider_id.to_string(), api_key.clone());
-        if let Some(url) = base_url.filter(|u| !u.is_empty()) {
+        if let Some(url) = base_url.filter(|u| !u.trim().is_empty()) {
+            let normalized = normalize_base_url(provider_id, url.trim());
             self.base_urls
                 .write()
                 .await
-                .insert(provider_id.to_string(), url);
+                .insert(provider_id.to_string(), normalized);
         }
         if provider_id == "deepseek" {
             let mut urls = self.base_urls.write().await;
@@ -150,7 +154,7 @@ impl ProviderCatalog {
 
     pub async fn get_base_url(&self, provider_id: &str) -> Option<String> {
         if let Some(url) = self.base_urls.read().await.get(provider_id).cloned() {
-            return Some(url);
+            return Some(normalize_base_url(provider_id, &url));
         }
         match provider_id {
             "deepseek" => Some(deepseek_default_base_url()),
@@ -161,6 +165,14 @@ impl ProviderCatalog {
 
 fn deepseek_default_base_url() -> String {
     deepseekcode_llm::DEEPSEEK_DEFAULT_BASE_URL.to_string()
+}
+
+fn normalize_base_url(provider_id: &str, url: &str) -> String {
+    if provider_id == "deepseek" {
+        deepseekcode_llm::providers::deepseek::normalize_deepseek_base_url(url)
+    } else {
+        url.trim().trim_end_matches('/').to_string()
+    }
 }
 
 fn provider_entry(id: &str, name: &str, creds: &HashMap<String, String>) -> ProviderInfo {

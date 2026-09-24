@@ -94,7 +94,11 @@ impl EventProjector {
         session_id: SessionId,
         since_seq: i64,
     ) -> Result<Vec<TimelineEntry>> {
-        let events = store.tail(since_seq, 10_000).await?;
+        // Session-filtered tail avoids pulling the global log into memory
+        // (P0-4 OOM guard for multi-session DBs).
+        let events = store
+            .tail_filtered(since_seq.max(0), 5_000, Some(session_id))
+            .await?;
         Ok(events
             .into_iter()
             .filter(|e| e.session_id == Some(session_id))
@@ -158,12 +162,7 @@ impl EventProjector {
         store: &EventStore,
         session_id: SessionId,
     ) -> Result<Vec<EventEnvelope>> {
-        Ok(store
-            .tail(0, 100_000)
-            .await?
-            .into_iter()
-            .filter(|e| e.session_id == Some(session_id))
-            .collect())
+        store.tail_filtered(0, 20_000, Some(session_id)).await
     }
 
     fn prompted_message_ids(events: &[EventEnvelope]) -> std::collections::HashSet<MessageId> {

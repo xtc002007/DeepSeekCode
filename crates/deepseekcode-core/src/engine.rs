@@ -40,17 +40,28 @@ impl DeepSeekCodeEngine {
 
     /// Reload config from disk and re-materialize tools/skills/MCP for a location.
     pub async fn reload_catalog(&mut self, project_dir: &str) -> Result<()> {
-        if let Ok(path) = Utf8Path::new(project_dir).canonicalize_utf8() {
-            let cfg = load_effective_config(&path)?;
-            self.config = cfg.clone();
-            self.locations.update_config(cfg).await;
-        }
+        // Never silently keep dirty config: canonicalize failure is an error,
+        // not a skip (previously dirty config + materialization ran anyway).
+        let path = Utf8Path::new(project_dir)
+            .canonicalize_utf8()
+            .map_err(|e| {
+                deepseekcode_types::DeepSeekCodeError::Config(format!(
+                    "canonicalize {project_dir}: {e}"
+                ))
+            })?;
+        let cfg = load_effective_config(&path)?;
+        self.config = cfg.clone();
+        self.locations.update_config(cfg).await;
         self.reload_materialization(project_dir).await;
         Ok(())
     }
 
     pub async fn reload_materialization(&self, project_dir: &str) {
         self.locations.reload_materialization(project_dir).await;
+    }
+
+    pub async fn interrupt_all(&self) {
+        self.locations.interrupt_all().await;
     }
 
     pub fn skills(&self) -> Vec<SkillEntry> {

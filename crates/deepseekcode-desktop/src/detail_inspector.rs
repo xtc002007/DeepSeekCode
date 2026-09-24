@@ -72,7 +72,12 @@ impl DetailInspector {
                                     .bg(theme.bg_base)
                                     .max_h(px(200.))
                                     .overflow_hidden()
-                                    .child(render_markdown(preview, &theme)),
+                                    .child(render_markdown(
+                                        preview,
+                                        &theme,
+                                        d.title.as_deref().unwrap_or("detail"),
+                                        &cx.entity(),
+                                    )),
                             ),
                     );
                 } else if let Some(url) = &d.url {

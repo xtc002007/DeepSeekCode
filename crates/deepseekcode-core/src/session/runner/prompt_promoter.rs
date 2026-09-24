@@ -41,19 +41,16 @@ impl<'a> PromptPromoter<'a> {
             return Ok(false);
         }
 
+        // Idle safe boundary: promote ALL pending inputs in admission order
+        // (queue and steer both visible). Previously only one row per drain
+        // was promoted and queue starved steer, requiring multiple drains.
         let pending = self.sessions.pending_inputs(self.session_id).await?;
-        let next = pending
-            .iter()
-            .find(|p| !p.promoted && matches!(p.delivery, PromptDelivery::Queue))
-            .or_else(|| {
-                pending
-                    .iter()
-                    .find(|p| !p.promoted && matches!(p.delivery, PromptDelivery::Steer))
-            });
-        let Some(input) = next else {
-            return Ok(false);
-        };
-        self.promote_input(input.id, &input.prompt).await
+        let mut any = false;
+        for input in pending.iter().filter(|p| !p.promoted) {
+            self.promote_input(input.id, &input.prompt).await?;
+            any = true;
+        }
+        Ok(any)
     }
 
     pub async fn promote_steer_if_any(&self) -> Result<bool> {

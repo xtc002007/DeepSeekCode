@@ -78,9 +78,18 @@ fn base_defaults() -> PolicyRuleset {
 }
 
 fn plan_defaults() -> PolicyRuleset {
+    // Spec: block edit/write/bash/apply_patch OUTSIDE .deepseekcode/plan/**.
+    // apply_patch has an explicit scope (P0-8: previously only covered
+    // indirectly via tool_scope->edit, so custom configs addressing
+    // `apply_patch` directly diverged).
     vec![
         PolicyRule {
             scope: "edit".into(),
+            pattern: "*".into(),
+            action: PolicyAction::Block,
+        },
+        PolicyRule {
+            scope: "write".into(),
             pattern: "*".into(),
             action: PolicyAction::Block,
         },
@@ -90,7 +99,27 @@ fn plan_defaults() -> PolicyRuleset {
             action: PolicyAction::Block,
         },
         PolicyRule {
+            scope: "apply_patch".into(),
+            pattern: "*".into(),
+            action: PolicyAction::Block,
+        },
+        PolicyRule {
             scope: "edit".into(),
+            pattern: ".deepseekcode/plan/**".into(),
+            action: PolicyAction::Permit,
+        },
+        PolicyRule {
+            scope: "write".into(),
+            pattern: ".deepseekcode/plan/**".into(),
+            action: PolicyAction::Permit,
+        },
+        PolicyRule {
+            scope: "bash".into(),
+            pattern: ".deepseekcode/plan/**".into(),
+            action: PolicyAction::Permit,
+        },
+        PolicyRule {
+            scope: "apply_patch".into(),
             pattern: ".deepseekcode/plan/**".into(),
             action: PolicyAction::Permit,
         },

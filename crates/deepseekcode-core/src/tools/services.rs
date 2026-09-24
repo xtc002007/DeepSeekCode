@@ -14,8 +14,22 @@ tokio::task_local! {
     static TOOL_SESSION_ID: SessionId;
 }
 
-pub fn with_services<R>(services: ToolServices, f: impl FnOnce() -> R) -> R {
-    futures::executor::block_on(with_services_async(services, async { f() }))
+pub fn with_services<R: Send + 'static>(
+    services: ToolServices,
+    f: impl FnOnce() -> R + Send + 'static,
+) -> R {
+    // Avoid `block_on` on a current runtime (panic/deadlock on
+    // current-thread runtimes). If a runtime exists, run the scoped future
+    // on a dedicated OS thread; otherwise block inline (P0-4/P1-9).
+    if tokio::runtime::Handle::try_current().is_ok() {
+        std::thread::spawn(move || {
+            futures::executor::block_on(with_services_async(services, async { f() }))
+        })
+        .join()
+        .expect("tool services thread panicked")
+    } else {
+        futures::executor::block_on(with_services_async(services, async { f() }))
+    }
 }
 
 pub async fn with_services_async<F, R>(services: ToolServices, f: F) -> R
@@ -114,10 +128,10 @@ where
                 retryable: true,
             })?,
             _ = token.cancelled() => {
-                return Err(ToolFailure {
+                Err(ToolFailure {
                     message: "tool execution interrupted".into(),
                     retryable: false,
-                });
+                })?
             }
         }
     } else {
@@ -250,6 +264,102 @@ pub fn is_cancelled(cancel: Option<&Arc<CancelToken>>) -> bool {
     cancel.map(|token| token.is_cancelled()).unwrap_or(false)
 }
 
+struct NoopTaskSpawner;
+
+#[async_trait]
+impl TaskSpawner for NoopTaskSpawner {
+    async fn spawn_task(
+        &self,
+        _parent_session_id: SessionId,
+        _agent: &str,
+        _prompt: &str,
+    ) -> Result<SessionId> {
+        Err(deepseekcode_types::DeepSeekCodeError::Other(
+            "task spawner not available".into(),
+        ))
+    }
+}
+
+pub fn noop_task_spawner() -> Arc<dyn TaskSpawner> {
+    Arc::new(NoopTaskSpawner)
+}
+
+pub async fn emit_todo_updated(
+    services: &ToolServices,
+    session_id: SessionId,
+    todos: &[deepseekcode_schema::todo::TodoItem],
+) -> Result<()> {
+    if let Some(events) = &services.events {
+        events
+            .append(
+                EventKind::TodoUpdated,
+                Some(session_id),
+                serde_json::json!({ "todos": todos }),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+pub async fn wait_for_question_answer(
+    services: &ToolServices,
+    timeout: std::time::Duration,
+) -> Result<String> {
+    let Some(tx_mutex) = services.question_tx.as_ref() else {
+        return Err(deepseekcode_types::DeepSeekCodeError::ToolFailure(
+            "question channel not configured".into(),
+        ));
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    // Queue, don't overwrite: if a question is already pending, wait for its
+    // slot instead of dropping the previous responder (P0-4).
+    loop {
+        {
+            let mut guard = tx_mutex.lock().await;
+            if guard.is_none() {
+                *guard = Some(tx);
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(answer)) => Ok(answer),
+        Ok(Err(_)) => Err(deepseekcode_types::DeepSeekCodeError::ToolFailure(
+            "question cancelled".into(),
+        )),
+        Err(_) => Err(deepseekcode_types::DeepSeekCodeError::ToolFailure(
+            "question timed out".into(),
+        )),
+    }
+}
+
+pub async fn submit_question_answer(services: &ToolServices, answer: String) -> Result<()> {
+    let Some(tx_mutex) = services.question_tx.as_ref() else {
+        return Err(deepseekcode_types::DeepSeekCodeError::NotFound(
+            "no pending question".into(),
+        ));
+    };
+    submit_question_answer_channel(tx_mutex, answer).await
+}
+
+pub async fn submit_question_answer_channel(
+    tx_mutex: &Arc<tokio::sync::Mutex<Option<QuestionResponder>>>,
+    answer: String,
+) -> Result<()> {
+    // Async lock (P0-4): `try_lock` spuriously returned NotFound when the
+    // mutex was momentarily held; `blocking_lock` panics inside a runtime.
+    match tx_mutex.lock().await.take() {
+        Some(tx) => {
+            let _ = tx.send(answer);
+            Ok(())
+        }
+        None => Err(deepseekcode_types::DeepSeekCodeError::NotFound(
+            "no pending question".into(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod cancel_tests {
     use super::*;
@@ -301,87 +411,4 @@ mod cancel_tests {
             token.reset();
         }
     }
-}
-
-pub async fn emit_todo_updated(
-    services: &ToolServices,
-    session_id: SessionId,
-    todos: &[deepseekcode_schema::todo::TodoItem],
-) -> Result<()> {
-    if let Some(events) = &services.events {
-        events
-            .append(
-                EventKind::TodoUpdated,
-                Some(session_id),
-                serde_json::json!({ "todos": todos }),
-            )
-            .await?;
-    }
-    Ok(())
-}
-
-pub async fn wait_for_question_answer(
-    services: &ToolServices,
-    timeout: std::time::Duration,
-) -> Result<String> {
-    let Some(tx_mutex) = services.question_tx.as_ref() else {
-        return Err(deepseekcode_types::DeepSeekCodeError::ToolFailure(
-            "question channel not configured".into(),
-        ));
-    };
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    *tx_mutex.lock().await = Some(tx);
-    match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(answer)) => Ok(answer),
-        Ok(Err(_)) => Err(deepseekcode_types::DeepSeekCodeError::ToolFailure(
-            "question cancelled".into(),
-        )),
-        Err(_) => Err(deepseekcode_types::DeepSeekCodeError::ToolFailure(
-            "question timed out".into(),
-        )),
-    }
-}
-
-pub fn submit_question_answer(services: &ToolServices, answer: String) -> Result<()> {
-    let Some(tx_mutex) = services.question_tx.as_ref() else {
-        return Err(deepseekcode_types::DeepSeekCodeError::NotFound(
-            "no pending question".into(),
-        ));
-    };
-    submit_question_answer_channel(tx_mutex, answer)
-}
-
-pub fn submit_question_answer_channel(
-    tx_mutex: &Arc<tokio::sync::Mutex<Option<QuestionResponder>>>,
-    answer: String,
-) -> Result<()> {
-    if let Ok(mut guard) = tx_mutex.try_lock() {
-        if let Some(tx) = guard.take() {
-            let _ = tx.send(answer);
-            return Ok(());
-        }
-    }
-    Err(deepseekcode_types::DeepSeekCodeError::NotFound(
-        "no pending question".into(),
-    ))
-}
-
-struct NoopTaskSpawner;
-
-#[async_trait]
-impl TaskSpawner for NoopTaskSpawner {
-    async fn spawn_task(
-        &self,
-        _parent_session_id: SessionId,
-        _agent: &str,
-        _prompt: &str,
-    ) -> Result<SessionId> {
-        Err(deepseekcode_types::DeepSeekCodeError::Other(
-            "task spawner not available".into(),
-        ))
-    }
-}
-
-pub fn noop_task_spawner() -> Arc<dyn TaskSpawner> {
-    Arc::new(NoopTaskSpawner)
 }

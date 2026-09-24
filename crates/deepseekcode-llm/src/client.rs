@@ -12,24 +12,27 @@ pub struct LlmClient {
 
 impl LlmClient {
     pub fn new() -> Self {
+        // Proxy-aware shared client: respects env proxy + OS system proxy
+        // (requires reqwest `system-proxy` feature) so VPN ON/OFF both work.
+        // Transport-level VPN fallback (direct <-> proxy) happens per-request
+        // in `http_client::post_json_with_fallback`.
         Self {
-            http: Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(30))
-                // Bounds stalls between reads so a provider that stops sending
-                // data cannot hang a session forever (streaming is additionally
-                // guarded by the runner's idle watchdog).
-                .read_timeout(std::time::Duration::from_secs(120))
-                .build()
-                .unwrap_or_default(),
+            http: crate::http_client::build_auto_client(),
         }
     }
 
     pub async fn generate(
-        &mut self,
+        &self,
         request: &LlmRequest,
         api_key: Option<String>,
     ) -> Result<LlmResponse> {
-        match request.provider.as_str() {
+        // Validate early so unknown/empty providers are 400-class, not 500;
+        // timeouts: non-stream 300s per-request, streams 10-min total cap with
+        // runner idle watchdog (P0-5).
+        request
+            .validate()
+            .map_err(|e| DeepSeekCodeError::InvalidInput(format!("invalid llm request: {e}")))?;
+        match request.provider.trim().to_ascii_lowercase().as_str() {
             "openai" | "openai-compatible" => {
                 openai::generate(&self.http, request, api_key, request.base_url.as_deref()).await
             }
@@ -38,7 +41,7 @@ impl LlmClient {
             "deepseek" => {
                 deepseek::generate(&self.http, request, api_key, request.base_url.as_deref()).await
             }
-            other => Err(DeepSeekCodeError::Llm(format!(
+            other => Err(DeepSeekCodeError::InvalidInput(format!(
                 "unsupported provider: {other}"
             ))),
         }
@@ -58,7 +61,10 @@ impl LlmClient {
             tool_count = request.tools.len(),
             "llm stream start"
         );
-        let result = match request.provider.as_str() {
+        request
+            .validate()
+            .map_err(|e| DeepSeekCodeError::InvalidInput(format!("invalid llm request: {e}")))?;
+        let result = match request.provider.trim().to_ascii_lowercase().as_str() {
             "openai" | "openai-compatible" => {
                 openai::stream(&self.http, request, api_key, request.base_url.as_deref()).await
             }
@@ -67,7 +73,7 @@ impl LlmClient {
             "deepseek" => {
                 deepseek::stream(&self.http, request, api_key, request.base_url.as_deref()).await
             }
-            other => Err(DeepSeekCodeError::Llm(format!(
+            other => Err(DeepSeekCodeError::InvalidInput(format!(
                 "unsupported provider: {other}"
             ))),
         };

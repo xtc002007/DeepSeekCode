@@ -46,8 +46,11 @@ impl SessionTimelineView {
         &self,
         cx: &gpui::Context<crate::workspace::WorkspaceView>,
         highlighted_todo_leaf: Option<&str>,
+        selected_detail_key: Option<&str>,
         scroll_handle: &ScrollHandle,
         session_loading: bool,
+        task_active: bool,
+        text_focus: &gpui::FocusHandle,
     ) -> impl gpui::IntoElement {
         crate::activity_timeline::ActivityTimelineView::render(
             cx,
@@ -56,8 +59,11 @@ impl SessionTimelineView {
             &self.collapsed_groups,
             &self.expanded_leaves,
             highlighted_todo_leaf,
+            selected_detail_key,
             scroll_handle,
             session_loading,
+            task_active,
+            text_focus,
         )
     }
 }

@@ -22,15 +22,19 @@ impl Auth for ApiKeyAuth {
 }
 
 /// Stub for future AWS Bedrock SigV4 signing.
+/// Fail-closed: `apply` MUST NOT emit an unsigned request. It logs and
+/// returns the builder unusable by marking it; callers must use
+/// `apply_or_error`. To enforce this, `apply` panics in all builds so a
+/// silent unsigned request is impossible (P0-5). Use `apply_or_error`.
 pub struct SigV4Auth;
 
 impl Auth for SigV4Auth {
-    fn apply(&self, builder: RequestBuilder, _api_key: &str) -> RequestBuilder {
+    fn apply(&self, _builder: RequestBuilder, _api_key: &str) -> RequestBuilder {
         tracing::error!(
             target: deepseekcode_telemetry::LLM,
             "SigV4 authentication is not supported in this build"
         );
-        builder
+        panic!("SigV4Auth::apply must not be used; use apply_or_error (fail-closed)");
     }
 }
 
@@ -48,16 +52,16 @@ impl SigV4Auth {
     }
 }
 
-/// Stub for future OAuth bearer refresh flows.
+/// Stub for future OAuth bearer refresh flows (fail-closed, see above).
 pub struct OAuthAuth;
 
 impl Auth for OAuthAuth {
-    fn apply(&self, builder: RequestBuilder, _token: &str) -> RequestBuilder {
+    fn apply(&self, _builder: RequestBuilder, _token: &str) -> RequestBuilder {
         tracing::error!(
             target: deepseekcode_telemetry::LLM,
             "OAuth authentication is not supported in this build"
         );
-        builder
+        panic!("OAuthAuth::apply must not be used; use apply_or_error (fail-closed)");
     }
 }
 

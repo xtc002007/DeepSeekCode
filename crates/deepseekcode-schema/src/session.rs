@@ -34,11 +34,13 @@ pub struct Session {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct SessionInput {
     #[schema(value_type = String)]
+    #[schemars(with = "String")]
     pub id: MessageId,
     #[schema(value_type = String)]
+    #[schemars(with = "String")]
     pub session_id: SessionId,
     pub prompt: String,
     pub delivery: PromptDelivery,

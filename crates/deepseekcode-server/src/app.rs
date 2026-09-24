@@ -47,12 +47,25 @@ pub async fn serve(
 }
 
 pub fn build_router(state: AppState) -> Router {
-    routes::router(state.clone())
+    // request_id must be the OUTERMOST layer so even 401s carry request-id.
+    // Axum `.layer()` wraps: last call = outermost. So auth first, then
+    // request_id last to sit outside auth.
+    // `/health` and `/api/v1/openapi.json` stay OUTSIDE auth so load
+    // balancers / probes work when a password is set.
+    let authed = routes::authed_router(state.clone()).layer(middleware::from_fn_with_state(
+        state.clone(),
+        basic_auth_middleware,
+    ));
+    let public = Router::new()
+        .route("/health", axum::routing::get(routes::health_root))
+        .route("/api/v1/health", axum::routing::get(routes::health))
+        .route(
+            "/api/v1/openapi.json",
+            axum::routing::get(routes::openapi_json),
+        );
+    public
+        .merge(authed)
         .layer(middleware::from_fn(request_id_middleware))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            basic_auth_middleware,
-        ))
         .layer(
             TraceLayer::new_for_http().make_span_with(|req: &Request<_>| {
                 tracing::span!(
@@ -68,6 +81,9 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 fn cors_layer() -> CorsLayer {
+    // Default deny: loopback only. `permissive()` (Any origin) would let any
+    // website call a localhost server with stored Basic credentials.
+    let loopback = ["http://127.0.0.1", "http://localhost", "http://[::1]"];
     match std::env::var("DEEPSEEKCODE_CORS_ORIGINS") {
         Ok(raw) if !raw.trim().is_empty() => {
             let origins: Vec<axum::http::HeaderValue> = raw
@@ -75,7 +91,15 @@ fn cors_layer() -> CorsLayer {
                 .filter_map(|part| part.trim().parse().ok())
                 .collect();
             if origins.is_empty() {
-                CorsLayer::permissive()
+                CorsLayer::new()
+                    .allow_origin(
+                        loopback
+                            .iter()
+                            .filter_map(|o| o.parse().ok())
+                            .collect::<Vec<axum::http::HeaderValue>>(),
+                    )
+                    .allow_methods(Any)
+                    .allow_headers(Any)
             } else {
                 CorsLayer::new()
                     .allow_origin(origins)
@@ -83,6 +107,14 @@ fn cors_layer() -> CorsLayer {
                     .allow_headers(Any)
             }
         }
-        _ => CorsLayer::permissive(),
+        _ => CorsLayer::new()
+            .allow_origin(
+                loopback
+                    .iter()
+                    .filter_map(|o| o.parse().ok())
+                    .collect::<Vec<axum::http::HeaderValue>>(),
+            )
+            .allow_methods(Any)
+            .allow_headers(Any),
     }
 }

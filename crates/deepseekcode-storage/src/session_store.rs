@@ -130,13 +130,31 @@ impl SessionStore {
     }
 
     pub async fn pending_inputs(&self, session_id: SessionId) -> Result<Vec<SessionInput>> {
-        let rows = sqlx::query_as::<_, InputRow>(
-            r#"SELECT id, session_id, prompt, delivery, admitted_at, promoted FROM session_input WHERE session_id = ? AND promoted = 0 ORDER BY admitted_at ASC"#,
+        // Order by pure admitted_seq when V11 exists, else legacy admitted_at.
+        let has_seq = sqlx::query_scalar::<_, i64>(
+            r#"SELECT COUNT(*) FROM pragma_table_info('session_input') WHERE name = 'admitted_seq'"#,
         )
-        .bind(session_id.to_string())
-        .fetch_all(&self.pool)
+        .fetch_one(&self.pool)
         .await
-        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        .map(|c: i64| c > 0)
+        .unwrap_or(false);
+        let rows = if has_seq {
+            sqlx::query_as::<_, InputRow>(
+                r#"SELECT id, session_id, prompt, delivery, admitted_at, promoted, admitted_seq FROM session_input WHERE session_id = ? AND promoted = 0 ORDER BY admitted_seq ASC, admitted_at ASC"#,
+            )
+            .bind(session_id.to_string())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?
+        } else {
+            sqlx::query_as::<_, InputRow>(
+                r#"SELECT id, session_id, prompt, delivery, admitted_at, promoted FROM session_input WHERE session_id = ? AND promoted = 0 ORDER BY admitted_at ASC"#,
+            )
+            .bind(session_id.to_string())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?
+        };
 
         rows.into_iter()
             .map(|r| r.into_input())
@@ -219,12 +237,74 @@ impl SessionStore {
 
     /// Delete unpromoted inbox entries admitted after the given message
     /// sequence, inside the caller's transaction (used by timeline revert).
+    /// Pure-seq cut via admitted_seq (V11); wall-clock only for pre-V11 DBs.
     pub async fn delete_pending_inputs_after_seq_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         session_id: SessionId,
         boundary_seq: i64,
     ) -> Result<()> {
+        // Resolve boundary message id → its inbox admitted_seq (the message
+        // was promoted from inbox, so ids match). Pure integer comparison.
+        let has_seq = sqlx::query_scalar::<_, i64>(
+            r#"SELECT COUNT(*) FROM pragma_table_info('session_input') WHERE name = 'admitted_seq'"#,
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map(|c: i64| c > 0)
+        .unwrap_or(false);
+        if has_seq {
+            let boundary_msg_id: Option<String> =
+                sqlx::query_scalar(r#"SELECT id FROM messages WHERE session_id = ? AND seq = ?"#)
+                    .bind(session_id.to_string())
+                    .bind(boundary_seq)
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+            if let Some(mid) = boundary_msg_id {
+                let cutoff: Option<i64> =
+                    sqlx::query_scalar(r#"SELECT admitted_seq FROM session_input WHERE id = ?"#)
+                        .bind(&mid)
+                        .fetch_optional(&mut **tx)
+                        .await
+                        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+                if let Some(c) = cutoff {
+                    sqlx::query(
+                        r#"DELETE FROM session_input WHERE session_id = ? AND promoted = 0 AND admitted_seq > ?"#,
+                    )
+                    .bind(session_id.to_string())
+                    .bind(c)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+                    return Ok(());
+                }
+            }
+            // Boundary message has no inbox row (e.g. assistant/tool msg):
+            // fall back to max admitted_seq among promoted rows up to boundary.
+            // Conservative: delete unpromoted with seq greater than max
+            // promoted seq for this session.
+            let max_promoted: Option<i64> = sqlx::query_scalar(
+                r#"SELECT MAX(admitted_seq) FROM session_input WHERE session_id = ? AND promoted = 1"#,
+            )
+            .bind(session_id.to_string())
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?
+            .flatten();
+            if let Some(m) = max_promoted {
+                sqlx::query(
+                    r#"DELETE FROM session_input WHERE session_id = ? AND promoted = 0 AND admitted_seq > ?"#,
+                )
+                .bind(session_id.to_string())
+                .bind(m)
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+                return Ok(());
+            }
+            return Ok(());
+        }
         sqlx::query(
             r#"DELETE FROM session_input
                WHERE session_id = ?
@@ -251,6 +331,101 @@ impl SessionStore {
                 .await
                 .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
         Ok(seq.unwrap_or(-1))
+    }
+
+    pub async fn latest_message_seq_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        session_id: SessionId,
+    ) -> Result<i64> {
+        let seq: Option<i64> =
+            sqlx::query_scalar(r#"SELECT MAX(seq) FROM messages WHERE session_id = ?"#)
+                .bind(session_id.to_string())
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        Ok(seq.unwrap_or(-1))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: SessionId,
+        location_id: LocationId,
+        working_directory: &str,
+        agent: AgentKind,
+        model_id: Option<&str>,
+        provider_id: Option<&str>,
+    ) -> Result<Session> {
+        let now = Utc::now();
+        sqlx::query(
+            r#"INSERT OR IGNORE INTO sessions (id, location_id, title, agent, model_id, provider_id, working_directory, created_at, updated_at)
+               VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(id.to_string())
+        .bind(location_id.to_string())
+        .bind(format!("{:?}", agent).to_lowercase())
+        .bind(model_id)
+        .bind(provider_id)
+        .bind(working_directory)
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        Ok(Session {
+            id,
+            location_id,
+            title: None,
+            agent,
+            model_id: model_id.map(String::from),
+            provider_id: provider_id.map(String::from),
+            parent_session_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    pub async fn copy_unpromoted_inbox_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        from_session: SessionId,
+        to_session: SessionId,
+    ) -> Result<()> {
+        // Preserve admitted_seq when V11 exists; fall back when running on
+        // pre-V11 DBs (column missing → plain copy).
+        let has_seq = sqlx::query_scalar::<_, i64>(
+            r#"SELECT COUNT(*) FROM pragma_table_info('session_input') WHERE name = 'admitted_seq'"#,
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map(|c: i64| c > 0)
+        .unwrap_or(false);
+        if has_seq {
+            sqlx::query(
+                r#"INSERT OR IGNORE INTO session_input (id, session_id, prompt, delivery, admitted_at, promoted, admitted_seq)
+                   SELECT id, ?, prompt, delivery, admitted_at, promoted, admitted_seq FROM session_input
+                   WHERE session_id = ? AND promoted = 0"#,
+            )
+            .bind(to_session.to_string())
+            .bind(from_session.to_string())
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        } else {
+            sqlx::query(
+                r#"INSERT OR IGNORE INTO session_input (id, session_id, prompt, delivery, admitted_at, promoted)
+                   SELECT id, ?, prompt, delivery, admitted_at, promoted FROM session_input
+                   WHERE session_id = ? AND promoted = 0"#,
+            )
+            .bind(to_session.to_string())
+            .bind(from_session.to_string())
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        }
+        Ok(())
     }
 
     pub async fn clear_pending_inputs(&self, session_id: SessionId) -> Result<()> {
@@ -298,58 +473,52 @@ impl SessionStore {
 
     pub async fn delete(&self, session_id: SessionId) -> Result<()> {
         let id = session_id.to_string();
-        sqlx::query(
+        // Collect on-disk sidecars BEFORE the tx so orphan files can be
+        // removed after commit (DB rollback keeps rows; files stay).
+        let snapshot_files: Vec<String> =
+            sqlx::query_scalar(r#"SELECT snapshot_path FROM file_snapshots WHERE session_id = ?"#)
+                .bind(&id)
+                .fetch_all(&self.pool)
+                .await
+                .unwrap_or_default();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        for sql in [
             r#"DELETE FROM message_parts WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?)"#,
-        )
-        .bind(&id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-        sqlx::query(r#"DELETE FROM messages WHERE session_id = ?"#)
-            .bind(&id)
-            .execute(&self.pool)
+            r#"DELETE FROM messages WHERE session_id = ?"#,
+            r#"DELETE FROM session_input WHERE session_id = ?"#,
+            r#"DELETE FROM context_epochs WHERE session_id = ?"#,
+            r#"DELETE FROM permissions WHERE session_id = ?"#,
+            r#"DELETE FROM policy_grants WHERE id IN (SELECT id FROM policy_grants WHERE 0)"#,
+            r#"DELETE FROM session_todos WHERE session_id = ?"#,
+            r#"DELETE FROM session_plan_ui WHERE session_id = ?"#,
+            r#"DELETE FROM session_plans WHERE session_id = ?"#,
+            r#"DELETE FROM file_snapshots WHERE session_id = ?"#,
+            r#"DELETE FROM session_revert WHERE session_id = ?"#,
+            r#"DELETE FROM tool_results WHERE session_id = ?"#,
+            r#"DELETE FROM events WHERE session_id = ?"#,
+            r#"DELETE FROM sessions WHERE id = ?"#,
+        ] {
+            // Best-effort for tables that may not exist on old DBs (e.g.
+            // session_plans/tool_results pre-migration): ignore "no such table".
+            match sqlx::query(sql).bind(&id).execute(&mut *tx).await {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("no such table") => {}
+                Err(e) => {
+                    tx.rollback().await.ok();
+                    return Err(DeepSeekCodeError::Storage(e.to_string()));
+                }
+            }
+        }
+        tx.commit()
             .await
             .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-        sqlx::query(r#"DELETE FROM session_input WHERE session_id = ?"#)
-            .bind(&id)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-        sqlx::query(r#"DELETE FROM context_epochs WHERE session_id = ?"#)
-            .bind(&id)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-        sqlx::query(r#"DELETE FROM permissions WHERE session_id = ?"#)
-            .bind(&id)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-        sqlx::query(r#"DELETE FROM session_todos WHERE session_id = ?"#)
-            .bind(&id)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-        sqlx::query(r#"DELETE FROM session_plan_ui WHERE session_id = ?"#)
-            .bind(&id)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-        sqlx::query(r#"DELETE FROM file_snapshots WHERE session_id = ?"#)
-            .bind(&id)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-        sqlx::query(r#"DELETE FROM session_revert WHERE session_id = ?"#)
-            .bind(&id)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-        sqlx::query(r#"DELETE FROM sessions WHERE id = ?"#)
-            .bind(&id)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        for f in snapshot_files {
+            let _ = std::fs::remove_file(&f);
+        }
         Ok(())
     }
 
@@ -368,6 +537,7 @@ impl SessionStore {
         .execute(&self.pool)
         .await
         .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        self.touch_session_by_message(message_id).await?;
         Ok(())
     }
 
@@ -391,6 +561,31 @@ impl SessionStore {
         .execute(&self.pool)
         .await
         .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        self.touch_session_by_message(message_id).await?;
+        Ok(())
+    }
+
+    async fn touch_session_by_message(&self, message_id: MessageId) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"UPDATE sessions SET updated_at = ? WHERE id = (SELECT session_id FROM messages WHERE id = ?)"#,
+        )
+        .bind(now)
+        .bind(message_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn touch_session(&self, session_id: SessionId) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(r#"UPDATE sessions SET updated_at = ? WHERE id = ?"#)
+            .bind(now)
+            .bind(session_id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
         Ok(())
     }
 
@@ -436,6 +631,7 @@ impl SessionStore {
         tx.commit()
             .await
             .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        self.touch_session(session_id).await?;
         Ok(())
     }
 
@@ -481,6 +677,7 @@ impl SessionStore {
         tx.commit()
             .await
             .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        self.touch_session(session_id).await?;
         Ok(())
     }
 
@@ -499,6 +696,7 @@ impl SessionStore {
         .execute(&self.pool)
         .await
         .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        self.touch_session_by_message(message_id).await?;
         Ok(())
     }
 
@@ -677,6 +875,7 @@ impl SessionStore {
         Ok(row)
     }
 
+    #[allow(dead_code)]
     async fn next_message_seq(&self, session_id: SessionId) -> Result<i64> {
         let id = session_id.to_string();
         let seq = sqlx::query_scalar::<_, i64>(
@@ -723,76 +922,108 @@ impl SessionStore {
         }))
     }
 
+    async fn insert_copied_message_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        to_session: SessionId,
+        msg: &deepseekcode_schema::message::Message,
+    ) -> Result<()> {
+        use deepseekcode_schema::message::PartKind;
+
+        let now = Utc::now();
+        let seq = self.next_message_seq_tx(tx, to_session).await?;
+        let new_id = MessageId::new();
+
+        sqlx::query(
+            r#"INSERT INTO messages (id, session_id, role, seq, created_at) VALUES (?, ?, ?, ?, ?)"#,
+        )
+        .bind(new_id.to_string())
+        .bind(to_session.to_string())
+        .bind(format!("{:?}", msg.role).to_lowercase())
+        .bind(seq)
+        .bind(now.to_rfc3339())
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+
+        for (idx, part) in msg.parts.iter().enumerate() {
+            match part.kind {
+                PartKind::Text | PartKind::Reasoning => {
+                    sqlx::query(
+                        r#"INSERT INTO message_parts (message_id, part_index, kind, text) VALUES (?, ?, ?, ?)"#,
+                    )
+                    .bind(new_id.to_string())
+                    .bind(idx as i64)
+                    .bind(format!("{:?}", part.kind).to_lowercase())
+                    .bind(part.text.as_deref())
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+                }
+                PartKind::ToolCall => {
+                    sqlx::query(
+                        r#"INSERT INTO message_parts (message_id, part_index, kind, tool_call_id, tool_name, tool_input)
+                           VALUES (?, ?, 'tool_call', ?, ?, ?)"#,
+                    )
+                    .bind(new_id.to_string())
+                    .bind(idx as i64)
+                    .bind(part.tool_call_id.as_deref())
+                    .bind(part.tool_name.as_deref())
+                    .bind(part.tool_input.as_ref().map(|v| v.to_string()))
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+                }
+                PartKind::ToolResult => {
+                    sqlx::query(
+                        r#"INSERT INTO message_parts (message_id, part_index, kind, tool_call_id, tool_name, tool_output)
+                           VALUES (?, ?, 'tool_result', ?, ?, ?)"#,
+                    )
+                    .bind(new_id.to_string())
+                    .bind(idx as i64)
+                    .bind(part.tool_call_id.as_deref())
+                    .bind(part.tool_name.as_deref())
+                    .bind(part.tool_output.as_ref().map(|v| v.to_string()))
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn copy_messages_with_parts_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        from_messages: &[deepseekcode_schema::message::Message],
+        to_session: SessionId,
+    ) -> Result<()> {
+        for msg in from_messages {
+            self.insert_copied_message_in_tx(tx, to_session, msg)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub async fn copy_messages_with_parts(
         &self,
         from_session: SessionId,
         to_session: SessionId,
     ) -> Result<()> {
-        use deepseekcode_schema::message::PartKind;
-
         let messages = self.list_messages(from_session).await?;
-        for msg in messages {
-            let now = Utc::now();
-            let seq = self.next_message_seq(to_session).await?;
-            let new_id = MessageId::new();
-
-            sqlx::query(
-                r#"INSERT INTO messages (id, session_id, role, seq, created_at) VALUES (?, ?, ?, ?, ?)"#,
-            )
-            .bind(new_id.to_string())
-            .bind(to_session.to_string())
-            .bind(format!("{:?}", msg.role).to_lowercase())
-            .bind(seq)
-            .bind(now.to_rfc3339())
-            .execute(&self.pool)
+        // Atomic: single transaction so concurrent forks/copies never interleave
+        // seqs and a mid-copy failure never leaves a half-copied session.
+        let mut tx = self
+            .pool
+            .begin()
             .await
             .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-
-            for (idx, part) in msg.parts.iter().enumerate() {
-                match part.kind {
-                    PartKind::Text | PartKind::Reasoning => {
-                        sqlx::query(
-                            r#"INSERT INTO message_parts (message_id, part_index, kind, text) VALUES (?, ?, ?, ?)"#,
-                        )
-                        .bind(new_id.to_string())
-                        .bind(idx as i64)
-                        .bind(format!("{:?}", part.kind).to_lowercase())
-                        .bind(part.text.as_deref())
-                        .execute(&self.pool)
-                        .await
-                        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-                    }
-                    PartKind::ToolCall => {
-                        sqlx::query(
-                            r#"INSERT INTO message_parts (message_id, part_index, kind, tool_call_id, tool_name, tool_input)
-                               VALUES (?, ?, 'tool_call', ?, ?, ?)"#,
-                        )
-                        .bind(new_id.to_string())
-                        .bind(idx as i64)
-                        .bind(part.tool_call_id.as_deref())
-                        .bind(part.tool_name.as_deref())
-                        .bind(part.tool_input.as_ref().map(|v| v.to_string()))
-                        .execute(&self.pool)
-                        .await
-                        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-                    }
-                    PartKind::ToolResult => {
-                        sqlx::query(
-                            r#"INSERT INTO message_parts (message_id, part_index, kind, tool_call_id, tool_name, tool_output)
-                               VALUES (?, ?, 'tool_result', ?, ?, ?)"#,
-                        )
-                        .bind(new_id.to_string())
-                        .bind(idx as i64)
-                        .bind(part.tool_call_id.as_deref())
-                        .bind(part.tool_name.as_deref())
-                        .bind(part.tool_output.as_ref().map(|v| v.to_string()))
-                        .execute(&self.pool)
-                        .await
-                        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-                    }
-                }
-            }
-        }
+        self.copy_messages_with_parts_in_tx(&mut tx, &messages, to_session)
+            .await?;
+        tx.commit()
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
         Ok(())
     }
 
@@ -803,16 +1034,57 @@ impl SessionStore {
         output_tokens: Option<i64>,
         reasoning_tokens: Option<i64>,
     ) -> Result<()> {
+        self.update_message_tokens_with_cache(
+            message_id,
+            input_tokens,
+            output_tokens,
+            reasoning_tokens,
+            None,
+        )
+        .await
+    }
+
+    pub async fn update_message_tokens_with_cache(
+        &self,
+        message_id: MessageId,
+        input_tokens: Option<i64>,
+        output_tokens: Option<i64>,
+        reasoning_tokens: Option<i64>,
+        cache_tokens: Option<i64>,
+    ) -> Result<()> {
         sqlx::query(
-            r#"UPDATE messages SET input_tokens = ?, output_tokens = ?, reasoning_tokens = ? WHERE id = ?"#,
+            r#"UPDATE messages SET input_tokens = ?, output_tokens = ?, reasoning_tokens = ?, cache_tokens = COALESCE(?, cache_tokens) WHERE id = ?"#,
         )
         .bind(input_tokens)
         .bind(output_tokens)
         .bind(reasoning_tokens)
+        .bind(cache_tokens)
         .bind(message_id.to_string())
         .execute(&self.pool)
         .await
         .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        self.touch_session_by_message(message_id).await?;
+        Ok(())
+    }
+
+    pub async fn copy_messages_until_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        from_messages: &[deepseekcode_schema::message::Message],
+        to_session: SessionId,
+        until_message_id: MessageId,
+    ) -> Result<()> {
+        let cutoff_seq = from_messages
+            .iter()
+            .find(|m| m.id == until_message_id)
+            .map(|m| m.seq)
+            .ok_or_else(|| {
+                DeepSeekCodeError::NotFound(format!("message {until_message_id} not in session"))
+            })?;
+        for msg in from_messages.iter().filter(|m| m.seq <= cutoff_seq) {
+            self.insert_copied_message_in_tx(tx, to_session, msg)
+                .await?;
+        }
         Ok(())
     }
 
@@ -822,79 +1094,17 @@ impl SessionStore {
         to_session: SessionId,
         until_message_id: MessageId,
     ) -> Result<()> {
-        use deepseekcode_schema::message::PartKind;
-
         let messages = self.list_messages(from_session).await?;
-        let cutoff_seq = messages
-            .iter()
-            .find(|m| m.id == until_message_id)
-            .map(|m| m.seq)
-            .ok_or_else(|| {
-                DeepSeekCodeError::NotFound(format!("message {until_message_id} not in session"))
-            })?;
-
-        for msg in messages.into_iter().filter(|m| m.seq <= cutoff_seq) {
-            let now = Utc::now();
-            let seq = self.next_message_seq(to_session).await?;
-            let new_id = MessageId::new();
-
-            sqlx::query(
-                r#"INSERT INTO messages (id, session_id, role, seq, created_at) VALUES (?, ?, ?, ?, ?)"#,
-            )
-            .bind(new_id.to_string())
-            .bind(to_session.to_string())
-            .bind(format!("{:?}", msg.role).to_lowercase())
-            .bind(seq)
-            .bind(now.to_rfc3339())
-            .execute(&self.pool)
+        let mut tx = self
+            .pool
+            .begin()
             .await
             .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-
-            for (idx, part) in msg.parts.iter().enumerate() {
-                match part.kind {
-                    PartKind::Text | PartKind::Reasoning => {
-                        sqlx::query(
-                            r#"INSERT INTO message_parts (message_id, part_index, kind, text) VALUES (?, ?, ?, ?)"#,
-                        )
-                        .bind(new_id.to_string())
-                        .bind(idx as i64)
-                        .bind(format!("{:?}", part.kind).to_lowercase())
-                        .bind(part.text.as_deref())
-                        .execute(&self.pool)
-                        .await
-                        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-                    }
-                    PartKind::ToolCall => {
-                        sqlx::query(
-                            r#"INSERT INTO message_parts (message_id, part_index, kind, tool_call_id, tool_name, tool_input)
-                               VALUES (?, ?, 'tool_call', ?, ?, ?)"#,
-                        )
-                        .bind(new_id.to_string())
-                        .bind(idx as i64)
-                        .bind(part.tool_call_id.as_deref())
-                        .bind(part.tool_name.as_deref())
-                        .bind(part.tool_input.as_ref().map(|v| v.to_string()))
-                        .execute(&self.pool)
-                        .await
-                        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-                    }
-                    PartKind::ToolResult => {
-                        sqlx::query(
-                            r#"INSERT INTO message_parts (message_id, part_index, kind, tool_call_id, tool_name, tool_output)
-                               VALUES (?, ?, 'tool_result', ?, ?, ?)"#,
-                        )
-                        .bind(new_id.to_string())
-                        .bind(idx as i64)
-                        .bind(part.tool_call_id.as_deref())
-                        .bind(part.tool_name.as_deref())
-                        .bind(part.tool_output.as_ref().map(|v| v.to_string()))
-                        .execute(&self.pool)
-                        .await
-                        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-                    }
-                }
-            }
-        }
+        self.copy_messages_until_in_tx(&mut tx, &messages, to_session, until_message_id)
+            .await?;
+        tx.commit()
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
         Ok(())
     }
 
@@ -1082,6 +1292,9 @@ struct InputRow {
     delivery: String,
     admitted_at: String,
     promoted: i64,
+    #[sqlx(default)]
+    #[allow(dead_code)]
+    admitted_seq: Option<i64>,
 }
 
 impl InputRow {

@@ -71,8 +71,14 @@ pub fn load_effective_config(project_dir: &Utf8Path) -> Result<DeepSeekCodeConfi
     for file in files {
         let content = fs::read_to_string(file.as_std_path())
             .map_err(|e| DeepSeekCodeError::Config(format!("read {}: {e}", file)))?;
-        let value: serde_json::Value = if file.extension() == Some("jsonc") {
-            parse_jsonc(&content)?
+        // Accept comments in both .json and .jsonc (case-insensitive):
+        // try JSONC first, fall back to strict JSON.
+        let ext = file.extension().unwrap_or_default().to_ascii_lowercase();
+        let value: serde_json::Value = if ext == "jsonc" || ext == "json" {
+            match parse_jsonc(&content) {
+                Ok(v) => v,
+                Err(_) => serde_json::from_str(&content)?,
+            }
         } else {
             serde_json::from_str(&content)?
         };
@@ -93,27 +99,59 @@ fn apply_policy_mode_override(config: &mut DeepSeekCodeConfig) {
     }
 }
 
-/// Apply legacy `permissions` allow/deny when no explicit `policy` entries exist.
+/// Merge legacy `permissions` allow/ask/deny into `policy` without dropping.
+/// Explicit `policy` entries always win: legacy rules are only inserted when
+/// the same scope+pattern is absent. This fixes both the old
+/// "policy non-empty => legacy silently dropped" and the service-side
+/// "legacy overwrites explicit policy" contradictions.
 fn finalize_policy(config: &mut DeepSeekCodeConfig) {
-    if config.policy.is_empty()
-        && (!config.permissions.allow.is_empty() || !config.permissions.deny.is_empty())
+    if config.permissions.allow.is_empty()
+        && config.permissions.ask.is_empty()
+        && config.permissions.deny.is_empty()
     {
-        for rule in crate::policy::ruleset_from_permissions(&config.permissions) {
-            insert_rule_into_policy(&mut config.policy, rule);
-        }
+        return;
+    }
+    for rule in crate::policy::ruleset_from_permissions(&config.permissions) {
+        insert_rule_into_policy_if_absent(&mut config.policy, rule);
     }
 }
 
 fn insert_rule_into_policy(policy: &mut PolicyConfig, rule: PolicyRule) {
+    insert_rule_into_policy_if_absent(policy, rule);
+}
+
+fn insert_rule_into_policy_if_absent(policy: &mut PolicyConfig, rule: PolicyRule) {
     if rule.pattern == "*" {
-        policy.insert(rule.scope, PolicyScopeConfig::Simple(rule.action));
+        // Never clobber an explicit Patterns map with a Simple catch-all.
+        match policy.get(&rule.scope) {
+            None => {
+                policy.insert(rule.scope, PolicyScopeConfig::Simple(rule.action));
+            }
+            Some(PolicyScopeConfig::Simple(_)) => {
+                // Explicit simple already wins; keep it.
+            }
+            Some(PolicyScopeConfig::Patterns(map)) => {
+                if !map.contains_key("*") {
+                    let mut map = map.clone();
+                    map.insert("*".to_string(), rule.action);
+                    policy.insert(rule.scope, PolicyScopeConfig::Patterns(map));
+                }
+            }
+        }
         return;
     }
     match policy.get_mut(&rule.scope) {
         Some(PolicyScopeConfig::Patterns(map)) => {
-            map.insert(rule.pattern, rule.action);
+            map.entry(rule.pattern).or_insert(rule.action);
         }
-        _ => {
+        Some(PolicyScopeConfig::Simple(existing)) => {
+            // Preserve explicit Simple as `*` entry, add legacy pattern alongside.
+            let mut map = HashMap::new();
+            map.insert("*".to_string(), *existing);
+            map.entry(rule.pattern).or_insert(rule.action);
+            policy.insert(rule.scope, PolicyScopeConfig::Patterns(map));
+        }
+        None => {
             let mut map = HashMap::new();
             map.insert(rule.pattern, rule.action);
             policy.insert(rule.scope, PolicyScopeConfig::Patterns(map));
@@ -141,11 +179,39 @@ fn merge_config(base: &mut DeepSeekCodeConfig, overlay: serde_json::Value) -> Re
     base.permissions
         .allow
         .extend(overlay_config.permissions.allow);
+    base.permissions.ask.extend(overlay_config.permissions.ask);
     base.permissions
         .deny
         .extend(overlay_config.permissions.deny);
     for (scope, cfg) in overlay_config.policy {
-        base.policy.insert(scope, cfg);
+        // Merge per-scope instead of whole-scope overwrite so a child file
+        // `Simple("*")` never wipes the parent's full pattern table.
+        match (base.policy.get_mut(&scope), cfg) {
+            (
+                Some(PolicyScopeConfig::Patterns(base_map)),
+                PolicyScopeConfig::Patterns(overlay_map),
+            ) => {
+                for (pat, act) in overlay_map {
+                    base_map.insert(pat, act);
+                }
+            }
+            (Some(PolicyScopeConfig::Patterns(base_map)), PolicyScopeConfig::Simple(act)) => {
+                base_map.insert("*".to_string(), act);
+            }
+            (Some(PolicyScopeConfig::Simple(_)), PolicyScopeConfig::Patterns(overlay_map)) => {
+                let mut map = HashMap::new();
+                if let Some(PolicyScopeConfig::Simple(prev)) = base.policy.get(&scope) {
+                    map.insert("*".to_string(), *prev);
+                }
+                for (pat, act) in overlay_map {
+                    map.insert(pat, act);
+                }
+                base.policy.insert(scope, PolicyScopeConfig::Patterns(map));
+            }
+            (_, overlay_cfg) => {
+                base.policy.insert(scope, overlay_cfg);
+            }
+        }
     }
     base.providers.extend(overlay_config.providers);
     if overlay_config.model.is_some() {

@@ -501,16 +501,20 @@ pub(crate) fn agent_allowed_tools(
         }
     }
     match agent {
+        // P0-8: plan mode hides write/edit/bash/apply_patch from the model
+        // (spec: "denies by default"). Writes under `.deepseekcode/plan/**`
+        // remain possible via policy permit, but the model is not offered
+        // the tools; `tool_result_page` (read scope) is included so large
+        // plan outputs remain pageable.
         "plan" => vec![
             "read".into(),
             "grep".into(),
             "glob".into(),
             "list".into(),
-            "write".into(),
-            "edit".into(),
             "skill".into(),
             "question".into(),
             "plan_complete".into(),
+            "tool_result_page".into(),
         ],
         _ => {
             let base = vec![
@@ -644,7 +648,7 @@ mod tests {
     fn definitions_are_sorted_for_prefix_cache() {
         let registry = ToolRegistry::new("/tmp".into(), &DeepSeekCodeConfig::default());
         let defs = registry.definitions();
-        let mut names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(

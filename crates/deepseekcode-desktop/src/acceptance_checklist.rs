@@ -30,6 +30,7 @@ mod tests {
             status: ActivityStatus::Completed,
             detail_ref: Some("r1".into()),
             text: None,
+            started_at: None,
         };
         let line = format_leaf_line(&leaf);
         assert!(line.contains("app/page.js"));
@@ -79,6 +80,7 @@ mod tests {
             status: ActivityStatus::Completed,
             detail_ref: Some("e1".into()),
             text: None,
+            started_at: None,
         };
         let line = format_leaf_line(&leaf);
         assert!(line.contains("+21"));
@@ -121,6 +123,7 @@ mod tests {
                 status: ActivityStatus::Completed,
                 detail_ref: Some("todo-9".into()),
                 text: None,
+                started_at: None,
             })],
         };
         assert_eq!(
@@ -161,6 +164,7 @@ mod tests {
                 status: ActivityStatus::Running,
                 detail_ref: Some("bash-1".into()),
                 text: None,
+                started_at: None,
             })],
         };
         assert!(patch_running_tool_leaf_preview(
@@ -280,6 +284,7 @@ mod tests {
                         status: ActivityStatus::Completed,
                         detail_ref: None,
                         text: None,
+                        started_at: None,
                     })],
                     collapsed_default: false,
                 },

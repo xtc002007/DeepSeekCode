@@ -269,6 +269,14 @@ impl<A: Send + Sync + serde::de::DeserializeOwned + 'static> ErasedSource for Co
 }
 
 fn baseline_differs_materially(generation: &Generation, previous: &Snapshot) -> bool {
+    // New-key-only by design (cache stability): content edits to existing
+    // sources ride the chronological `Updated` tail per Spec Rule 4
+    // ("changed sources combine into one chronological system message"),
+    // and the baseline is replaced at compaction per Rule 5. The opt-in
+    // `standing_replacement_on_edit` covers callers that prefer replacement.
+    // (A content-hash variant was considered and rejected: it turned every
+    // standing/instruction edit into a prefix miss, contradicting the
+    // tail-by-default contract locked by tests.)
     generation
         .snapshot
         .keys()

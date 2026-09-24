@@ -116,7 +116,7 @@ Settings → **Export Diagnostics** saves a zip and logs the `run_id`.
 ### CLI
 
 ```bash
-deepseekcode-cli diagnostics export --output ./support-bundle.zip
+deepseekcode diagnostics export --output ./support-bundle.zip
 ```
 
 ### HTTP API

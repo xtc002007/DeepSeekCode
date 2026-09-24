@@ -3,7 +3,13 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=../../scripts/git-hooks/pre-commit");
-    ensure_git_hooks();
+    // P1-10: opt-in only. Type crates must have zero build side effects:
+    // read-only checkouts, cross-compiles, and `cargo package` previously
+    // failed or mutated global git config on every `cargo build`.
+    // Set `DEEPSEEKCODE_INSTALL_HOOKS=1` to enable the one-time hooks setup.
+    if std::env::var("DEEPSEEKCODE_INSTALL_HOOKS").as_deref() == Ok("1") {
+        ensure_git_hooks();
+    }
 }
 
 fn ensure_git_hooks() {

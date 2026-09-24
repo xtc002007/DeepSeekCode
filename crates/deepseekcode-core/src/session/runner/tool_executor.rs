@@ -91,6 +91,11 @@ impl SessionRunner {
                     .await;
             }
             Err(e) => {
+                // SessionInterrupted (e.g. interrupt during policy prompt)
+                // must propagate, not masquerade as a policy denial (P0-4).
+                if matches!(e, DeepSeekCodeError::SessionInterrupted) {
+                    return Err(e);
+                }
                 return self
                     .complete_tool_policy_failure(
                         session,
@@ -123,10 +128,13 @@ impl SessionRunner {
             )
             .await?;
 
+        // Read-lock only across execute (`execute(&self)` needs no &mut);
+        // refresh paths take the write lock, so long tools no longer starve
+        // definitions/refresh.
         let result_id = MessageId::new();
         let envelope: ToolResultEnvelope = match self
             .tools
-            .lock()
+            .read()
             .await
             .execute(
                 &tool_call.name,
@@ -222,6 +230,17 @@ impl SessionRunner {
 
         let _ = crate::activity::emit_activity_updated(&self.events, self.session_id, 0).await;
 
+        // Success resets the loop-guard streak for this fingerprint so the
+        // same tool reuse across drains does not accumulate (P0-4).
+        {
+            let normalized = deepseekcode_types::normalize_tool_arguments(&tool_call.arguments);
+            let fp = tool_fingerprint(
+                &tool_call.name,
+                &serde_json::to_value(&normalized).unwrap_or(tool_call.arguments.clone()),
+            );
+            self.note_tool_success(&fp).await;
+        }
+
         tracing::info!(
             target: deepseekcode_telemetry::TOOL,
             session_id = %self.session_id,
@@ -300,28 +319,51 @@ impl SessionRunner {
     ) -> Result<Option<String>> {
         use deepseekcode_schema::policy::PolicyDecision;
 
-        let fp = tool_fingerprint(&tool_call.name, &tool_call.arguments);
+        // Normalize arguments (sorted keys, trimmed) so key-order/whitespace
+        // variants cannot bypass the fingerprint. Count per-fingerprint in a
+        // map so `A,A,B,A,A` still trips on the third consecutive A-run?
+        // Spec: same tool+args repeated 3x consecutively. Non-consecutive
+        // different tools reset only that fingerprint's streak, not all.
+        let normalized = deepseekcode_types::normalize_tool_arguments(&tool_call.arguments);
+        let fp = tool_fingerprint(
+            &tool_call.name,
+            &serde_json::to_value(&normalized).unwrap_or(tool_call.arguments.clone()),
+        );
+        // Turn-scoped counting: `loop_guard_turn` bumps on every user
+        // promotion (see `promote_at_safe_boundary`). Same fp in the same
+        // turn increments; a new turn or a different fp resets. Successful
+        // tool completion resets via `note_tool_success` below.
+        let turn = self
+            .loop_guard_turn
+            .load(std::sync::atomic::Ordering::SeqCst);
         let count = {
-            let mut guard = self.loop_guard.lock().await;
-            let count = match guard.as_ref() {
-                Some((prev, c)) if prev == &fp => c.saturating_add(1),
-                _ => 1,
-            };
-            *guard = Some((fp, count));
-            count
+            let mut guard = self.loop_guard_counts.lock().await;
+            let others: Vec<String> = guard
+                .keys()
+                .filter(|k| k.as_str() != fp.as_str())
+                .cloned()
+                .collect();
+            for k in others {
+                guard.remove(&k);
+            }
+            let entry = guard.entry(fp.clone()).or_insert((0u32, turn));
+            if entry.1 != turn {
+                *entry = (0, turn);
+            }
+            entry.0 = entry.0.saturating_add(1);
+            entry.0
         };
         if count < 3 {
             return Ok(None);
         }
 
+        // Evaluate with the concrete tool pattern so custom
+        // `loop_guard:{tool:action}` rules hit (previously always `*`).
+        let tool_pattern = format!("{}:*", tool_call.name);
+        let patterns = vec![tool_pattern.clone(), "*".to_string()];
         match self
             .permissions
-            .evaluate(
-                self.session_id,
-                &session.agent,
-                "loop_guard",
-                &["*".to_string()],
-            )
+            .evaluate(self.session_id, &session.agent, "loop_guard", &patterns)
             .await
         {
             PolicyDecision::Permit => Ok(None),
@@ -337,6 +379,7 @@ impl SessionRunner {
                     json!({
                         "tool": tool_call.name,
                         "count": count,
+                        "pattern": tool_pattern,
                     }),
                     &self.project_dir,
                 )

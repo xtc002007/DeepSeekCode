@@ -5,6 +5,9 @@ on:
     branches: [main, master]
   pull_request:
 
+env:
+  RUST_BACKTRACE: 1
+
 jobs:
   test-windows:
     runs-on: windows-latest
@@ -45,10 +48,6 @@ jobs:
         env:
           DEEPSEEKCODE_DISABLE_KEYRING: "1"
         run: ./scripts/check-cache-impact.ps1 -Mode cold
-      - name: Workspace tests
-        env:
-          DEEPSEEKCODE_DISABLE_KEYRING: "1"
-        run: cargo test --workspace --exclude deepseekcode-desktop
       - name: Bench smoke (startup)
         env:
           DEEPSEEKCODE_DISABLE_KEYRING: "1"
@@ -61,3 +60,22 @@ jobs:
         env:
           DEEPSEEKCODE_DISABLE_KEYRING: "1"
         run: cargo bench -p deepseekcode-sdk --bench memory -- --nocapture
+      - name: Bench smoke (file_tree)
+        env:
+          DEEPSEEKCODE_DISABLE_KEYRING: "1"
+        run: cargo bench -p deepseekcode-sdk --bench file_tree -- --nocapture
+  # P1-13: linux/macOS portability gate (rfd/keyring/portable-pty breakage).
+  test-unix:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check workspace (excl. desktop git-dep)
+        run: cargo check --workspace --exclude deepseekcode-desktop
+      - name: Test portable crates
+        env:
+          DEEPSEEKCODE_DISABLE_KEYRING: "1"
+        run: cargo test -p deepseekcode-types -p deepseekcode-schema -p deepseekcode-config -p deepseekcode-storage -p deepseekcode-llm -p deepseekcode-core

@@ -21,12 +21,17 @@ impl Tool for QuestionTool {
         json!({
             "type": "object",
             "properties": {
-                "question": { "type": "string" },
+                "question": { "type": "string", "description": "Question text shown to the user" },
                 "options": {
                     "type": "array",
-                    "items": { "type": "string" }
+                    "items": { "type": "string" },
+                    "description": "Predefined choices; Desktop appends an 'Other (custom input)' option with a text field when non-empty"
                 },
-                "allow_custom": { "type": "boolean" }
+                "allow_custom": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "When true (default), Desktop always offers a final custom-input path alongside options"
+                }
             },
             "required": ["question"]
         })

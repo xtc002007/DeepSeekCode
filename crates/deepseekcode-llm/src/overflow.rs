@@ -1,6 +1,26 @@
 /// Provider context-window overflow detection from LLM error responses.
+/// The bare `"exceeds"` substring is deliberately NOT a signal: it false-
+/// positives on `quota exceeds`, `rate limit exceeded`, etc. Require a
+/// context/token/length companion instead.
 pub fn is_context_overflow(message: &str) -> bool {
     let lower = message.to_lowercase();
+    // Fast reject: rate/quota/auth errors are never overflow, even when they
+    // mention context-adjacent words.
+    if lower.contains("rate limit")
+        || lower.contains("quota")
+        || lower.contains("insufficient_quota")
+        || lower.contains("billing")
+        || lower.contains("unauthorized")
+        || lower.contains("invalid api key")
+    {
+        // Unless it is explicitly a context-length rate shape.
+        if !(lower.contains("context") && lower.contains("exceed")) {
+            // `rate limit exceeded` without context => not overflow.
+            if lower.contains("rate") || lower.contains("quota") {
+                return false;
+            }
+        }
+    }
     const SUBSTRINGS: &[&str] = &[
         "prompt is too long",
         "input is too long for requested model",
@@ -20,8 +40,6 @@ pub fn is_context_overflow(message: &str) -> bool {
         "context length exceeded",
         "request entity too large",
         "context length is only",
-        "input length",
-        "exceeds",
         "prompt too long",
         "too large for model with",
         "model_context_window_exceeded",
@@ -29,13 +47,27 @@ pub fn is_context_overflow(message: &str) -> bool {
         "max tokens exceeded",
     ];
     if SUBSTRINGS.iter().any(|needle| lower.contains(needle)) {
-        // Require stronger signals for ambiguous substrings.
-        if lower.contains("rate limit") && !lower.contains("context") {
-            return false;
-        }
         return true;
     }
-    lower.contains("413") && lower.contains("context")
+    // Gated bare-exceeds: only when paired with context/token/length terms.
+    if lower.contains("exceed") {
+        let companion = lower.contains("context")
+            || lower.contains("token")
+            || lower.contains("maximum")
+            || lower.contains("max tokens")
+            || lower.contains("length")
+            || lower.contains("input length");
+        if companion {
+            return true;
+        }
+        return false;
+    }
+    // Bare 413 without context words is not enough (could be file upload).
+    (lower.contains("413") || lower.contains("payload too large"))
+        && (lower.contains("context")
+            || lower.contains("token")
+            || lower.contains("prompt")
+            || lower.contains("message"))
 }
 
 #[cfg(test)]

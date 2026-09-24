@@ -1,4 +1,9 @@
 use deepseekcode_schema::agent::AgentKind;
+use deepseekcode_schema::api::{
+    AddProjectDirectoryRequest, CreatePtyRequest, CreateWorktreeRequest, ForkRequest,
+    McpConnectResponse, MoveSessionRequest, OkResponse, PluginInfo, ProjectDirectoryEntry,
+    SessionExportResponse, SkillInfo, TimelineEntry, UpdateModelRequest, WorktreeEntry,
+};
 use deepseekcode_schema::event::{EventEnvelope, EventKind};
 use deepseekcode_schema::message::Message;
 use deepseekcode_schema::permission::{PermissionRequest, PermissionStatus};
@@ -33,6 +38,32 @@ fn main() {
         ("plan_meta", schema_for!(PlanMeta)),
         ("plan_completed_payload", schema_for!(PlanCompletedPayload)),
         ("session_plan_summary", schema_for!(SessionPlanSummary)),
+        ("ok_response", schema_for!(OkResponse)),
+        ("move_session_request", schema_for!(MoveSessionRequest)),
+        ("update_model_request", schema_for!(UpdateModelRequest)),
+        ("skill_info", schema_for!(SkillInfo)),
+        ("plugin_info", schema_for!(PluginInfo)),
+        (
+            "session_export_response",
+            schema_for!(SessionExportResponse),
+        ),
+        ("timeline_entry", schema_for!(TimelineEntry)),
+        ("worktree_entry", schema_for!(WorktreeEntry)),
+        (
+            "project_directory_entry",
+            schema_for!(ProjectDirectoryEntry),
+        ),
+        (
+            "add_project_directory_request",
+            schema_for!(AddProjectDirectoryRequest),
+        ),
+        (
+            "create_worktree_request",
+            schema_for!(CreateWorktreeRequest),
+        ),
+        ("mcp_connect_response", schema_for!(McpConnectResponse)),
+        ("fork_request", schema_for!(ForkRequest)),
+        ("create_pty_request", schema_for!(CreatePtyRequest)),
     ];
 
     let out_dir = std::env::args()

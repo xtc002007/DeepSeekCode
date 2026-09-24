@@ -5,7 +5,9 @@ use deepseekcode_types::{DeepSeekCodeError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
 
 use super::local_stdio::{LocalMcpClient, McpToolInfo};
 use super::remote::RemoteMcpClient;
@@ -20,6 +22,7 @@ pub struct McpServerStatus {
 }
 
 enum McpConnection {
+    // Sync mutex: only locked inside `spawn_blocking`, never across `.await`.
     Local(Arc<std::sync::Mutex<LocalMcpClient>>),
     Remote(Arc<RemoteMcpClient>),
 }
@@ -51,16 +54,35 @@ impl McpConnectionPool {
     }
 
     pub async fn connect_all(&self) {
+        // Concurrent with per-server timeout so one slow server cannot block
+        // location startup. tokio::Mutex is held only for map insert.
+        use futures::stream::{FuturesUnordered, StreamExt};
+        let mut pending = FuturesUnordered::new();
         for (name, cfg) in &self.servers {
             if cfg.enabled.unwrap_or(true) {
-                if let Err(e) = self.connect(name).await {
-                    tracing::warn!(
-                        target: deepseekcode_telemetry::APP,
-                        server = %name,
-                        error = %e,
-                        "mcp auto-connect failed"
-                    );
-                }
+                let name = name.clone();
+                // Note: `connect` borrows self; spawn via timeout wrapper.
+                pending.push(async move {
+                    let res =
+                        tokio::time::timeout(Duration::from_secs(15), self.connect(&name)).await;
+                    (name, res)
+                });
+            }
+        }
+        while let Some((name, res)) = pending.next().await {
+            match res {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => tracing::warn!(
+                    target: deepseekcode_telemetry::APP,
+                    server = %name,
+                    error = %e,
+                    "mcp auto-connect failed"
+                ),
+                Err(_) => tracing::warn!(
+                    target: deepseekcode_telemetry::APP,
+                    server = %name,
+                    "mcp auto-connect timed out after 15s"
+                ),
             }
         }
     }
@@ -106,14 +128,14 @@ impl McpConnectionPool {
         let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
         self.connected
             .lock()
-            .unwrap()
+            .await
             .insert(name.to_string(), ConnectedServer { tools, connection });
         self.emit_status(name, true, &tool_names).await;
         Ok(tool_names)
     }
 
     pub async fn disconnect(&self, name: &str) -> Result<()> {
-        if self.connected.lock().unwrap().remove(name).is_none() {
+        if self.connected.lock().await.remove(name).is_none() {
             return Err(DeepSeekCodeError::NotFound(format!(
                 "mcp server {name} not connected"
             )));
@@ -141,7 +163,18 @@ impl McpConnectionPool {
     }
 
     pub fn status(&self) -> Vec<McpServerStatus> {
-        let connected = self.connected.lock().unwrap();
+        // Sync snapshot for UI polling; try_lock to avoid blocking async.
+        let Ok(connected) = self.connected.try_lock() else {
+            return self
+                .servers
+                .keys()
+                .map(|name| McpServerStatus {
+                    name: name.clone(),
+                    connected: false,
+                    tools: Vec::new(),
+                })
+                .collect();
+        };
         self.servers
             .iter()
             .map(|(name, cfg)| {
@@ -165,7 +198,9 @@ impl McpConnectionPool {
     }
 
     pub(crate) fn connected_tools(&self) -> Vec<(String, Vec<McpToolInfo>)> {
-        let connected = self.connected.lock().unwrap();
+        let Ok(connected) = self.connected.try_lock() else {
+            return Vec::new();
+        };
         connected
             .iter()
             .map(|(server, entry)| (server.clone(), entry.tools.clone()))
@@ -177,49 +212,37 @@ impl McpConnectionPool {
     }
 
     pub async fn call_tool(&self, server: &str, tool: &str, arguments: Value) -> Result<Value> {
-        let connected = self.connected.clone();
-        let server = server.to_string();
-        let tool = tool.to_string();
-        let remote_client = {
-            let guard = connected.lock().unwrap();
-            let entry = guard.get(&server).ok_or_else(|| {
+        // Single lock acquisition: clone the needed Arc, then release before await.
+        let connection = {
+            let guard = self.connected.lock().await;
+            let entry = guard.get(server).ok_or_else(|| {
                 DeepSeekCodeError::NotFound(format!("mcp server {server} not connected"))
             })?;
             match &entry.connection {
-                McpConnection::Remote(client) => Some(client.clone()),
-                McpConnection::Local(_) => None,
+                McpConnection::Remote(c) => McpConnection::Remote(c.clone()),
+                McpConnection::Local(c) => McpConnection::Local(c.clone()),
             }
         };
-        if let Some(client) = remote_client {
-            return client.call_tool(&tool, arguments).await;
+        match connection {
+            McpConnection::Remote(client) => client.call_tool(tool, arguments).await,
+            McpConnection::Local(client) => {
+                let tool = tool.to_string();
+                tokio::task::spawn_blocking(move || {
+                    let mut locked = client
+                        .lock()
+                        .map_err(|_| DeepSeekCodeError::Other("mcp client lock poisoned".into()))?;
+                    locked.call_tool(&tool, arguments)
+                })
+                .await
+                .map_err(|e| DeepSeekCodeError::Other(format!("mcp local call join failed: {e}")))?
+            }
         }
-        let local_client = {
-            let guard = connected.lock().unwrap();
-            let entry = guard.get(&server).ok_or_else(|| {
-                DeepSeekCodeError::NotFound(format!("mcp server {server} not connected"))
-            })?;
-            match &entry.connection {
-                McpConnection::Local(client) => Some(client.clone()),
-                McpConnection::Remote(_) => None,
-            }
-        };
-        let Some(client) = local_client else {
-            return Err(DeepSeekCodeError::NotFound(format!(
-                "mcp server {server} not connected"
-            )));
-        };
-        tokio::task::spawn_blocking(move || {
-            let mut client = client
-                .lock()
-                .map_err(|_| DeepSeekCodeError::Other("mcp client lock poisoned".into()))?;
-            client.call_tool(&tool, arguments)
-        })
-        .await
-        .map_err(|e| DeepSeekCodeError::Other(format!("mcp local call join failed: {e}")))?
     }
 
     pub fn list_registered_tool_names(&self) -> Vec<String> {
-        let connected = self.connected.lock().unwrap();
+        let Ok(connected) = self.connected.try_lock() else {
+            return Vec::new();
+        };
         let mut names = Vec::new();
         for (server, entry) in connected.iter() {
             for tool in &entry.tools {

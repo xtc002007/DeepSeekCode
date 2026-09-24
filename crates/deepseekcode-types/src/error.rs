@@ -43,6 +43,9 @@ pub enum DeepSeekCodeError {
     #[error("retry provider turn after compaction")]
     RetryAfterCompaction,
 
+    #[error("retry provider turn without reasoning content")]
+    RetryWithoutReasoning,
+
     #[error("{0}")]
     Other(String),
 }

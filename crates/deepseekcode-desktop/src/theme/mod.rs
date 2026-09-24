@@ -3,7 +3,7 @@ mod radius;
 mod spacing;
 mod style;
 mod system;
-mod themes;
+pub mod themes;
 mod tokens;
 mod typography;
 

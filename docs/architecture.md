@@ -38,6 +38,8 @@ flowchart TB
 
   Desktop --> Sdk
   CLI --> Sdk
+  CLI --> Axum
+  Sdk --> core
   Sdk --> Axum
   Axum --> core
   core --> infra
@@ -52,6 +54,7 @@ flowchart TB
 | Storage | `deepseekcode-storage` | SQLite, events, encrypted credentials |
 | Server | `deepseekcode-server` | HTTP `/api/v1/*`, SSE, OpenAPI |
 | SDK | `deepseekcode-sdk` | `EmbeddedEngine`, HTTP client |
+| API types | `deepseekcode-schema::api` | Single source of truth for HTTP shapes (SDK/server share; no hand-rolled `json!`) |
 | Desktop | `deepseekcode-desktop` | GPUI UI |
 | CLI | `deepseekcode-cli` | `serve`, `run`, session commands |
 
@@ -81,6 +84,23 @@ Benchmarks under `benches/` track rough targets:
 | `memory` | RSS after engine start (regression guard) |
 
 Run: `cargo bench -p deepseekcode-sdk --bench startup`
+
+## Known structural debts (tracked, phased)
+
+- **SDK → server dependency**: `deepseekcode-sdk` currently depends on
+  `deepseekcode-server` (Axum + PTY + core) for `EmbeddedEngine`, forcing
+  desktop/CLI to link the full server. Phase-out: extract a
+  `server-api-types`-only surface (done for DTOs via `schema::api`) and route
+  `EmbeddedEngine` through it, leaving the Axum router to `serve`-only builds.
+- **`wasmtime` compile cost**: `core → plugin → wasmtime 29` taxes even
+  `run`/`serve` builds that never load WASM (~100MB). Phase-out: `plugin/wasm`
+  cargo feature gate + engine pooling/fuel/memory limits + `.wasm` signature
+  verification (`host.rs` currently accepts any instantiable module).
+- **`dirs 6.0` (unmaintained)**: used by config/storage/CLI/desktop.
+  Phase-out: migrate to `directories` with sandboxed fallbacks.
+- **`sqlx` + `refinery` dual migration stacks**: kept because history files
+  use refinery naming; the custom runner now enforces version order +
+  fail-closed DDL. Long term: converge on one runner.
 
 ## Related docs
 

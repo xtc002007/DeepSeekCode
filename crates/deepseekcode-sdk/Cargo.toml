@@ -12,6 +12,8 @@ deepseekcode-config = { workspace = true }
 deepseekcode-core = { workspace = true }
 deepseekcode-server = { workspace = true }
 deepseekcode-storage = { workspace = true }
+deepseekcode-llm = { workspace = true }
+urlencoding = "2"
 axum = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }

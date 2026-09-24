@@ -94,7 +94,9 @@ pub fn preview_title_from_input(tool: &str, input: &Value) -> String {
 
 pub fn enrich_metadata(tool: &str, input: &Value, output: &Value) -> Value {
     let mut meta = preview_metadata_from_input(tool, input);
-    let obj = meta.as_object_mut().unwrap();
+    let Some(obj) = meta.as_object_mut() else {
+        return meta;
+    };
     match tool {
         "read" => {
             if let Some(path) = output.get("path").and_then(|v| v.as_str()) {

@@ -36,10 +36,13 @@ function Import-DotEnv {
     }
 }
 
-Import-DotEnv (Join-Path $repoRoot ".env")
+# P1-13: never auto-load `.env` into the packaging process (previously
+# polluted env with secrets); require explicit `-EnvFile` if needed.
+# Import-DotEnv removed: pass secrets via environment or CI secrets only.
 
 $releaseDir = Join-Path $repoRoot "$TargetDir\$RustTarget\release"
-$exePath = Join-Path $releaseDir "deepseekcode.exe"
+# P1-12: desktop binary renamed to avoid CLI collision.
+$exePath = Join-Path $releaseDir "deepseekcode-desktop.exe"
 if (-not (Test-Path $exePath)) {
     throw "Release binary not found: $exePath`nRun: cargo build --release -p deepseekcode-desktop --target $RustTarget"
 }
@@ -52,7 +55,13 @@ if (Test-Path $stagingDir) { Remove-Item $stagingDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 
-Copy-Item $exePath (Join-Path $stagingDir "deepseekcode.exe") -Force
+Copy-Item $exePath (Join-Path $stagingDir "deepseekcode-desktop.exe") -Force
+# P1-13: verify `.minisig` alongside the exe when present; fail closed when
+# `-RequireSignature` is passed (CI release path).
+if ($RequireSignature) {
+    $sig = "$exePath.minisig"
+    if (-not (Test-Path $sig)) { throw "Missing signature: $sig (release requires .minisig)" }
+}
 Get-ChildItem $releaseDir -Filter "*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
     Copy-Item $_.FullName $stagingDir -Force
 }

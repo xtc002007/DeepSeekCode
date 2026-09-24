@@ -32,6 +32,13 @@ pub enum PolicyOutcome {
     Blocked { reason: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PolicyWaitErr {
+    Cancelled,
+    TimedOut,
+    Closed,
+}
+
 struct PendingEntry {
     request: PolicyRequest,
     tx: oneshot::Sender<PolicyOutcome>,
@@ -47,6 +54,9 @@ pub struct PolicyService {
     store: Option<PolicyStore>,
     project_dir: String,
     events: Option<Arc<EventStore>>,
+    /// Per-session cancel tokens registered by the runner so `interrupt`
+    /// aborts pending `prompt` waits (P0-4). Absent entry = no cancellation.
+    cancels: RwLock<HashMap<SessionId, Arc<crate::tools::services::CancelToken>>>,
 }
 
 impl PolicyService {
@@ -72,11 +82,75 @@ impl PolicyService {
             store,
             project_dir: project_dir.into(),
             events: None,
+            cancels: RwLock::new(HashMap::new()),
         }
     }
 
     async fn is_auto_mode(&self) -> bool {
         *self.policy_mode.read().await == PolicyMode::Auto
+    }
+
+    /// Register (or replace) the cancel token for a session. Called by the
+    /// runner on each drain start.
+    pub async fn register_cancel(
+        &self,
+        session_id: SessionId,
+        token: Arc<crate::tools::services::CancelToken>,
+    ) {
+        self.cancels.write().await.insert(session_id, token);
+    }
+
+    /// Cancel all pending prompts for a session (called by `interrupt`).
+    /// Removes pending entries and wakes their waiters with rejection.
+    pub async fn cancel_pending(&self, session_id: SessionId) {
+        let mut pending = self.pending.write().await;
+        let ids: Vec<PermissionId> = pending
+            .iter()
+            .filter(|(_, e)| e.request.session_id == session_id)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            if let Some(entry) = pending.remove(&id) {
+                let _ = entry.tx.send(PolicyOutcome::Rejected {
+                    message: Some("interrupted".into()),
+                });
+            }
+        }
+    }
+
+    async fn cancel_for(
+        &self,
+        session_id: SessionId,
+    ) -> Option<Arc<crate::tools::services::CancelToken>> {
+        self.cancels.read().await.get(&session_id).cloned()
+    }
+
+    /// Wait for a policy reply, a cancel, or a timeout.
+    /// Returns `Ok(PolicyOutcome)` on reply, `Err(Cancelled)` on interrupt,
+    /// `Err(TimedOut)` on timeout, `Err(Closed)` when the sender drops.
+    async fn await_policy_reply(
+        &self,
+        rx: oneshot::Receiver<PolicyOutcome>,
+        cancel: Option<Arc<crate::tools::services::CancelToken>>,
+    ) -> std::result::Result<PolicyOutcome, PolicyWaitErr> {
+        use std::result::Result::{Err, Ok};
+        if let Some(token) = cancel {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => Err(PolicyWaitErr::Cancelled),
+                res = rx => match res {
+                    Ok(outcome) => Ok(outcome),
+                    Err(_) => Err(PolicyWaitErr::Closed),
+                },
+                _ = tokio::time::sleep(POLICY_TIMEOUT) => Err(PolicyWaitErr::TimedOut),
+            }
+        } else {
+            match tokio::time::timeout(POLICY_TIMEOUT, rx).await {
+                Ok(Ok(outcome)) => Ok(outcome),
+                Ok(Err(_)) => Err(PolicyWaitErr::Closed),
+                Err(_) => Err(PolicyWaitErr::TimedOut),
+            }
+        }
     }
 
     pub fn with_events(mut self, events: Arc<EventStore>) -> Self {
@@ -91,7 +165,9 @@ impl PolicyService {
                 .iter()
                 .map(|g| deepseekcode_schema::policy::PolicyRule {
                     scope: g.scope.clone(),
-                    pattern: g.pattern.clone(),
+                    // Expand `~` consistently with config file rules so
+                    // `~/.ssh=block`-style grants actually match absolutes.
+                    pattern: expand_home_for_grant(&g.pattern),
                     action: deepseekcode_schema::policy::PolicyAction::Permit,
                 })
                 .collect();
@@ -109,6 +185,13 @@ impl PolicyService {
             }
         }
         *self.agent_rules.write().await = agent_rules;
+        // Hot-reload must reflect DB deletes: re-read project grants and
+        // drop stale in-memory session grants/pending (engine.reload_catalog
+        // contract). Previously memory survived `DELETE /grants/{id}`.
+        self.load_from_db().await?;
+        self.session_grants.write().await.clear();
+        // Pending prompts reference old rulesets; keep them (user must still
+        // reply) but they will re-evaluate on reply path. Do not auto-clear.
         Ok(())
     }
 
@@ -206,12 +289,52 @@ impl PolicyService {
             }
         }
 
+        // P0-8 symmetric secondary checks: `write` honors explicit `write`
+        // rules; `apply_patch` honors its own `apply_patch` scope (no longer
+        // mapped to `edit`); `edit` honors explicit `edit` via primary scope
+        // already. Any Block wins.
+        if matches!(tool_name, "write" | "apply_patch") {
+            let secondary_scope = if tool_name == "apply_patch" {
+                "apply_patch"
+            } else {
+                "write"
+            };
+            let secondary_patterns =
+                extract_patterns_for_workspace(tool_name, &input, Some(working_dir));
+            if matches!(
+                self.evaluate(session_id, agent, secondary_scope, &secondary_patterns)
+                    .await,
+                PolicyDecision::Block
+            ) {
+                return Ok(PolicyOutcome::Blocked {
+                    reason: format!(
+                        "tool '{tool_name}' blocked by policy ({secondary_scope} scope)"
+                    ),
+                });
+            }
+        }
         match self.evaluate(session_id, agent, &scope, &patterns).await {
             PolicyDecision::Permit => Ok(PolicyOutcome::Permitted),
             PolicyDecision::Block => Ok(PolicyOutcome::Blocked {
                 reason: format!("tool '{tool_name}' blocked by policy"),
             }),
             PolicyDecision::Prompt => {
+                // loop_guard is never YOLO-permitted: auto mode must not
+                // silently disable the 3x repetition guard.
+                if scope == "loop_guard" {
+                    return self
+                        .prompt(
+                            session_id,
+                            agent,
+                            &scope,
+                            tool_name,
+                            &patterns,
+                            &remember_patterns_for_workspace(tool_name, &input, Some(working_dir)),
+                            format!("Repeated tool '{tool_name}' detected 3x. Allow again?"),
+                            input,
+                        )
+                        .await;
+                }
                 if self.is_auto_mode().await {
                     self.emit_auto_permitted(session_id, &scope, tool_name, &patterns, input)
                         .await?;
@@ -251,17 +374,54 @@ impl PolicyService {
         let Some(events) = &self.events else {
             return Ok(());
         };
-        let payload = json!({
-            "policy_id": PermissionId::new().to_string(),
+        // Audit chain must not break in auto mode: emit prompted+resolved
+        // with a legal `once` reply and `auto:true` marker (schema has no
+        // `auto` reply kind; previously `"auto"` was schema-illegal).
+        let policy_id = PermissionId::new();
+        let prompted = json!({
+            "policy_id": policy_id.to_string(),
             "session_id": session_id.to_string(),
             "scope": scope,
             "tool_name": tool_name,
             "patterns": patterns,
-            "reply": "auto",
+            "remember_patterns": patterns,
+            "description": format!("Auto-permitted '{tool_name}' (policy_mode=auto)"),
             "input": input,
+            "permission_id": policy_id.to_string(),
+            "auto": true,
         });
         events
-            .append(EventKind::PolicyResolved, Some(session_id), payload)
+            .append(
+                EventKind::PolicyPrompted,
+                Some(session_id),
+                prompted.clone(),
+            )
+            .await?;
+        // Legacy compat alias.
+        events
+            .append(EventKind::PermissionRequested, Some(session_id), prompted)
+            .await?;
+        let resolved = json!({
+            "policy_id": policy_id.to_string(),
+            "session_id": session_id.to_string(),
+            "scope": scope,
+            "tool_name": tool_name,
+            "patterns": patterns,
+            "reply": "once",
+            "auto": true,
+            "message": serde_json::Value::Null,
+            "permission_id": policy_id.to_string(),
+            "status": "permitted",
+        });
+        events
+            .append(
+                EventKind::PolicyResolved,
+                Some(session_id),
+                resolved.clone(),
+            )
+            .await?;
+        events
+            .append(EventKind::PermissionResolved, Some(session_id), resolved)
             .await?;
         Ok(())
     }
@@ -301,6 +461,9 @@ impl PolicyService {
         };
 
         let (tx, rx) = oneshot::channel();
+        // Interrupt-aware: capture the session cancel token so `interrupt`
+        // aborts the 300s wait instead of blocking the drain (P0-4).
+        let cancel = self.cancel_for(session_id).await;
         self.pending.write().await.insert(
             req.id,
             PendingEntry {
@@ -311,9 +474,11 @@ impl PolicyService {
 
         self.emit_prompted(&req).await?;
 
-        let outcome = match tokio::time::timeout(POLICY_TIMEOUT, rx).await {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(_)) => {
+        // Capture cancel state for post-timeout classification.
+        let cancel_flag = cancel.clone();
+        let outcome = match self.await_policy_reply(rx, cancel).await {
+            Ok(outcome) => outcome,
+            Err(PolicyWaitErr::Closed) => {
                 self.finalize_pending_timeout(
                     &req,
                     &format!("policy channel closed for {tool_name}"),
@@ -323,7 +488,41 @@ impl PolicyService {
                     message: Some(format!("policy channel closed for {tool_name}")),
                 }
             }
-            Err(_) => {
+            Err(PolicyWaitErr::Cancelled) => {
+                // Clean the pending map without emitting a second resolve if
+                // `cancel_pending` already consumed the entry.
+                let still_pending = self.pending.write().await.remove(&req.id).is_some();
+                if still_pending {
+                    self.emit_resolved(
+                        &req,
+                        &PolicyReply {
+                            reply: PolicyReplyKind::Reject,
+                            message: Some("interrupted".into()),
+                        },
+                    )
+                    .await?;
+                }
+                return Err(DeepSeekCodeError::SessionInterrupted);
+            }
+            Err(PolicyWaitErr::TimedOut) => {
+                let interrupted = cancel_flag
+                    .as_ref()
+                    .map(|t| t.is_cancelled())
+                    .unwrap_or(false);
+                if interrupted {
+                    let still_pending = self.pending.write().await.remove(&req.id).is_some();
+                    if still_pending {
+                        self.emit_resolved(
+                            &req,
+                            &PolicyReply {
+                                reply: PolicyReplyKind::Reject,
+                                message: Some("interrupted".into()),
+                            },
+                        )
+                        .await?;
+                    }
+                    return Err(DeepSeekCodeError::SessionInterrupted);
+                }
                 self.finalize_pending_timeout(&req, &format!("timeout waiting for {tool_name}"))
                     .await?;
                 PolicyOutcome::Rejected {
@@ -365,7 +564,19 @@ impl PolicyService {
             "permission_id": req.id.to_string(),
         });
         events
-            .append(EventKind::PolicyPrompted, Some(req.session_id), payload)
+            .append(
+                EventKind::PolicyPrompted,
+                Some(req.session_id),
+                payload.clone(),
+            )
+            .await?;
+        // Compat alias: legacy subscribers listen for permission.requested.
+        events
+            .append(
+                EventKind::PermissionRequested,
+                Some(req.session_id),
+                payload,
+            )
             .await?;
         Ok(())
     }
@@ -448,21 +659,22 @@ impl PolicyService {
         } else {
             req.remember_patterns.clone()
         };
-        if let Some(store) = &self.store {
-            for pattern in &patterns {
-                store
-                    .save_grant(&self.project_dir, &req.scope, pattern)
-                    .await?;
-            }
-        }
-        let mut grants = self.project_grants.write().await;
+        // `project` means durable SQLite persistence. Without a store the
+        // grant would vanish on restart: fail loudly instead of keeping a
+        // memory-only illusion.
+        let Some(store) = &self.store else {
+            return Err(DeepSeekCodeError::Storage(
+                "project grant requires a policy store (SQLite); configure storage first".into(),
+            ));
+        };
         for pattern in &patterns {
-            grants.push(deepseekcode_schema::policy::PolicyRule {
-                scope: req.scope.clone(),
-                pattern: pattern.clone(),
-                action: deepseekcode_schema::policy::PolicyAction::Permit,
-            });
+            store
+                .save_grant(&self.project_dir, &req.scope, pattern)
+                .await?;
         }
+        // Re-read from DB so UNIQUE/UPSERT semantics (not in-memory push)
+        // are the source of truth.
+        self.load_from_db().await?;
         Ok(())
     }
 
@@ -486,7 +698,14 @@ impl PolicyService {
             "status": status,
         });
         events
-            .append(EventKind::PolicyResolved, Some(req.session_id), payload)
+            .append(
+                EventKind::PolicyResolved,
+                Some(req.session_id),
+                payload.clone(),
+            )
+            .await?;
+        events
+            .append(EventKind::PermissionResolved, Some(req.session_id), payload)
             .await?;
         Ok(())
     }
@@ -521,6 +740,13 @@ impl PolicyService {
     }
 
     pub async fn respond_legacy(&self, id: PermissionId, status: PermissionStatus) -> Result<()> {
+        // `Pending` is a query state, never a decision: reject would turn a
+        // status poll into a denial. Return InvalidInput instead.
+        if matches!(status, PermissionStatus::Pending) {
+            return Err(DeepSeekCodeError::InvalidInput(
+                "cannot respond with pending status; use allowed/always/denied".into(),
+            ));
+        }
         let reply = match status {
             PermissionStatus::Allowed => PolicyReply {
                 reply: PolicyReplyKind::Once,
@@ -530,10 +756,11 @@ impl PolicyService {
                 reply: PolicyReplyKind::Project,
                 message: None,
             },
-            PermissionStatus::Denied | PermissionStatus::Pending => PolicyReply {
+            PermissionStatus::Denied => PolicyReply {
                 reply: PolicyReplyKind::Reject,
                 message: None,
             },
+            PermissionStatus::Pending => unreachable!(),
         };
         self.reply(id, reply).await
     }
@@ -547,10 +774,27 @@ fn is_path_scoped_tool(tool_name: &str) -> bool {
 }
 
 fn build_global_ruleset(config: &DeepSeekCodeConfig) -> PolicyRuleset {
+    // Explicit `policy` always wins over legacy `permissions`: legacy first,
+    // explicit last (last-match-wins). Previously reversed, so legacy
+    // silently overwrote explicit rules.
     merge_config_rulesets([
-        ruleset_from_config(&config.policy),
         ruleset_from_permissions(&config.permissions),
+        ruleset_from_config(&config.policy),
     ])
+}
+
+fn expand_home_for_grant(pattern: &str) -> String {
+    if let Some(rest) = pattern.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return format!("{}/{}", home.display(), rest);
+        }
+    }
+    if let Some(rest) = pattern.strip_prefix("$HOME/") {
+        if let Some(home) = dirs::home_dir() {
+            return format!("{}/{}", home.display(), rest);
+        }
+    }
+    pattern.to_string()
 }
 
 fn effective_policy_mode(config: &DeepSeekCodeConfig) -> PolicyMode {
@@ -560,9 +804,45 @@ fn effective_policy_mode(config: &DeepSeekCodeConfig) -> PolicyMode {
 fn policy_to_permission_request(req: PolicyRequest) -> PermissionRequest {
     PermissionRequest {
         id: req.id,
-        tool_name: req.tool_name,
-        description: req.description,
-        input: req.input,
+        tool_name: req.tool_name.clone(),
+        // Preserve scope/patterns/session so legacy UI can decide.
+        description: format!(
+            "{} | scope={} patterns=[{}] session={} | {}",
+            req.description,
+            req.scope,
+            req.patterns.join(", "),
+            req.session_id,
+            req.tool_name,
+        ),
+        input: {
+            let mut v = req.input.clone();
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("scope".into(), serde_json::Value::String(req.scope.clone()));
+                obj.insert(
+                    "patterns".into(),
+                    serde_json::Value::Array(
+                        req.patterns
+                            .iter()
+                            .map(|p| serde_json::Value::String(p.clone()))
+                            .collect(),
+                    ),
+                );
+                obj.insert(
+                    "remember_patterns".into(),
+                    serde_json::Value::Array(
+                        req.remember_patterns
+                            .iter()
+                            .map(|p| serde_json::Value::String(p.clone()))
+                            .collect(),
+                    ),
+                );
+                obj.insert(
+                    "session_id".into(),
+                    serde_json::Value::String(req.session_id.to_string()),
+                );
+            }
+            v
+        },
         status: PermissionStatus::Pending,
         created_at: req.created_at,
     }

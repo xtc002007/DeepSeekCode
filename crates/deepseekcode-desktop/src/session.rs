@@ -1,6 +1,5 @@
-//! Session viewport: activity timeline rendering and scroll helpers.
+//! Session viewport: scroll helpers for the activity timeline.
 
-use deepseekcode_schema::activity::ActivityTree;
 use gpui::*;
 
 pub fn is_session_at_bottom(scroll_handle: &ScrollHandle) -> bool {
@@ -11,27 +10,4 @@ pub fn is_session_at_bottom(scroll_handle: &ScrollHandle) -> bool {
         return false;
     }
     -scroll_handle.offset().y >= max_scroll - px(24.)
-}
-
-/// Render the Cursor-style activity timeline (delegates to `ActivityTimelineView`).
-pub fn render_activity_timeline(
-    cx: &Context<crate::workspace::WorkspaceView>,
-    tree: &ActivityTree,
-    expanded_groups: &std::collections::HashSet<String>,
-    collapsed_groups: &std::collections::HashSet<String>,
-    expanded_leaves: &std::collections::HashSet<String>,
-    highlighted_todo_leaf: Option<&str>,
-    scroll_handle: &ScrollHandle,
-    session_loading: bool,
-) -> impl IntoElement {
-    crate::activity_timeline::ActivityTimelineView::render(
-        cx,
-        tree,
-        expanded_groups,
-        collapsed_groups,
-        expanded_leaves,
-        highlighted_todo_leaf,
-        scroll_handle,
-        session_loading,
-    )
 }

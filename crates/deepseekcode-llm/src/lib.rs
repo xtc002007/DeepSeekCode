@@ -1,9 +1,11 @@
 pub mod axis;
 pub mod client;
 pub mod event;
+pub mod http_client;
 pub mod overflow;
 pub mod providers;
 pub mod request;
+pub mod sni_pinned;
 pub mod tool_call;
 
 pub use client::LlmClient;

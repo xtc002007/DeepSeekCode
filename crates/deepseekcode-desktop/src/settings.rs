@@ -21,7 +21,8 @@ pub(crate) const POLICY_SCOPES: &[&str] = &[
     "bash",
     "read",
     "edit",
-    "write",
+    // `write` maps to `edit` at runtime (tool_scope); listing it creates
+    // dead `write:{…}` rules that never match. Kept out intentionally.
     "grep",
     "glob",
     "list",
@@ -31,8 +32,12 @@ pub(crate) const POLICY_SCOPES: &[&str] = &[
     "websearch",
     "skill",
     "task",
+    "plan",
+    "mcp",
     "lsp",
     "question",
+    "todo",
+    "context",
     "*",
 ];
 
@@ -90,6 +95,7 @@ impl SettingsView {
         policy_rule_rows: &[PolicyRuleRow],
         policy_auto_mode: bool,
         selected_policy_row: Option<usize>,
+        policy_pattern_input: Entity<crate::composer::PromptInput>,
     ) -> AnyElement {
         if !open {
             return div().into_any_element();
@@ -138,6 +144,7 @@ impl SettingsView {
                         policy_rule_rows,
                         policy_auto_mode,
                         selected_policy_row,
+                        policy_pattern_input,
                     ))
                     .child(render_close_button(cx)),
             )
@@ -303,10 +310,11 @@ fn render_content(
     server_password_input: Entity<crate::composer::PromptInput>,
     worktree_branch_input: Entity<crate::composer::PromptInput>,
     permission_allow_input: Entity<crate::composer::PromptInput>,
-    permission_deny_input: Entity<crate::composer::PromptInput>,
+    _permission_deny_input: Entity<crate::composer::PromptInput>,
     policy_rule_rows: &[PolicyRuleRow],
     policy_auto_mode: bool,
     selected_policy_row: Option<usize>,
+    policy_pattern_input: Entity<crate::composer::PromptInput>,
 ) -> impl IntoElement {
     let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
     let body: AnyElement = match section {
@@ -330,7 +338,7 @@ fn render_content(
             cx,
             catalog,
             permission_allow_input,
-            permission_deny_input,
+            policy_pattern_input,
             policy_rule_rows,
             policy_auto_mode,
             selected_policy_row,
@@ -745,7 +753,7 @@ fn render_permissions_section(
     cx: &Context<crate::workspace::WorkspaceView>,
     catalog: &SettingsCatalog,
     permission_allow_input: Entity<crate::composer::PromptInput>,
-    permission_deny_input: Entity<crate::composer::PromptInput>,
+    policy_pattern_input: Entity<crate::composer::PromptInput>,
     policy_rule_rows: &[PolicyRuleRow],
     policy_auto_mode: bool,
     selected_policy_row: Option<usize>,
@@ -859,7 +867,7 @@ fn render_permissions_section(
                                     .text_color(theme.text_muted)
                                     .child("Pattern for selected rule:"),
                             )
-                            .child(div().min_h(px(28.)).child(permission_deny_input.clone())),
+                            .child(div().min_h(px(28.)).child(policy_pattern_input.clone())),
                     )
                 })
                 .child(

@@ -15,94 +15,14 @@ use deepseekcode_schema::session::{
     UpdateSessionRequest,
 };
 use deepseekcode_schema::todo::{TodoItem, TodoUpdateRequest};
-use deepseekcode_types::MessageId;
 
-#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-pub struct OkResponse {
-    pub ok: bool,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-pub struct MoveSessionRequest {
-    pub directory: String,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-pub struct UpdateModelRequest {
-    pub agent: Option<String>,
-    pub model_id: String,
-    pub provider_id: String,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-pub struct SkillInfo {
-    pub name: String,
-    pub description: String,
-    pub path: String,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-pub struct SessionExportResponse {
-    pub version: i32,
-    pub session: Session,
-    pub messages: Vec<Message>,
-    pub timeline: Vec<serde_json::Value>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-pub struct TimelineEntry {
-    pub seq: i64,
-    pub kind: String,
-    pub label: String,
-    pub detail: String,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-pub struct WorktreeEntry {
-    pub path: String,
-    pub head: Option<String>,
-    pub branch: Option<String>,
-    pub bare: bool,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-pub struct ProjectDirectoryEntry {
-    pub id: String,
-    pub project_path: String,
-    pub directory_path: String,
-    pub strategy: String,
-    pub created_at: String,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-pub struct AddProjectDirectoryRequest {
-    pub directory_path: String,
-    pub strategy: Option<String>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-pub struct CreateWorktreeRequest {
-    pub branch: Option<String>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-pub struct McpConnectResponse {
-    pub ok: bool,
-    #[serde(default)]
-    pub tools: Vec<serde_json::Value>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-pub struct ForkRequest {
-    #[schema(value_type = Option<String>)]
-    pub until_message_id: Option<MessageId>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-pub struct CreatePtyRequest {
-    pub rows: Option<u16>,
-    pub cols: Option<u16>,
-}
+// P1-10: single source of truth in `deepseekcode-schema::api`; re-exported
+// here so existing `crate::openapi::X` paths keep compiling.
+pub use deepseekcode_schema::api::{
+    AddProjectDirectoryRequest, CreatePtyRequest, CreateWorktreeRequest, ForkRequest,
+    McpConnectResponse, MoveSessionRequest, OkResponse, PluginInfo, ProjectDirectoryEntry,
+    SessionExportResponse, SkillInfo, TimelineEntry, UpdateModelRequest, WorktreeEntry,
+};
 
 #[derive(OpenApi)]
 #[openapi(

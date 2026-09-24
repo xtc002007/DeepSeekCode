@@ -135,13 +135,40 @@ fn should_redact_diagnostic_file(path: &Path) -> bool {
 }
 
 /// Read the last N lines from app.log for CI / failure dumps.
+/// Streaming reverse scan (P1-13: previously `read_to_string` loaded the
+/// whole file, OOM on large logs).
 pub fn tail_app_log(run_dir: &Path, lines: usize) -> String {
+    use std::io::{Read, Seek, SeekFrom};
     let path = run_dir.join("app.log");
-    let Ok(content) = fs::read_to_string(path) else {
+    let Ok(mut file) = fs::File::open(&path) else {
         return String::new();
     };
-    content
-        .lines()
+    let Ok(size) = file.metadata().map(|m| m.len()) else {
+        return String::new();
+    };
+    // Scan backwards in 8KiB windows, collecting newlines until `lines`.
+    const WINDOW: u64 = 8192;
+    let mut buf = Vec::new();
+    let mut pos = size;
+    let mut newlines = 0usize;
+    while pos > 0 && newlines <= lines {
+        let take = WINDOW.min(pos);
+        pos -= take;
+        if file.seek(SeekFrom::Start(pos)).is_err() {
+            break;
+        }
+        let mut chunk = vec![0u8; take as usize];
+        if file.read_exact(&mut chunk).is_err() {
+            break;
+        }
+        newlines += chunk.iter().filter(|b| **b == b'\n').count();
+        buf.splice(0..0, chunk);
+        if buf.len() > 1024 * 1024 {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&buf).to_string();
+    text.lines()
         .rev()
         .take(lines)
         .collect::<Vec<_>>()

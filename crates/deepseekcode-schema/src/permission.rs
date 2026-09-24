@@ -25,7 +25,7 @@ pub struct PermissionRequest {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct PermissionResponse {
     pub status: PermissionStatus,
 }

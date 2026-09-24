@@ -417,7 +417,10 @@ async fn compact_session_endpoint() {
         .json()
         .await
         .expect("compact json");
-    assert_eq!(compact["ok"], true);
+    // Fresh session with no history compacts to a no-op (`ok: false`), not an
+    // error: manual `/compact` initializes the epoch (Rule 1) and reports
+    // whether a checkpoint was installed.
+    assert_eq!(compact["ok"], false);
 
     server.abort();
 }

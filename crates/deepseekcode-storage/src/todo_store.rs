@@ -12,6 +12,40 @@ impl TodoStore {
     }
 
     pub async fn update(&self, session_id: SessionId, todos: &[TodoItem]) -> Result<Vec<TodoItem>> {
+        // Bounds + whitelist: unbounded todos previously blew up the DB;
+        // unknown status/priority strings are rejected instead of stored.
+        const MAX_TODOS: usize = 100;
+        const MAX_CONTENT_LEN: usize = 2000;
+        if todos.len() > MAX_TODOS {
+            return Err(DeepSeekCodeError::InvalidInput(format!(
+                "too many todos (max {MAX_TODOS})"
+            )));
+        }
+        for t in todos {
+            if t.content.len() > MAX_CONTENT_LEN {
+                return Err(DeepSeekCodeError::InvalidInput(
+                    "todo content too long".into(),
+                ));
+            }
+            match t.status.as_str() {
+                "pending" | "in_progress" | "completed" | "cancelled" => {}
+                _ => {
+                    return Err(DeepSeekCodeError::InvalidInput(format!(
+                        "invalid todo status: {}",
+                        t.status
+                    )))
+                }
+            }
+            match t.priority.as_str() {
+                "low" | "medium" | "high" | "urgent" => {}
+                _ => {
+                    return Err(DeepSeekCodeError::InvalidInput(format!(
+                        "invalid todo priority: {}",
+                        t.priority
+                    )))
+                }
+            }
+        }
         let sid = session_id.to_string();
         let mut tx = self
             .pool

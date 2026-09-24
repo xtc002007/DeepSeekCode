@@ -9,4 +9,6 @@ pub use branding::{
 };
 pub use error::{DeepSeekCodeError, Result};
 pub use ids::*;
-pub use tool_arguments::{normalize_tool_arguments, parse_tool_arguments};
+pub use tool_arguments::{
+    normalize_tool_arguments, parse_tool_arguments, tool_fingerprint_canonical,
+};

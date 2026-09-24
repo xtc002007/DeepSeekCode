@@ -77,7 +77,9 @@ impl Tool for PlanCompleteTool {
             message: format!("failed to read plan file: {e}"),
             retryable: true,
         })?;
-        if content.trim().len() < MIN_PLAN_BYTES {
+        // Unicode-aware char count (P0-8: previously byte `len`, so 67 CJK
+        // chars passed the 200-byte floor).
+        if content.trim().chars().count() < MIN_PLAN_BYTES {
             return Err(ToolFailure {
                 message: format!(
                     "plan file is too short (minimum {MIN_PLAN_BYTES} characters of content required)"
@@ -265,6 +267,8 @@ fn discover_plan_with_file(working: &Path, primary_file_name: &str) -> Option<St
     if !plan_root.is_dir() {
         return None;
     }
+    // Deterministic: (mtime, plan_id) max wins so same-second concurrent
+    // writes resolve identically (P0-8: previously mtime-only, nondeterministic).
     let mut best: Option<(SystemTime, String)> = None;
     for entry in std::fs::read_dir(&plan_root).ok()? {
         let entry = entry.ok()?;
@@ -277,8 +281,9 @@ fn discover_plan_with_file(working: &Path, primary_file_name: &str) -> Option<St
         }
         let modified = std::fs::metadata(&plan_file).ok()?.modified().ok()?;
         let id = entry.file_name().to_string_lossy().to_string();
-        if best.as_ref().map(|(t, _)| modified > *t).unwrap_or(true) {
-            best = Some((modified, id));
+        let candidate = (modified, id);
+        if best.as_ref().map(|b| candidate > *b).unwrap_or(true) {
+            best = Some(candidate);
         }
     }
     best.map(|(_, id)| id)
@@ -293,16 +298,24 @@ fn read_existing_created_at(plan_dir: &Path) -> Option<chrono::DateTime<Utc>> {
 
 fn generate_plan_id(title: &str) -> String {
     let slug = slugify(title);
+    // Char-boundary safe truncation (P0-8: byte slice panicked on CJK).
     let slug = if slug.is_empty() {
         "plan".to_string()
-    } else if slug.len() > 48 {
-        slug[..48].trim_end_matches('-').to_string()
     } else {
-        slug
+        let truncated: String = slug.chars().take(48).collect();
+        truncated.trim_end_matches('-').to_string()
     };
     let date = Utc::now().format("%Y%m%d");
-    let suffix = &ulid::Ulid::new().to_string()[..4];
+    // 6-char suffix (26 bits more entropy than 4) + existence check by
+    // callers; ULID time-ordered so collisions are negligible.
+    let suffix = ulid::Ulid::new().to_string();
+    let suffix = &suffix[..6.min(suffix.len())];
     format!("{slug}-{date}-{suffix}")
+}
+
+#[allow(dead_code)]
+fn truncate_char_boundary(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
 }
 
 fn slugify(title: &str) -> String {

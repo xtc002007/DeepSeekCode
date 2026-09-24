@@ -330,6 +330,7 @@ mod tests {
                     status: deepseekcode_schema::activity::ActivityStatus::Running,
                     detail_ref: None,
                     text: Some(String::new()),
+                    started_at: None,
                 },
             )],
         };
@@ -399,6 +400,7 @@ mod tests {
                     status: deepseekcode_schema::activity::ActivityStatus::Completed,
                     detail_ref: None,
                     text: Some("done".into()),
+                    started_at: None,
                 },
             )],
         };

@@ -161,9 +161,19 @@ async fn mcp_tool_invoked_in_mock_llm_session() {
         None,
     ));
     let hooks = Arc::new(deepseekcode_plugin::HookRegistry::new());
+    // Direct MCP tools must be opted in: since the stable-`use_capability`
+    // proxy became the default, `mcp_echo_echo` is only registered (and the
+    // mock LLM's direct call only executable) with `direct_tools = true`.
+    let session_config = DeepSeekCodeConfig {
+        mcp: Some(deepseekcode_config::schema::McpConfig {
+            servers: HashMap::new(),
+            direct_tools: Some(true),
+        }),
+        ..Default::default()
+    };
     let service = SessionService::new(
         db,
-        DeepSeekCodeConfig::default(),
+        session_config,
         dir.path().to_string_lossy().to_string(),
         permissions,
         providers,

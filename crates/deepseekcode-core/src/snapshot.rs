@@ -225,7 +225,20 @@ pub fn mutating_tool_paths(
             let patch = input["patch"].as_str().unwrap_or("");
             let mut paths = Vec::new();
             for line in patch.lines() {
-                if let Some(rel) = line.strip_prefix("+++ b/") {
+                // Accept `+++ b/path`, `+++ path`, and quoted forms; skip
+                // `/dev/null` (new-file deletions have no snapshot).
+                let rel = line
+                    .strip_prefix("+++ b/")
+                    .or_else(|| line.strip_prefix("+++ a/"))
+                    .or_else(|| line.strip_prefix("+++ "))
+                    .map(str::trim)
+                    .map(|s| s.trim_matches('"').trim())
+                    .unwrap_or("");
+                if rel.is_empty() || rel == "/dev/null" || rel == "b/dev/null" {
+                    continue;
+                }
+                // Only treat it as a path header (not patch content).
+                if line.starts_with("+++") {
                     paths.push(resolve(rel));
                 }
             }

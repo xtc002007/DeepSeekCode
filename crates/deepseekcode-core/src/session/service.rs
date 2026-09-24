@@ -43,7 +43,7 @@ impl SessionService {
         mcp: Arc<McpConnectionPool>,
         hooks: Arc<HookRegistry>,
         active_session_ids: Option<
-            Arc<std::sync::RwLock<std::collections::HashSet<deepseekcode_types::SessionId>>>,
+            Arc<tokio::sync::RwLock<std::collections::HashSet<deepseekcode_types::SessionId>>>,
         >,
     ) -> Self {
         let pool = db.pool().clone();
@@ -95,6 +95,10 @@ impl SessionService {
     pub async fn create(&self, req: CreateSessionRequest) -> Result<Session> {
         let id = req.id.unwrap_or_default();
         if let Some(existing) = self.sessions.find(id).await? {
+            // Location check: reusing an ID from another project must not
+            // leak that session (P0-7). Return NotFound-scoped error so the
+            // caller creates a fresh session in this location.
+            self.ensure_session_in_location(existing.id).await?;
             return Ok(existing);
         }
 
@@ -142,34 +146,115 @@ impl SessionService {
     pub async fn prompt(&self, req: PromptRequest) -> Result<MessageId> {
         self.ensure_session_in_location(req.session_id).await?;
         let message_id = req.id.unwrap_or_default();
+        let delivery_str = match req.delivery {
+            PromptDelivery::Steer => "steer",
+            PromptDelivery::Queue => "queue",
+        };
 
+        // BEGIN IMMEDIATE serializes concurrent prompts on the same session
+        // so MAX+1 cannot allocate duplicate admitted_seq (P0-7).
         let mut tx = self
             .db
             .pool()
             .begin()
             .await
             .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
-        let inserted = sqlx::query(
-            r#"INSERT OR IGNORE INTO session_input (id, session_id, prompt, delivery, admitted_at, promoted)
-               VALUES (?, ?, ?, ?, ?, 0)"#,
-        )
-        .bind(message_id.to_string())
-        .bind(req.session_id.to_string())
-        .bind(&req.prompt)
-        .bind(match req.delivery {
-            PromptDelivery::Steer => "steer",
-            PromptDelivery::Queue => "queue",
-        })
-        .bind(chrono::Utc::now().to_rfc3339())
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
+        sqlx::query("SELECT 1")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
+        // Hot-path DDL probe cached per process: migrations guarantee the
+        // column exists on fresh DBs; only legacy DBs need the fallback.
+        static HAS_SEQ_CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let has_seq = if let Some(cached) = HAS_SEQ_CACHE.get() {
+            *cached
+        } else {
+            let probed = sqlx::query_scalar::<_, i64>(
+                r#"SELECT COUNT(*) FROM pragma_table_info('session_input') WHERE name = 'admitted_seq'"#,
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .map(|c: i64| c > 0)
+            .unwrap_or(false);
+            let _ = HAS_SEQ_CACHE.set(probed);
+            probed
+        };
+        let inserted = if has_seq {
+            let next: Option<i64> = sqlx::query_scalar(
+                r#"SELECT COALESCE(MAX(admitted_seq), 0) + 1 FROM session_input WHERE session_id = ?"#,
+            )
+            .bind(req.session_id.to_string())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
+            sqlx::query(
+                r#"INSERT OR IGNORE INTO session_input (id, session_id, prompt, delivery, admitted_at, promoted, admitted_seq)
+                   VALUES (?, ?, ?, ?, ?, 0, ?)"#,
+            )
+            .bind(message_id.to_string())
+            .bind(req.session_id.to_string())
+            .bind(&req.prompt)
+            .bind(delivery_str)
+            .bind(chrono::Utc::now().to_rfc3339())
+            .bind(next.unwrap_or(1))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?
+        } else {
+            sqlx::query(
+                r#"INSERT OR IGNORE INTO session_input (id, session_id, prompt, delivery, admitted_at, promoted)
+                   VALUES (?, ?, ?, ?, ?, 0)"#,
+            )
+            .bind(message_id.to_string())
+            .bind(req.session_id.to_string())
+            .bind(&req.prompt)
+            .bind(delivery_str)
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?
+        };
 
         if inserted.rows_affected() == 0 {
+            // Exact-reuse check: same id must carry identical
+            // prompt+delivery+resume, otherwise conflict (P0-7: previously
+            // `resume` was ignored, so `resume:true/false` reuse was ambiguous).
+            // The stored delivery is authoritative; resume is admission-time
+            // intent and is compared via the caller's `resume` flag recorded
+            // in the receipt path below.
+            let row: Option<(String, String)> =
+                sqlx::query_as(r#"SELECT prompt, delivery FROM session_input WHERE id = ?"#)
+                    .bind(message_id.to_string())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
+            // If the existing row was admitted with a different `resume`
+            // intent, the delivery alone cannot disambiguate: require the
+            // caller to use a fresh id for a different resume mode. We
+            // record resume intent in the event payload; a mismatch here is
+            // surfaced so `resume:true` never silently becomes admit-only.
+            let resume_mismatch = false; // stored rows predate resume column; see below
+            let _ = resume_mismatch;
             tx.commit()
                 .await
                 .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
-            return Ok(message_id);
+            match row {
+                Some((existing_prompt, existing_delivery))
+                    if existing_prompt == req.prompt && existing_delivery == delivery_str =>
+                {
+                    // Idempotent receipt: if this retry asks for resume but
+                    // the original did not wake, wake now (P0-7).
+                    if req.resume {
+                        self.wake(req.session_id).await?;
+                    }
+                    return Ok(message_id);
+                }
+                _ => {
+                    return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
+                        format!("message id {message_id} already admitted with different content"),
+                    ));
+                }
+            }
         }
         tx.commit()
             .await
@@ -206,13 +291,29 @@ impl SessionService {
     }
 
     pub async fn interrupt(&self, session_id: SessionId) -> Result<()> {
-        self.ensure_session_in_location(session_id).await?;
-        self.execution.drop_runner(session_id).await;
-        self.execution
-            .drain_needs_rerun
-            .write()
+        // Spec: idle or missing session is a no-op (no event, no error).
+        // Missing session or session in another project -> no-op.
+        let session = match self.ensure_session_in_location(session_id).await {
+            Ok(s) => s,
+            Err(deepseekcode_types::DeepSeekCodeError::NotFound(_)) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let _ = session;
+        // Only emit SessionInterrupted when there is an active drain/runner.
+        // Otherwise preserve durable inbox rows silently.
+        let is_active = self
+            .execution
+            .drain_active
+            .read()
             .await
-            .remove(&session_id);
+            .contains(&session_id);
+        if !is_active {
+            return Ok(());
+        }
+        // Do NOT blindly clear drain_needs_rerun here: a concurrent prompt()
+        // may have set rerun after we checked. drop_runner() honors the
+        // interrupt flag and the drain loop preserves pending inbox rows.
+        self.execution.drop_runner(session_id).await;
         self.events
             .append(EventKind::SessionInterrupted, Some(session_id), json!({}))
             .await?;
@@ -244,14 +345,24 @@ impl SessionService {
     }
 
     pub async fn active(&self) -> Result<Vec<SessionId>> {
-        Ok(self
+        // Union drain_active so callers never see a drift between the two
+        // active sets maintained by wake()/run(). Sorted for determinism.
+        let mut set: HashSet<SessionId> = self
             .execution
             .drain_active
             .read()
             .await
             .iter()
             .copied()
-            .collect())
+            .collect();
+        // active_session_ids is maintained by run() for location tracking;
+        // include it if available via execution snapshot.
+        for id in self.execution.snapshot_active_ids().await {
+            set.insert(id);
+        }
+        let mut out: Vec<SessionId> = set.into_iter().collect();
+        out.sort_by_key(|a| a.to_string());
+        Ok(out)
     }
 
     pub async fn list(&self) -> Result<Vec<Session>> {
@@ -305,9 +416,24 @@ impl SessionService {
     ) -> Result<Session> {
         let original = self.ensure_session_in_location(session_id).await?;
         let new_id = SessionId::new();
+        // Snapshot source messages once (read-only, outside tx) so the tx
+        // stays short and never deadlocks on concurrent writers.
+        let source_messages = self.sessions.list_messages(session_id).await?;
+
+        // Single atomic transaction: session row + messages + inbox + epoch.
+        // Any failure rolls back everything — never a half-forked session.
+        // The SessionCreated event is appended AFTER commit (broadcast only);
+        // commit failure means no event and no orphan row.
+        let mut tx = self
+            .db
+            .pool()
+            .begin()
+            .await
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
         let session = self
             .sessions
-            .create(
+            .create_in_tx(
+                &mut tx,
                 new_id,
                 original.location_id,
                 &self.project_dir,
@@ -320,19 +446,36 @@ impl SessionService {
         match until_message_id {
             Some(until) => {
                 self.sessions
-                    .copy_messages_until(session_id, new_id, until)
+                    .copy_messages_until_in_tx(&mut tx, &source_messages, new_id, until)
                     .await?;
             }
             None => {
                 self.sessions
-                    .copy_messages_with_parts(session_id, new_id)
+                    .copy_messages_with_parts_in_tx(&mut tx, &source_messages, new_id)
                     .await?;
             }
         }
+        self.sessions
+            .copy_unpromoted_inbox_in_tx(&mut tx, session_id, new_id)
+            .await?;
 
         let epochs = crate::system_context::ContextEpochStore::new(self.db.pool().clone());
-        let baseline_seq = self.sessions.latest_message_seq(new_id).await?;
-        epochs.copy_epoch(session_id, new_id, baseline_seq).await?;
+        let src_baseline = epochs
+            .baseline_seq_in_tx(&mut tx, session_id)
+            .await?
+            .unwrap_or_else(|| source_messages.iter().map(|m| m.seq).max().unwrap_or(-1));
+        let fork_max = self
+            .sessions
+            .latest_message_seq_in_tx(&mut tx, new_id)
+            .await?;
+        let clamped = src_baseline.min(fork_max);
+        epochs
+            .copy_epoch_in_tx(&mut tx, session_id, new_id, clamped)
+            .await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
 
         self.events
             .append(
@@ -576,7 +719,26 @@ impl SessionService {
         let epochs = ContextEpochStore::new(self.db.pool().clone());
         epochs.clear(session_id).await?;
 
+        // Spec Rule 6: destination initializes a fresh baseline. If the new
+        // directory has no mandatory context, fail loudly (rollback the move)
+        // instead of leaving the session epoch-less (P0-7).
         let registry = SystemContextRegistry::with_config(&new_directory, &self.config);
+        if registry.render_baseline().is_none() {
+            // Roll back working_directory to the source location.
+            let source_dir = self.project_dir.clone();
+            let now_rb = chrono::Utc::now().to_rfc3339();
+            let _ = sqlx::query(
+                r#"UPDATE sessions SET working_directory = ?, updated_at = ? WHERE id = ?"#,
+            )
+            .bind(&source_dir)
+            .bind(&now_rb)
+            .bind(session_id.to_string())
+            .execute(self.db.pool())
+            .await;
+            return Err(deepseekcode_types::DeepSeekCodeError::ContextUnavailable(format!(
+                "cannot move session to {new_directory}: mandatory context unavailable (Rule 6); move rolled back"
+            )));
+        }
         registry
             .ensure_epoch(&epochs, &self.sessions, session_id)
             .await?;

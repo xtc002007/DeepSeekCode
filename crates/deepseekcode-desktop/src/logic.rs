@@ -1,8 +1,8 @@
 //! Pure logic helpers for desktop (unit-testable without GPUI).
 
 use deepseekcode_schema::activity::{
-    ActivityKind, ActivityLeaf, ActivityMeta, ActivityNode, ActivityStatus, ActivityTargetKind,
-    ActivityTree,
+    ActivityGroupKind, ActivityKind, ActivityLeaf, ActivityMeta, ActivityNode, ActivityStatus,
+    ActivityTargetKind, ActivityTree,
 };
 use deepseekcode_schema::agent::AgentKind;
 use deepseekcode_schema::event::EventKind;
@@ -442,6 +442,7 @@ pub fn toggle_activity_group_expansion(
 }
 
 /// Ancestor `ActivityGroup` ids containing a leaf (for auto-expand on todo highlight).
+/// Walks the orphan-adopted tree so adopted leaves report their display parent.
 pub fn ancestor_group_ids_for_leaf(tree: &ActivityTree, leaf_id: &str) -> Vec<String> {
     let mut path = Vec::new();
     fn walk(nodes: &[ActivityNode], leaf_id: &str, path: &mut Vec<String>) -> bool {
@@ -460,7 +461,8 @@ pub fn ancestor_group_ids_for_leaf(tree: &ActivityTree, leaf_id: &str) -> Vec<St
         }
         false
     }
-    if walk(&tree.roots, leaf_id, &mut path) {
+    let owned = crate::activity_rows::adopt_orphans_for_display(tree);
+    if walk(&owned, leaf_id, &mut path) {
         path
     } else {
         Vec::new()
@@ -493,7 +495,9 @@ pub fn activity_visible_row_index(
                     let expanded =
                         is_activity_group_expanded(group, expanded_groups, collapsed_groups);
                     if expanded {
-                        if group.summary.is_some() {
+                        // Mirrors flatten: turn summaries merge into the header.
+                        if group.summary.is_some() && group.kind != ActivityGroupKind::ProviderTurn
+                        {
                             *row += 1;
                         }
                         if walk(
@@ -527,8 +531,11 @@ pub fn activity_visible_row_index(
         }
         false
     }
+    // Same display adoption as render (stale + orphans), so the computed
+    // row index matches the displayed rows.
+    let owned = crate::activity_rows::adopt_orphans_for_display(tree);
     if walk(
-        &tree.roots,
+        &owned,
         leaf_id,
         expanded_groups,
         collapsed_groups,
@@ -1016,6 +1023,7 @@ mod tests {
                 status: ActivityStatus::Running,
                 detail_ref: Some("bash-1".into()),
                 text: None,
+                started_at: None,
             })],
         };
         assert!(patch_running_tool_leaf_preview(
@@ -1049,6 +1057,7 @@ mod tests {
                     status: ActivityStatus::Completed,
                     detail_ref: None,
                     text: None,
+                    started_at: None,
                 }),
                 ActivityNode::Leaf(ActivityLeaf {
                     id: "todo-9".into(),
@@ -1062,6 +1071,7 @@ mod tests {
                     status: ActivityStatus::Completed,
                     detail_ref: None,
                     text: None,
+                    started_at: None,
                 }),
             ],
         };
@@ -1105,6 +1115,7 @@ mod tests {
                     status: ActivityStatus::Completed,
                     detail_ref: None,
                     text: None,
+                    started_at: None,
                 }),
                 ActivityNode::Leaf(ActivityLeaf {
                     id: "todo-9".into(),
@@ -1115,6 +1126,7 @@ mod tests {
                     status: ActivityStatus::Completed,
                     detail_ref: None,
                     text: None,
+                    started_at: None,
                 }),
             ],
         };

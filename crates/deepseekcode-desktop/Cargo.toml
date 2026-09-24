@@ -7,15 +7,19 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+# P1-12: distinct binary name so `target/release/deepseekcode(.exe)` (CLI)
+# and the desktop never overwrite each other; installer grabs
+# `deepseekcode-desktop(.exe)` explicitly.
 [[bin]]
-name = "deepseekcode"
+name = "deepseekcode-desktop"
 path = "src/main.rs"
 
 [lib]
 name = "deepseekcode_desktop"
 path = "src/lib.rs"
 
-[build-dependencies]
+# P1-12: windows-only build deps must not compile on linux/macOS.
+[target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
 image = "0.25"
 ico = "0.3"

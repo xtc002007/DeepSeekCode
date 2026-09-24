@@ -65,7 +65,10 @@ Skills are discovered from:
 { "name": "my-skill" }
 ```
 
-`GET /api/v1/skills` triggers `reload_materialization()` to refresh skill tools on active runners.
+`GET /api/v1/skills` is read-only and never triggers `reload_materialization()`
+(it must not serialize the server per list call). Catalog changes are applied
+via explicit reload paths (`engine.reload_catalog()` / runner
+`reload_materialization_for_all_runners`).
 
 
 | Hook | When |

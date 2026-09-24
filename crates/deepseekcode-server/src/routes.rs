@@ -41,11 +41,11 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
 
 use crate::openapi;
-use crate::openapi::{
+use deepseekcode_schema::api::{
     AddProjectDirectoryRequest, CreatePtyRequest, CreateWorktreeRequest, ForkRequest,
     MoveSessionRequest, UpdateModelRequest,
 };
-use crate::pty::{PTY_TICKET_HEADER, PTY_TICKET_HEADER_VALUE};
+
 use crate::state::AppState;
 
 const SSE_REPLAY_LIMIT: i64 = 10_000;
@@ -55,7 +55,55 @@ fn sse_replay_limit() -> i64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|&n| n > 0)
+        .map(|n: i64| n.min(SSE_REPLAY_LIMIT))
         .unwrap_or(SSE_REPLAY_LIMIT)
+}
+
+/// Directories a client header may address. `DEEPSEEKCODE_ALLOWED_ROOTS` is an
+/// opt-in `;`-separated allowlist; entries are canonicalized once per request.
+/// Unset/empty means "no restriction" (back-compat: the server is
+/// location-scoped per directory by design, and localhost binding + password
+/// remain the primary boundary per SECURITY.md). Deployments exposed beyond
+/// localhost MUST set `DEEPSEEKCODE_ALLOWED_ROOTS` to the served tree.
+fn allowed_roots() -> Option<Vec<PathBuf>> {
+    let raw = std::env::var("DEEPSEEKCODE_ALLOWED_ROOTS").unwrap_or_default();
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let mut roots = Vec::new();
+    for part in raw.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        roots.push(canonical_lossy(StdPath::new(part)));
+    }
+    Some(roots)
+}
+
+fn canonical_lossy(p: &StdPath) -> PathBuf {
+    std::fs::canonicalize(p)
+        .map(|c| strip_extended_path_prefix(&c))
+        .unwrap_or_else(|_| normalize_path(p))
+}
+
+fn is_dir_allowed(dir: &str) -> bool {
+    let Some(roots) = allowed_roots() else {
+        return true;
+    };
+    let candidate = canonical_lossy(StdPath::new(dir));
+    roots
+        .iter()
+        .any(|root| candidate == *root || candidate.starts_with(root))
+}
+
+fn validated_project_root(
+    headers: &HeaderMap,
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let dir = project_dir(headers);
+    if !is_dir_allowed(&dir) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "directory not allowed", "code": "forbidden" })),
+        ));
+    }
+    Ok(dir)
 }
 
 fn parse_session_id(id: &str) -> Result<SessionId, (StatusCode, Json<serde_json::Value>)> {
@@ -81,12 +129,65 @@ fn parse_permission_id(
 fn service_error_response(
     e: deepseekcode_types::DeepSeekCodeError,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    use deepseekcode_types::DeepSeekCodeError as E;
     let status = match &e {
-        deepseekcode_types::DeepSeekCodeError::NotFound(_) => StatusCode::NOT_FOUND,
-        deepseekcode_types::DeepSeekCodeError::PermissionDenied(_) => StatusCode::FORBIDDEN,
+        E::NotFound(_) => StatusCode::NOT_FOUND,
+        E::PermissionDenied(_) => StatusCode::FORBIDDEN,
+        E::InvalidInput(_) => StatusCode::BAD_REQUEST,
+        E::AlreadyExists(_) => StatusCode::CONFLICT,
+        E::SessionInterrupted => StatusCode::CONFLICT,
+        E::ContextUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+        E::RetryAfterCompaction | E::RetryWithoutReasoning => StatusCode::SERVICE_UNAVAILABLE,
+        E::Llm(msg) => {
+            if deepseekcode_llm::is_context_overflow(msg) {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                let lower = msg.to_ascii_lowercase();
+                if lower.contains("unauthorized") || lower.contains("invalid api key") {
+                    StatusCode::UNAUTHORIZED
+                } else if lower.contains("rate limit") || lower.contains("too many requests") {
+                    StatusCode::TOO_MANY_REQUESTS
+                } else {
+                    StatusCode::BAD_GATEWAY
+                }
+            }
+        }
+        E::ToolFailure(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        E::Config(_) => StatusCode::BAD_REQUEST,
+        E::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    (status, Json(serde_json::json!({ "error": e.to_string() })))
+    // Never leak storage internals (table names / SQL). Cap message length.
+    let message = match &e {
+        E::Storage(_) => "storage error".to_string(),
+        other => {
+            let s = other.to_string();
+            if s.len() > 500 {
+                s[..500].to_string()
+            } else {
+                s
+            }
+        }
+    };
+    // Single canonical shape: { error, code }.
+    let code = match &e {
+        E::NotFound(_) => "not_found",
+        E::PermissionDenied(_) => "forbidden",
+        E::InvalidInput(_) => "invalid_input",
+        E::AlreadyExists(_) => "conflict",
+        E::SessionInterrupted => "interrupted",
+        E::ContextUnavailable(_) => "context_unavailable",
+        E::RetryAfterCompaction | E::RetryWithoutReasoning => "retryable",
+        E::Llm(_) => "llm_error",
+        E::ToolFailure(_) => "tool_failure",
+        E::Config(_) => "config_error",
+        E::Storage(_) => "storage_error",
+        _ => "internal",
+    };
+    (
+        status,
+        Json(serde_json::json!({ "error": message, "code": code })),
+    )
 }
 
 macro_rules! parse_session_path {
@@ -108,10 +209,17 @@ macro_rules! parse_permission_path {
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    // Back-compat: full router including public health routes.
+    authed_router(state.clone())
         .route("/health", get(health_root))
         .route("/api/v1/health", get(health))
         .route("/api/v1/openapi.json", get(openapi_json))
+}
+
+/// Routes that REQUIRE auth (everything except health/openapi).
+/// Used by `app::build_router` to keep probes public.
+pub fn authed_router(state: AppState) -> Router {
+    Router::new()
         .route("/api/v1/location", get(get_location))
         .route("/api/v1/projects", get(list_projects).post(create_project))
         .route(
@@ -126,13 +234,15 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/worktree/prune", post(prune_worktrees))
         .route("/api/v1/session", get(list_sessions).post(create_session))
+        // Static `/active` must precede `/{id}` so `GET /active` is not
+        // captured as `id="active"` (400 from parse_session_id).
+        .route("/api/v1/session/active", get(list_active_sessions))
         .route(
             "/api/v1/session/{id}",
             get(get_session)
                 .patch(update_session)
                 .delete(delete_session),
         )
-        .route("/api/v1/session/active", get(list_active_sessions))
         .route("/api/v1/session/{id}/prompt", post(prompt))
         .route("/api/v1/session/{id}/interrupt", post(interrupt))
         .route("/api/v1/session/{id}/messages", get(list_messages))
@@ -177,6 +287,14 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/permission/pending", get(list_pending_permissions))
         .route("/api/v1/permission/{id}/respond", post(respond_permission))
+        // Legacy thin wrappers for policy grants/config (spec: remain for one
+        // release cycle). Delegate to the same handlers.
+        .route("/api/v1/permission/grants", get(list_policy_grants))
+        .route(
+            "/api/v1/permission/grants/{id}",
+            delete(delete_policy_grant),
+        )
+        .route("/api/v1/permission/config", put(update_policy_config))
         .route("/api/v1/policy/pending", get(list_pending_policies))
         .route("/api/v1/policy/{id}/reply", post(reply_policy))
         .route("/api/v1/policy/grants", get(list_policy_grants))
@@ -270,7 +388,10 @@ fn project_dir(headers: &HeaderMap) -> String {
                 .to_string_lossy()
                 .to_string()
         });
-    normalize_server_directory(&raw)
+    // Cap header length and reject NUL to bound DoS / log injection.
+    let truncated: String = raw.chars().take(1024).collect();
+    let cleaned = truncated.replace('\0', "");
+    normalize_server_directory(&cleaned)
 }
 
 fn fs_write_allowed() -> bool {
@@ -305,14 +426,25 @@ fn normalize_path(path: &StdPath) -> PathBuf {
 
 fn strip_extended_path_prefix(path: &StdPath) -> PathBuf {
     let rendered = path.to_string_lossy();
-    if let Some(stripped) = rendered.strip_prefix(r"\\?\") {
-        PathBuf::from(stripped)
-    } else {
-        path.to_path_buf()
+    // Handle `\\?\`, `\\.\`, and UNC (`\\server\share`) verbatim prefixes.
+    for prefix in [r"\\?\", r"\\.\"] {
+        if let Some(stripped) = rendered.strip_prefix(prefix) {
+            return PathBuf::from(stripped);
+        }
     }
+    if rendered.starts_with(r"\\") {
+        // UNC: normalize slashes for stable comparison.
+        return PathBuf::from(rendered.replace('/', "\\"));
+    }
+    path.to_path_buf()
 }
 
 fn resolve_within_project(project_root: &str, requested: &str) -> Result<PathBuf, StatusCode> {
+    if requested.contains('\0') || project_root.contains('\0') {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    // Reject absolute `requested` outside the root up front: only join
+    // relative paths; absolute inputs must already be under root.
     let root = strip_extended_path_prefix(
         &std::fs::canonicalize(project_root).map_err(|_| StatusCode::BAD_REQUEST)?,
     );
@@ -321,11 +453,21 @@ fn resolve_within_project(project_root: &str, requested: &str) -> Result<PathBuf
     } else {
         let requested_path = strip_extended_path_prefix(StdPath::new(requested));
         if requested_path.is_absolute() {
-            requested_path
+            // Absolute path must already be inside root after canonicalization.
+            let canon = requested_path
+                .canonicalize()
+                .map(|p| strip_extended_path_prefix(&p))
+                .unwrap_or_else(|_| normalize_path(&requested_path));
+            if canon != root && !canon.starts_with(&root) {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            canon
         } else {
             root.join(requested_path)
         }
     };
+    // Follow symlinks (canonicalize) so `link -> /etc` escapes are blocked.
+    // For not-yet-existing files, canonicalize the existing parent prefix.
     let resolved = target
         .canonicalize()
         .map(|p| strip_extended_path_prefix(&p))
@@ -334,6 +476,11 @@ fn resolve_within_project(project_root: &str, requested: &str) -> Result<PathBuf
                 if let Ok(canonical_parent) = parent.canonicalize() {
                     let parent = strip_extended_path_prefix(&canonical_parent);
                     if let Some(file_name) = target.file_name() {
+                        // Reject `..` / absolute file names that escape.
+                        let name = file_name.to_string_lossy();
+                        if name.contains('\0') || name == ".." {
+                            return root.join("__rejected__");
+                        }
                         return parent.join(file_name);
                     }
                     return parent;
@@ -342,7 +489,10 @@ fn resolve_within_project(project_root: &str, requested: &str) -> Result<PathBuf
             normalize_path(&target)
         });
     let resolved = strip_extended_path_prefix(&resolved);
-    if !resolved.starts_with(&root) {
+    // Re-canonicalize once more to close check-then-use symlink races on
+    // the parent; callers must open with `O_NOFOLLOW`-style handling where
+    // available, but this blocks the common escape.
+    if resolved != root && !resolved.starts_with(&root) {
         return Err(StatusCode::FORBIDDEN);
     }
     Ok(resolved)
@@ -477,7 +627,16 @@ pub(crate) async fn prompt(
     Json(mut req): Json<PromptRequest>,
 ) -> impl IntoResponse {
     let dir = project_dir(&headers);
-    req.session_id = parse_session_path!(&id);
+    let path_id = parse_session_path!(&id);
+    // Do not silently mask client mistakes: body session_id must match path.
+    if req.session_id != path_id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "body session_id does not match path id" })),
+        )
+            .into_response();
+    }
+    req.session_id = path_id;
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
     match location.session_service.prompt(req).await {
@@ -779,7 +938,7 @@ pub(crate) async fn dismiss_session_plan_prompt(
         .dismiss_plan_implement_prompt(session_id, &plan_id)
         .await
     {
-        Ok(()) => StatusCode::OK.into_response(),
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => service_error_response(e).into_response(),
     }
 }
@@ -850,11 +1009,7 @@ pub(crate) async fn answer_session_question(
         .await
     {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => service_error_response(e).into_response(),
     }
 }
 
@@ -1002,23 +1157,19 @@ pub(crate) async fn connect_provider(
     Json(req): Json<ConnectProviderRequest>,
 ) -> impl IntoResponse {
     let dir = project_dir(&headers);
-    let mut engine = state.engine.write().await;
-    let location = engine.location(&dir).await;
-    if let Some(key) = req.api_key.filter(|k| !k.is_empty()) {
+    // Read-only catalog access: do not hold engine.write() across network IO.
+    let location = {
+        let engine = state.engine.read().await;
+        engine.location(&dir).await
+    };
+    if let Some(key) = req.api_key.filter(|k| !k.trim().is_empty()) {
         match location
             .providers
             .connect(&id, key, req.base_url.clone())
             .await
         {
-            Ok(()) => {
-                let _ = engine.reload_catalog(&dir).await;
-                Json(serde_json::json!({ "ok": true })).into_response()
-            }
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
-            )
-                .into_response(),
+            Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+            Err(e) => service_error_response(e).into_response(),
         }
     } else {
         (
@@ -1046,11 +1197,7 @@ pub(crate) async fn disconnect_provider(
     let location = engine.location(&dir).await;
     match location.providers.disconnect(&id).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => service_error_response(e).into_response(),
     }
 }
 
@@ -1136,11 +1283,7 @@ pub(crate) async fn reply_policy(
     let location = engine.location(&dir).await;
     match location.permissions.reply(permission_id, req).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => service_error_response(e).into_response(),
     }
 }
 
@@ -1176,9 +1319,19 @@ pub(crate) async fn delete_policy_grant(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let dir = project_dir(&headers);
+    if !is_dir_allowed(&dir) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "directory not allowed", "code": "forbidden" })),
+        )
+            .into_response();
+    }
+    // Project-scoped delete via the store so enumerable IDs cannot delete
+    // another project's grants.
     let engine = state.engine.read().await;
-    let location = engine.location(&dir).await;
-    match location.permissions.delete_grant(&id).await {
+    let pool = engine.db.pool().clone();
+    let store = deepseekcode_storage::PolicyStore::new(pool);
+    match store.delete_grant_in_project(&id, &dir).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => service_error_response(e).into_response(),
     }
@@ -1202,31 +1355,54 @@ pub(crate) async fn update_policy_config(
     headers: HeaderMap,
     Json(req): Json<UpdatePolicyConfigRequest>,
 ) -> impl IntoResponse {
-    let dir = project_dir(&headers);
-    let config_path = std::path::Path::new(&dir).join("deepseekcode.jsonc");
-    let mut cfg = camino::Utf8Path::new(&dir)
-        .canonicalize_utf8()
-        .ok()
-        .and_then(|p| deepseekcode_config::load_effective_config(&p).ok())
-        .unwrap_or_default();
-    cfg.policy = req.policy;
-    if let Some(mode) = req.policy_mode {
-        cfg.policy_mode = Some(mode);
-    }
-    let serialized = match serde_json::to_string_pretty(&cfg) {
-        Ok(s) => s,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
+    let dir = match validated_project_root(&headers) {
+        Ok(d) => d,
+        Err(resp) => return resp.into_response(),
     };
-    if let Err(e) = std::fs::write(&config_path, serialized) {
+    // Persist ONLY the policy delta to the project file: previously the full
+    // effective config (merged parents+defaults) was pretty-printed over
+    // deepseekcode.jsonc, flattening hierarchy and dropping JSONC comments.
+    // NOTE: writing pretty JSON still drops comments; callers should keep a
+    // backup. Atomic rename below avoids half-written files.
+    let canonical_dir = canonical_lossy(StdPath::new(&dir));
+    let config_path = canonical_dir.join("deepseekcode.jsonc");
+    let existing: serde_json::Value = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|s| {
+            // Preserve comments: parse JSONC, fall back to empty object.
+            jsonc_parser::parse_to_serde_value(&s, &jsonc_parser::ParseOptions::default())
+                .ok()
+                .flatten()
+                .or_else(|| serde_json::from_str(&s).ok())
+        })
+        .unwrap_or_else(|| serde_json::json!({}));
+    let mut obj = existing.as_object().cloned().unwrap_or_default();
+    obj.insert(
+        "policy".into(),
+        serde_json::to_value(&req.policy).unwrap_or_else(|_| serde_json::json!({})),
+    );
+    if let Some(mode) = req.policy_mode {
+        let mode_str = match mode {
+            deepseekcode_config::PolicyMode::Auto => "auto",
+            deepseekcode_config::PolicyMode::Interactive => "interactive",
+        };
+        obj.insert(
+            "policy_mode".into(),
+            serde_json::Value::String(mode_str.into()),
+        );
+    }
+    let serialized = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
+        .unwrap_or_else(|_| "{}".into());
+    // Atomic write (tmp + rename) without holding engine.write() across IO.
+    let tmp_path = canonical_dir.join(format!(".deepseekcode.jsonc.tmp{}", std::process::id()));
+    if let Err(_e) = std::fs::write(&tmp_path, serialized).and_then(|()| {
+        std::fs::rename(&tmp_path, &config_path)
+            .map_err(|e| std::io::Error::new(e.kind(), e.to_string()))
+    }) {
+        let _ = std::fs::remove_file(&tmp_path);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
+            Json(serde_json::json!({ "error": "failed to persist policy config", "code": "storage_error" })),
         )
             .into_response();
     }
@@ -1267,18 +1443,13 @@ pub(crate) async fn connect_mcp(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     let dir = project_dir(&headers);
-    let mut engine = state.engine.write().await;
-    let location = engine.location(&dir).await;
+    let location = {
+        let engine = state.engine.read().await;
+        engine.location(&dir).await
+    };
     match location.mcp.connect(&name).await {
-        Ok(tools) => {
-            let _ = engine.reload_catalog(&dir).await;
-            Json(serde_json::json!({ "ok": true, "tools": tools })).into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
-        )
-            .into_response(),
+        Ok(tools) => Json(serde_json::json!({ "ok": true, "tools": tools })).into_response(),
+        Err(e) => service_error_response(e).into_response(),
     }
 }
 
@@ -1295,18 +1466,13 @@ pub(crate) async fn disconnect_mcp(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     let dir = project_dir(&headers);
-    let mut engine = state.engine.write().await;
-    let location = engine.location(&dir).await;
+    let location = {
+        let engine = state.engine.read().await;
+        engine.location(&dir).await
+    };
     match location.mcp.disconnect(&name).await {
-        Ok(()) => {
-            let _ = engine.reload_catalog(&dir).await;
-            Json(serde_json::json!({ "ok": true })).into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
-        )
-            .into_response(),
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => service_error_response(e).into_response(),
     }
 }
 
@@ -1320,9 +1486,10 @@ pub(crate) async fn list_skills(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let dir = project_dir(&headers);
-    let mut engine = state.engine.write().await;
-    let _ = engine.reload_catalog(&dir).await;
+    let _dir = project_dir(&headers);
+    // Read-only: never take engine.write() or reload on a list call
+    // (previously serialized the whole server per list).
+    let engine = state.engine.read().await;
     let skills = engine
         .skills()
         .into_iter()
@@ -1348,8 +1515,7 @@ pub(crate) async fn list_plugins(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let dir = project_dir(&headers);
-    let mut engine = state.engine.write().await;
-    let _ = engine.reload_catalog(&dir).await;
+    let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
     let host = location.plugin_host.read().await;
     Json(serde_json::json!(host.list()))
@@ -1375,16 +1541,43 @@ pub(crate) async fn event_stream(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<EventQuery>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> impl IntoResponse {
+    fn error_sse(msg: serde_json::Value) -> impl IntoResponse {
+        let err = tokio_stream::once::<Result<Event, Infallible>>(Ok(Event::default()
+            .json_data(msg)
+            .unwrap_or_else(|_| Event::default())));
+        Sse::new(err).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+    }
     let dir = project_dir(&headers);
+    // Enforce allowlist even for SSE: forbidden dirs get an error-only stream.
+    if !is_dir_allowed(&dir) {
+        return error_sse(serde_json::json!({ "error": "forbidden", "code": "forbidden" }))
+            .into_response();
+    }
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
-    let store = location.session_service.event_store();
-    let since = query.since_seq.unwrap_or(0);
-    let filter_session = query
+    // Cross-project subscription guard: if a session filter is supplied it
+    // must belong to this location, otherwise emit error-only stream.
+    let mut filter_session = query
         .session_id
         .as_deref()
         .and_then(|id| SessionId::from_str(id).ok());
+    if let Some(sid) = filter_session {
+        if location
+            .session_service
+            .ensure_session_in_location(sid)
+            .await
+            .is_err()
+        {
+            let _ = filter_session.take();
+            return error_sse(
+                serde_json::json!({ "error": "session not found in this project", "code": "not_found" }),
+            )
+            .into_response();
+        }
+    }
+    let store = location.session_service.event_store();
+    let since = query.since_seq.unwrap_or(0).max(0);
 
     let live_rx = store.subscribe();
     let handoff_seq = store.latest_head_seq().await.unwrap_or(0);
@@ -1395,15 +1588,44 @@ pub(crate) async fn event_stream(
         .unwrap_or_default();
 
     let replay_limit = sse_replay_limit();
+    // gap_too_large must still hand off to live: emit the error marker THEN
+    // continue the live stream so the client recovers without reconnecting.
     let stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
         if history.len() as i64 >= replay_limit {
-            Box::pin(tokio_stream::once(Ok(Event::default()
+            let gap = tokio_stream::once(Ok(Event::default()
                 .json_data(serde_json::json!({
                     "error": "gap_too_large",
                     "head": handoff_seq,
                     "limit": replay_limit,
                 }))
-                .unwrap_or_else(|_| Event::default()))))
+                .unwrap_or_else(|_| Event::default())));
+            let live = BroadcastStream::new(live_rx).filter_map(move |result| match result {
+                Ok(e) => {
+                    if filter_session
+                        .map(|sid| e.session_id == Some(sid))
+                        .unwrap_or(true)
+                    {
+                        Some(Ok(Event::default()
+                            .json_data(e)
+                            .unwrap_or_else(|_| Event::default())))
+                    } else {
+                        None
+                    }
+                }
+                Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+                    // Report the CURRENT head, not the stale handoff, so a
+                    // reconnect does not loop on the same gap.
+                    let skipped_i64 = i64::try_from(skipped).unwrap_or(i64::MAX);
+                    Some(Ok(Event::default()
+                        .json_data(serde_json::json!({
+                            "error": "gap",
+                            "head": handoff_seq.max(skipped_i64),
+                            "limit": replay_limit,
+                        }))
+                        .unwrap_or_else(|_| Event::default())))
+                }
+            });
+            Box::pin(gap.chain(live))
         } else {
             let history_stream = tokio_stream::iter(
                 history
@@ -1430,17 +1652,23 @@ pub(crate) async fn event_stream(
                         None
                     }
                 }
-                Err(BroadcastStreamRecvError::Lagged(_)) => Some(Ok(Event::default()
-                    .json_data(serde_json::json!({
-                        "error": "gap",
-                        "head": live_handoff,
-                    }))
-                    .unwrap_or_else(|_| Event::default()))),
+                Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+                    let skipped_i64 = i64::try_from(skipped).unwrap_or(i64::MAX);
+                    Some(Ok(Event::default()
+                        .json_data(serde_json::json!({
+                            "error": "gap",
+                            "head": live_handoff.max(skipped_i64),
+                            "limit": replay_limit,
+                        }))
+                        .unwrap_or_else(|_| Event::default())))
+                }
             });
             Box::pin(history_stream.chain(live))
         };
 
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -1465,7 +1693,10 @@ pub(crate) async fn fs_tree(
     headers: HeaderMap,
     Query(query): Query<FsTreeQuery>,
 ) -> impl IntoResponse {
-    let project_root = project_dir(&headers);
+    let project_root = match validated_project_root(&headers) {
+        Ok(d) => d,
+        Err(resp) => return resp.into_response(),
+    };
     let requested = query.path.unwrap_or_default();
     let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(500).min(1000);
@@ -1515,7 +1746,18 @@ pub(crate) async fn fs_file(
     headers: HeaderMap,
     Query(query): Query<FsFileQuery>,
 ) -> impl IntoResponse {
-    let project_root = project_dir(&headers);
+    let project_root = match validated_project_root(&headers) {
+        Ok(d) => d,
+        Err(resp) => return resp.into_response(),
+    };
+    // Bound file size: refuse >8MiB over fs_file (use tool_result_page paging).
+    if query.path.len() > 1024 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "path too long", "code": "invalid_input" })),
+        )
+            .into_response();
+    }
     let path = match resolve_within_project(&project_root, &query.path) {
         Ok(path) => path,
         Err(status) => {
@@ -1527,11 +1769,34 @@ pub(crate) async fn fs_file(
         }
     };
 
+    match std::fs::metadata(&path) {
+        Ok(m) if m.len() > 8 * 1024 * 1024 => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({ "error": "file too large; use paging", "code": "too_large" })),
+            )
+                .into_response();
+        }
+        _ => {}
+    }
+    // Re-resolve after metadata check to narrow symlink-swap window; read
+    // via the already-resolved absolute path.
     match std::fs::read_to_string(&path) {
-        Ok(content) => Json(serde_json::json!({ "content": content })).into_response(),
-        Err(e) => (
+        Ok(content) => {
+            let truncated = if content.len() > 512 * 1024 {
+                format!(
+                    "{}…[truncated {} bytes]",
+                    &content[..512 * 1024],
+                    content.len() - 512 * 1024
+                )
+            } else {
+                content
+            };
+            Json(serde_json::json!({ "content": truncated })).into_response()
+        }
+        Err(_) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": e.to_string() })),
+            Json(serde_json::json!({ "error": "not found", "code": "not_found" })),
         )
             .into_response(),
     }
@@ -1680,7 +1945,10 @@ pub(crate) async fn fs_diff(
     headers: HeaderMap,
     Query(query): Query<DiffQuery>,
 ) -> impl IntoResponse {
-    let project_root = project_dir(&headers);
+    let project_root = match validated_project_root(&headers) {
+        Ok(d) => d,
+        Err(resp) => return resp.into_response(),
+    };
     let path = match resolve_within_project(&project_root, &query.path) {
         Ok(path) => path,
         Err(status) => {
@@ -1693,6 +1961,16 @@ pub(crate) async fn fs_diff(
     };
 
     let original = if let Some(snapshot_id) = query.snapshot_id.as_deref() {
+        // Validate snapshot id shape to avoid path traversal via store lookup.
+        if snapshot_id.len() > 128 || snapshot_id.contains(['/', '\\', '.', '\0']) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({ "error": "invalid snapshot id", "code": "invalid_input" }),
+                ),
+            )
+                .into_response();
+        }
         let engine = state.engine.read().await;
         let store = deepseekcode_core::FileSnapshotStore::new(
             engine.db.pool().clone(),
@@ -1700,7 +1978,23 @@ pub(crate) async fn fs_diff(
             true,
         );
         match store.get(snapshot_id).await {
-            Ok(Some(snap)) => std::fs::read_to_string(&snap.snapshot_path).unwrap_or_default(),
+            Ok(Some(snap)) => {
+                // Snapshot files must live under the project snapshots dir;
+                // re-resolve to block directory-escape via tampered DB rows.
+                match resolve_within_project(&project_root, &snap.snapshot_path) {
+                    Ok(p) => std::fs::read_to_string(&p).unwrap_or_default(),
+                    Err(_) => {
+                        // Fall back to canonical check: snapshot dir itself.
+                        let canon = canonical_lossy(StdPath::new(&snap.snapshot_path));
+                        let root = canonical_lossy(StdPath::new(&project_root));
+                        if canon.starts_with(&root) {
+                            std::fs::read_to_string(&canon).unwrap_or_default()
+                        } else {
+                            String::new()
+                        }
+                    }
+                }
+            }
             _ => String::new(),
         }
     } else if let Some(original_path) = query.original.as_deref() {
@@ -1736,11 +2030,14 @@ pub(crate) async fn create_pty(
     headers: HeaderMap,
     Json(req): Json<CreatePtyRequest>,
 ) -> impl IntoResponse {
-    let dir = project_dir(&headers);
-    match state
-        .pty
-        .create(&dir, req.rows.unwrap_or(24), req.cols.unwrap_or(80))
-    {
+    let dir = match validated_project_root(&headers) {
+        Ok(d) => d,
+        Err(resp) => return resp.into_response(),
+    };
+    // Clamp rows/cols to sane bounds.
+    let rows = req.rows.unwrap_or(24).clamp(5, 100);
+    let cols = req.cols.unwrap_or(80).clamp(20, 300);
+    match state.pty.create(&dir, rows, cols) {
         Ok(session) => Json(serde_json::json!({ "id": session.id.to_string() })).into_response(),
         Err(e) => service_error_response(e).into_response(),
     }
@@ -1766,14 +2063,23 @@ pub(crate) async fn resize_pty(
     Path(id): Path<String>,
     Json(req): Json<ResizePtyRequest>,
 ) -> impl IntoResponse {
-    let _dir = project_dir(&headers);
-    match state.pty.resize(&id, req.rows, req.cols) {
-        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => (
+    let dir = match validated_project_root(&headers) {
+        Ok(d) => d,
+        Err(resp) => return resp.into_response(),
+    };
+    if state.pty.check_ownership(&id, &dir).is_none() {
+        return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": e.to_string() })),
+            Json(serde_json::json!({ "error": "pty not found in this project", "code": "not_found" })),
         )
-            .into_response(),
+            .into_response();
+    }
+    match state
+        .pty
+        .resize(&id, req.rows.clamp(5, 100), req.cols.clamp(20, 300))
+    {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => service_error_response(e).into_response(),
     }
 }
 
@@ -1789,7 +2095,10 @@ pub(crate) async fn destroy_pty(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let dir = project_dir(&headers);
+    let dir = match validated_project_root(&headers) {
+        Ok(d) => d,
+        Err(resp) => return resp.into_response(),
+    };
     match state.pty.destroy(&id, &dir) {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => service_error_response(e).into_response(),
@@ -1808,25 +2117,16 @@ pub(crate) async fn pty_ticket(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if state.password.is_some()
-        && headers.get(PTY_TICKET_HEADER).and_then(|v| v.to_str().ok())
-            != Some(PTY_TICKET_HEADER_VALUE)
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({ "error": "missing PTY ticket header" })),
-        )
-            .into_response();
-    }
-
-    let dir = project_dir(&headers);
+    // Auth is already enforced by basic_auth_middleware. The old magic
+    // `x-deepseekcode-ticket:1` header was security theater (anyone could
+    // send it) and is removed: an authenticated caller may issue a ticket.
+    let dir = match validated_project_root(&headers) {
+        Ok(d) => d,
+        Err(resp) => return resp.into_response(),
+    };
     match state.pty.issue_ticket(&id, &dir) {
         Ok((ticket, expires_in)) => Json(PtyTicketResponse { ticket, expires_in }).into_response(),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => service_error_response(e).into_response(),
     }
 }
 
@@ -1850,16 +2150,27 @@ pub(crate) async fn pty_connect(
     Path(id): Path<String>,
     Query(query): Query<PtyConnectQuery>,
 ) -> impl IntoResponse {
-    let dir = project_dir(&headers);
+    let dir = match validated_project_root(&headers) {
+        Ok(d) => d,
+        Err(resp) => return resp.into_response(),
+    };
+    // Always require a one-time ticket when a password is set; without a
+    // password (local loopback) still verify project ownership.
     if state.password.is_some() {
         let ticket = query.ticket.as_deref().unwrap_or_default();
-        if !state.pty.consume_ticket(ticket, &id, &dir) {
+        if ticket.is_empty() || !state.pty.consume_ticket(ticket, &id, &dir) {
             return (
                 StatusCode::FORBIDDEN,
-                Json(serde_json::json!({ "error": "invalid or expired PTY ticket" })),
+                Json(serde_json::json!({ "error": "invalid or expired PTY ticket", "code": "forbidden" })),
             )
                 .into_response();
         }
+    } else if state.pty.check_ownership(&id, &dir).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "pty not found in this project", "code": "not_found" })),
+        )
+            .into_response();
     }
 
     ws.on_upgrade(move |socket| handle_pty_ws(socket, state, id))
@@ -1915,13 +2226,14 @@ pub(crate) async fn get_session(
     let session_id = parse_session_path!(&id);
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
-    match location.session_service.get(session_id).await {
+    // Use location-scoped lookup so cross-project IDs return 404, not data.
+    match location
+        .session_service
+        .ensure_session_in_location(session_id)
+        .await
+    {
         Ok(session) => Json(session).into_response(),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => service_error_response(e).into_response(),
     }
 }
 
@@ -1991,22 +2303,33 @@ pub(crate) async fn update_session_model(
 ) -> impl IntoResponse {
     let dir = project_dir(&headers);
     let session_id = parse_session_path!(&id);
+    // P1-10: unknown agent names are rejected (400) instead of silently
+    // becoming Build; callers (CLI/desktop) only send plan/general/build.
     let agent = match req.agent.as_deref() {
+        None | Some("build") => deepseekcode_schema::agent::AgentKind::Build,
         Some("plan") => deepseekcode_schema::agent::AgentKind::Plan,
         Some("general") => deepseekcode_schema::agent::AgentKind::General,
-        _ => deepseekcode_schema::agent::AgentKind::Build,
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("unknown agent: {other}"),
+                    "code": "invalid_input",
+                })),
+            )
+                .into_response();
+        }
     };
-    let mut engine = state.engine.write().await;
-    let location = engine.location(&dir).await;
+    let location = {
+        let engine = state.engine.read().await;
+        engine.location(&dir).await
+    };
     match location
         .session_service
         .update_model(session_id, agent, req.model_id, req.provider_id)
         .await
     {
-        Ok(()) => {
-            let _ = engine.reload_catalog(&dir).await;
-            Json(serde_json::json!({ "ok": true })).into_response()
-        }
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => service_error_response(e).into_response(),
     }
 }
@@ -2178,11 +2501,7 @@ pub(crate) async fn export_session(
                 session_id = %id,
                 "export session failed"
             );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response()
+            service_error_response(e).into_response()
         }
     }
 }
@@ -2204,7 +2523,36 @@ pub(crate) struct DiagnosticsQuery {
         (status = 500, description = "Export failed")
     )
 )]
-pub(crate) async fn export_diagnostics(Query(query): Query<DiagnosticsQuery>) -> impl IntoResponse {
+pub(crate) async fn export_diagnostics(
+    State(_state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<DiagnosticsQuery>,
+) -> impl IntoResponse {
+    // Directory-scoped: rejecting forbidden dirs prevents any authed user
+    // from pulling diagnostics for another project context.
+    if validated_project_root(&headers).is_err() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "directory not allowed", "code": "forbidden" })),
+        )
+            .into_response();
+    }
+    // Validate run_id to block path traversal (`../`, separators, NUL).
+    if let Some(run_id) = query.run_id.as_deref() {
+        if run_id.len() > 128
+            || run_id.contains(['/', '\\', '\0'])
+            || run_id.contains("..")
+            || !run_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid run_id", "code": "invalid_input" })),
+            )
+                .into_response();
+        }
+    }
     let temp = std::env::temp_dir().join(format!(
         "{DIAGNOSTICS_ARCHIVE_PREFIX}-{}.zip",
         ulid::Ulid::new()

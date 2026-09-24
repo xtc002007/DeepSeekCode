@@ -111,6 +111,7 @@ async fn question_tool_waits_for_submitted_answer() {
         },
         "option-a".into(),
     )
+    .await
     .expect("submit answer");
     let out = answer_task.await.expect("join");
     assert_eq!(out["answer"], "option-a");

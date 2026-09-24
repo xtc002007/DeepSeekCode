@@ -53,23 +53,35 @@ pub fn merge_rulesets(sets: impl IntoIterator<Item = PolicyRuleset>) -> PolicyRu
     sets.into_iter().flatten().collect()
 }
 
-/// Legacy `permissions.allow/deny` → policy rules.
+/// Legacy `permissions.allow/ask/deny` → policy rules.
+/// Each entry is split into (scope, pattern) so `git *` becomes
+/// `scope=bash pattern=git *` instead of a dead `scope="git *"`.
+/// Order: allow, ask, deny — deny last so an explicit block wins ties
+/// when the same pattern appears in both lists.
 pub fn ruleset_from_permissions(permissions: &PermissionsConfig) -> PolicyRuleset {
     let mut rules = Vec::new();
-    for pattern in &permissions.deny {
-        let scope = legacy_pattern_to_scope(pattern);
+    for pattern in &permissions.allow {
+        let (scope, pat) = legacy_scope_pattern(pattern);
         rules.push(PolicyRule {
             scope,
-            pattern: "*".into(),
-            action: PolicyAction::Block,
+            pattern: pat,
+            action: PolicyAction::Permit,
         });
     }
-    for pattern in &permissions.allow {
-        let scope = legacy_pattern_to_scope(pattern);
+    for pattern in &permissions.ask {
+        let (scope, pat) = legacy_scope_pattern(pattern);
         rules.push(PolicyRule {
             scope,
-            pattern: "*".into(),
-            action: PolicyAction::Permit,
+            pattern: pat,
+            action: PolicyAction::Prompt,
+        });
+    }
+    for pattern in &permissions.deny {
+        let (scope, pat) = legacy_scope_pattern(pattern);
+        rules.push(PolicyRule {
+            scope,
+            pattern: pat,
+            action: PolicyAction::Block,
         });
     }
     rules
@@ -118,14 +130,40 @@ pub fn ruleset_permission(value: &serde_json::Value) -> PolicyRuleset {
     rules
 }
 
-fn legacy_pattern_to_scope(pattern: &str) -> String {
-    if pattern == "*" {
-        return "*".into();
+fn legacy_scope_pattern(raw: &str) -> (String, String) {
+    let pattern = raw.trim();
+    if pattern.is_empty() || pattern == "*" {
+        return ("*".into(), "*".into());
     }
     if pattern.starts_with("mcp:") {
-        return pattern.to_string();
+        // e.g. `mcp:server:*` stays a scope; pattern is wildcard.
+        return (pattern.to_string(), "*".into());
     }
-    pattern.to_string()
+    // Bash-like command prefixes: `git *`, `rm *`, `npm run *`.
+    let first = pattern.split_whitespace().next().unwrap_or("");
+    const BASH_CMDS: &[&str] = &[
+        "git", "rm", "npm", "npx", "cargo", "pnpm", "yarn", "go", "python", "pip", "docker",
+        "kubectl", "ls", "cat", "echo", "cd", "mkdir", "rmdir", "cp", "mv", "chmod", "chown",
+    ];
+    if BASH_CMDS.contains(&first) || pattern.contains('*') && first.len() <= 12 {
+        // Heuristic: command-like entries map to bash scope preserving granularity.
+        // `*` alone already handled; `*.env` is a read-scope file glob.
+        if first.starts_with('*') || first.starts_with('.') {
+            return ("read".into(), pattern.to_string());
+        }
+        return ("bash".into(), pattern.to_string());
+    }
+    // File globs (`*.env`, `src/**`) map to read scope.
+    if pattern.contains('/') || pattern.contains('.') || pattern.contains('*') {
+        return ("read".into(), pattern.to_string());
+    }
+    // Fallback: treat as bash command pattern (never a dead scope).
+    ("bash".into(), pattern.to_string())
+}
+
+#[allow(dead_code)]
+fn legacy_pattern_to_scope(pattern: &str) -> String {
+    legacy_scope_pattern(pattern).0
 }
 
 fn expand_home(pattern: &str) -> String {

@@ -11,6 +11,7 @@
 | AGENTS.md | `agents_md_loaded.json` | project/agents_md source |
 | Session create | `session_create_only.json` | sessions.create |
 | Interrupt noop | `interrupt_noop.json` | sessions.interrupt idle |
+| Interrupt preserves inbox | `interrupt_preserves_inbox.json` | interrupt keeps durable inbox |
 | Session move | `move_session.json` | epoch clear on move |
 | Fork | `fork_session.json` | sessions.fork |
 | Active sessions | `active_sessions_empty.json` | sessions.active |

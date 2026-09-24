@@ -29,14 +29,14 @@ struct PtyTicketRecord {
 }
 
 pub struct PtyManager {
-    sessions: Mutex<HashMap<String, Arc<PtySession>>>,
+    sessions: Arc<Mutex<HashMap<String, Arc<PtySession>>>>,
     tickets: Mutex<HashMap<String, PtyTicketRecord>>,
 }
 
 impl PtyManager {
     pub fn new() -> Self {
         Self {
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
             tickets: Mutex::new(HashMap::new()),
         }
     }
@@ -92,6 +92,22 @@ impl PtyManager {
         let writer = Arc::new(Mutex::new(writer));
 
         let pty_id_log = id.to_string();
+        let pty_id_cleanup = id.to_string();
+        let sessions_cleanup = Arc::clone(&self.sessions);
+        // Insert the session BEFORE spawning the reader so early EOF cannot
+        // race cleanup; the thread removes the entry on exit (no FD leak).
+        let session = Arc::new(PtySession {
+            id,
+            directory: cwd.to_string(),
+            writer,
+            master,
+            child: Arc::new(Mutex::new(child)),
+            input_tx,
+        });
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), session.clone());
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             loop {
@@ -118,20 +134,8 @@ impl PtyManager {
                     }
                 }
             }
+            sessions_cleanup.lock().unwrap().remove(&pty_id_cleanup);
         });
-
-        let session = Arc::new(PtySession {
-            id,
-            directory: cwd.to_string(),
-            writer,
-            master,
-            child: Arc::new(Mutex::new(child)),
-            input_tx,
-        });
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(id.to_string(), session.clone());
         Ok(session)
     }
 
@@ -152,13 +156,47 @@ impl PtyManager {
         Ok((ticket, PTY_TICKET_TTL.as_secs()))
     }
 
+    /// Normalize once for all comparisons (server `normalize_server_directory`
+    /// equivalent): trim, unify separators, strip verbatim prefix,
+    /// case-insensitive on Windows.
+    fn normalize_dir(dir: &str) -> String {
+        normalize_pty_cwd(dir)
+    }
+
+    fn dirs_equal(a: &str, b: &str) -> bool {
+        let na = Self::normalize_dir(a);
+        let nb = Self::normalize_dir(b);
+        #[cfg(windows)]
+        {
+            na.eq_ignore_ascii_case(&nb)
+        }
+        #[cfg(not(windows))]
+        {
+            na == nb
+        }
+    }
+
+    pub fn check_ownership(&self, id: &str, directory: &str) -> Option<Arc<PtySession>> {
+        // Lazy sweep of expired tickets on every ownership check.
+        self.tickets
+            .lock()
+            .unwrap()
+            .retain(|_, record| record.expires_at > Instant::now());
+        let session = self.get(id)?;
+        if Self::dirs_equal(&session.directory, directory) {
+            Some(session)
+        } else {
+            None
+        }
+    }
+
     pub fn consume_ticket(&self, ticket: &str, pty_id: &str, directory: &str) -> bool {
         let mut tickets = self.tickets.lock().unwrap();
         tickets.retain(|_, record| record.expires_at > Instant::now());
         let Some(record) = tickets.remove(ticket) else {
             return false;
         };
-        record.pty_id == pty_id && record.directory == directory
+        record.pty_id == pty_id && Self::dirs_equal(&record.directory, directory)
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<PtySession>> {
@@ -178,18 +216,17 @@ impl PtyManager {
         Ok(())
     }
 
-    /// Remove a PTY session: kill the child shell, drop any live tickets.
+    /// Remove a PTY session: kill the child shell, wait for it, drop tickets.
     /// `directory` must match the directory the PTY was created under, so one
     /// project cannot destroy another project's terminals.
     pub fn destroy(&self, id: &str, directory: &str) -> Result<()> {
-        let requested = normalize_pty_cwd(directory);
         let session = {
             let mut sessions = self.sessions.lock().unwrap();
             let session = sessions
                 .get(id)
                 .cloned()
                 .ok_or_else(|| DeepSeekCodeError::NotFound(format!("pty {id}")))?;
-            if session.directory != requested {
+            if !Self::dirs_equal(&session.directory, directory) {
                 return Err(DeepSeekCodeError::NotFound(format!(
                     "pty {id} does not belong to this project directory"
                 )));
@@ -206,6 +243,8 @@ impl PtyManager {
                     "pty child kill failed"
                 );
             }
+            // Reap the child to avoid zombies.
+            let _ = child.wait();
         }
         self.tickets
             .lock()
@@ -240,21 +279,27 @@ impl Default for PtyManager {
 }
 
 fn normalize_pty_cwd(cwd: &str) -> String {
-    let cwd = cwd.trim();
-    if cwd.is_empty() {
+    // Cap length, unify separators, strip verbatim prefixes consistently
+    // with the HTTP layer so ticket/destroy comparisons cannot be bypassed.
+    let trimmed: String = cwd.trim().chars().take(1024).collect();
+    if trimmed.is_empty() {
         return std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".into());
     }
-    let pb = std::path::Path::new(cwd);
+    let unified = trimmed.replace('/', std::path::MAIN_SEPARATOR.to_string().as_str());
+    let pb = std::path::Path::new(&unified);
     let canonical = std::fs::canonicalize(pb).unwrap_or_else(|_| pb.to_path_buf());
-    let s = canonical.display().to_string();
-    #[cfg(windows)]
-    {
-        s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+    let mut s = canonical.display().to_string();
+    for prefix in [r"\\?\", r"\\.\"] {
+        if let Some(stripped) = s.strip_prefix(prefix) {
+            s = stripped.to_string();
+            break;
+        }
     }
-    #[cfg(not(windows))]
-    {
-        s
+    // Trailing separators make `==` fail; remove them (keep root).
+    while s.len() > 1 && s.ends_with(std::path::MAIN_SEPARATOR) {
+        s.pop();
     }
+    s
 }

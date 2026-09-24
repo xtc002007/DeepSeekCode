@@ -22,12 +22,172 @@ pub fn ensure_agents_md(project_dir: &str) -> bool {
 }
 
 /// Whether `path` resolves inside `project_dir` (including the root itself).
+/// Symlink-aware: existing prefixes are canonicalized so `link->/etc` via
+/// `link/secret` is correctly judged outside. `~`/`$HOME`/`%VAR%`/UNC and
+/// verbatim prefixes are expanded before comparison.
 pub fn path_within_project(project_dir: &str, path: &Path) -> bool {
-    let root = best_effort_abs(project_dir);
-    let resolved = resolve_path_against_root(project_dir, &root, path);
+    let root = canonical_root(project_dir);
+    let expanded = expand_user_path(path.to_string_lossy().as_ref());
+    let expanded_path = PathBuf::from(expanded);
+    let resolved = resolve_path_against_root(project_dir, &root, &expanded_path);
+    let canonical_target = canonicalize_existing_prefix(&resolved);
     let root_cmp = normalize_compare_path(&root);
-    let target_cmp = normalize_compare_path(&resolved);
-    target_cmp == root_cmp || target_cmp.starts_with(&format!("{root_cmp}/"))
+    let target_cmp = normalize_compare_path(&canonical_target);
+    if target_cmp == root_cmp || target_cmp.starts_with(&format!("{root_cmp}/")) {
+        // Even if lexically inside, a symlink component may point outside:
+        // resolve the full chain when the target (or its parent) exists.
+        if let Ok(real) = std::fs::canonicalize(&resolved) {
+            let real = strip_verbatim_prefix(real);
+            let real_cmp = normalize_compare_path(&real);
+            return real_cmp == root_cmp || real_cmp.starts_with(&format!("{root_cmp}/"));
+        }
+        return true;
+    }
+    false
+}
+
+fn canonical_root(project_dir: &str) -> PathBuf {
+    let expanded = expand_user_path(project_dir);
+    let p = PathBuf::from(expanded);
+    if let Ok(real) = std::fs::canonicalize(&p) {
+        return strip_verbatim_prefix(real);
+    }
+    // Fallback for non-existent roots (tests, not-yet-created projects):
+    // resolve the longest EXISTING prefix so the root agrees with
+    // `canonicalize_existing_prefix` applied to targets below. A plain
+    // lexical fallback leaves drive-less `/tmp/...` roots on Windows while
+    // targets resolve to `D:\tmp\...`, misjudging every relative path as
+    // outside (regression vs the old purely-lexical check).
+    canonicalize_existing_prefix(&best_effort_abs(p.to_string_lossy().as_ref()))
+}
+
+/// Expand `~`, `$HOME`/`%USERPROFILE%`/`%VAR%`, `$env:VAR` for sandbox checks.
+fn expand_user_path(raw: &str) -> String {
+    let mut s = raw.trim().to_string();
+    if s.starts_with("~/") || s == "~" {
+        if let Some(home) = dirs::home_dir() {
+            s = format!("{}{}", home.display(), &s[1..]);
+        }
+    } else if s.starts_with("$HOME/") || s.starts_with("$HOME\\") {
+        if let Some(home) = dirs::home_dir() {
+            s = format!("{}{}", home.display(), &s[5..]);
+        }
+    } else if s.starts_with("%") {
+        // %VAR%/rest -> env value
+        if let Some(end) = s[1..].find('%') {
+            let var = &s[1..1 + end];
+            if let Ok(val) = std::env::var(var) {
+                s = format!("{}{}", val, &s[1 + end + 1..]);
+            }
+        }
+    } else if s.starts_with("$env:") {
+        let rest = &s[5..];
+        let var_end = rest.find(['/', '\\']).unwrap_or(rest.len());
+        let var = &rest[..var_end];
+        if let Ok(val) = std::env::var(var) {
+            s = format!("{}{}", val, &rest[var_end..]);
+        }
+    }
+    // Expand embedded $VAR / %VAR% occurrences.
+    s = expand_embedded_env(&s);
+    s
+}
+
+fn expand_embedded_env(s: &str) -> String {
+    let mut out = s.to_string();
+    // $HOME embedded
+    if out.contains("$HOME") {
+        if let Some(home) = dirs::home_dir() {
+            out = out.replace("$HOME", &home.display().to_string());
+        }
+    }
+    // Generic $VAR embedded: expand `$NAME` ([A-Za-z_][A-Za-z0-9_]*).
+    // Skips `${...}`, `$env:` (handled above), and already-expanded `$HOME`.
+    let mut search_from = 0usize;
+    while let Some(rel) = out[search_from..].find('$') {
+        let dollar = search_from + rel;
+        let rest = &out[dollar + 1..];
+        if rest.starts_with('{') || rest.starts_with("env:") || rest.starts_with("HOME") {
+            search_from = dollar + 1;
+            continue;
+        }
+        let mut end = 0usize;
+        for (i, ch) in rest.char_indices() {
+            if (i == 0 && (ch.is_ascii_alphabetic() || ch == '_'))
+                || (i > 0 && (ch.is_ascii_alphanumeric() || ch == '_'))
+            {
+                end = i + ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if end == 0 {
+            search_from = dollar + 1;
+            continue;
+        }
+        let var = rest[..end].to_string();
+        let val = std::env::var(&var).unwrap_or_default();
+        out.replace_range(dollar..dollar + 1 + end, &val);
+        search_from = dollar + val.len();
+        if search_from > out.len() {
+            break;
+        }
+    }
+    // %VAR% embedded
+    while let Some(start) = out.find('%') {
+        let Some(end_rel) = out[start + 1..].find('%') else {
+            break;
+        };
+        let end = start + 1 + end_rel;
+        let var = &out[start + 1..end];
+        if var.is_empty() || !var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            break;
+        }
+        let val = std::env::var(var).unwrap_or_default();
+        out.replace_range(start..=end, &val);
+    }
+    out
+}
+
+/// Canonicalize the longest existing prefix, then re-append the remainder
+/// lexically. This catches `project/link(subdir->/etc)/secret` without
+/// requiring the full target to exist.
+fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
+    let mut cur = path.to_path_buf();
+    let mut remainder: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if cur.exists() {
+            if let Ok(real) = std::fs::canonicalize(&cur) {
+                let mut out = strip_verbatim_prefix(real);
+                remainder.reverse();
+                for comp in remainder {
+                    out.push(comp);
+                }
+                return out;
+            }
+            return path.to_path_buf();
+        }
+        match cur.file_name() {
+            Some(name) => {
+                remainder.push(name.to_os_string());
+                if let Some(parent) = cur.parent() {
+                    cur = parent.to_path_buf();
+                    if cur.as_os_str().is_empty() {
+                        return path.to_path_buf();
+                    }
+                    continue;
+                }
+                return path.to_path_buf();
+            }
+            None => {
+                // Reached root without existing prefix.
+                if let Ok(real) = std::fs::canonicalize(path) {
+                    return strip_verbatim_prefix(real);
+                }
+                return path.to_path_buf();
+            }
+        }
+    }
 }
 
 /// Normalize a tool path for policy glob matching (forward slashes, project-relative).
@@ -36,16 +196,18 @@ pub fn policy_path_pattern(project_dir: &str, path: &str) -> String {
     if path.is_empty() || path == "*" {
         return "*".into();
     }
-    let root = best_effort_abs(project_dir);
-    let resolved = resolve_path_against_root(project_dir, &root, Path::new(path));
+    let expanded = expand_user_path(path);
+    let root = canonical_root(project_dir);
+    let resolved = resolve_path_against_root(project_dir, &root, Path::new(&expanded));
+    let canonical = canonicalize_existing_prefix(&resolved);
     let root_slash = normalize_path_slashes(&root);
-    let resolved_slash = normalize_path_slashes(&resolved);
+    let resolved_slash = normalize_path_slashes(&canonical);
     if resolved_slash == root_slash {
         ".".into()
     } else if let Some(suffix) = resolved_slash.strip_prefix(&format!("{root_slash}/")) {
         suffix.to_string()
     } else {
-        path.replace('\\', "/")
+        expanded.replace('\\', "/")
     }
 }
 
@@ -65,23 +227,36 @@ fn normalize_path_slashes(path: &Path) -> String {
     normalized.to_string_lossy().replace('\\', "/")
 }
 
-fn resolve_path_against_root(project_dir: &str, root: &Path, path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        if let Ok(relative) = path.strip_prefix(project_dir) {
+fn resolve_path_against_root(_project_dir: &str, root: &Path, path: &Path) -> PathBuf {
+    // Normalize verbatim prefix + slashes before joining so
+    // `\\?\C:\proj` and `C:/proj` compare equal.
+    let cleaned = strip_verbatim_prefix(path.to_path_buf());
+    if cleaned.is_absolute() {
+        // If already under canonical root, keep under root (preserves case).
+        if let Ok(relative) = cleaned.strip_prefix(root) {
             return root.join(relative);
         }
-        if let Ok(relative) = path.strip_prefix(root) {
-            return root.join(relative);
+        // Try case-insensitive / slash-normalized prefix match for Windows.
+        let root_cmp = normalize_compare_path(root);
+        let abs_cmp = normalize_compare_path(&cleaned);
+        if abs_cmp == root_cmp || abs_cmp.starts_with(&format!("{root_cmp}/")) {
+            return cleaned;
         }
-        best_effort_abs_path(path)
-    } else {
-        root.join(path)
+        return strip_verbatim_prefix(best_effort_abs_path(&cleaned));
     }
+    root.join(cleaned)
 }
 
 /// Ensure a resolved filesystem path stays inside the project root.
+/// Canonicalizes existing prefixes (symlink-aware) and re-checks the parent
+/// after creation to close TOCTOU on `create_dir_all` races.
 pub fn validate_project_path(project_dir: &str, path: PathBuf) -> Result<PathBuf, ToolFailure> {
+    // Expand user/env shorthands on the string form first.
+    let expanded = expand_user_path(&path.to_string_lossy());
+    let path = PathBuf::from(expanded);
     if path_within_project(project_dir, &path) {
+        // If parent exists as a symlink to outside, canonical check above
+        // already fails. Return the lexically-joined path for IO.
         Ok(path)
     } else {
         Err(ToolFailure {
@@ -129,8 +304,11 @@ pub fn command_threatens_project_root(command: &str, project_dir: &str) -> Optio
 }
 
 /// Reject shell commands that leave the project root or create files outside it.
+/// Covers `cd`, relative `../outside`, `~/…`, `$HOME`/`%VAR%`/`$env:VAR`,
+/// `..\secret`, PowerShell `Get-Content ../x` / `Set-Content`, and relative
+/// redirects (`> ../out`). Quote-aware.
 pub fn command_escapes_project_directory(command: &str, project_dir: &str) -> Option<String> {
-    let root = best_effort_abs(project_dir);
+    let root = canonical_root(project_dir);
     let mut cwd = root.clone();
 
     for segment in split_shell_segments(command) {
@@ -140,7 +318,8 @@ pub fn command_escapes_project_directory(command: &str, project_dir: &str) -> Op
         }
 
         if let Some(target) = parse_cd_target(seg) {
-            cwd = resolve_cd_path(&cwd, &target);
+            let expanded = expand_user_path(&target);
+            cwd = resolve_cd_path(&cwd, &expanded);
             if !path_within_project(project_dir, &cwd) {
                 return Some(format!(
                     "Refusing to change directory outside the project root `{}`. \
@@ -152,7 +331,8 @@ pub fn command_escapes_project_directory(command: &str, project_dir: &str) -> Op
         }
 
         if let Some(dir) = parse_mkdir_target(seg) {
-            let full = resolve_relative_path(&cwd, &dir);
+            let expanded = expand_user_path(&dir);
+            let full = resolve_relative_path(&cwd, &expanded);
             if !path_within_project(project_dir, &full) {
                 return Some(format!(
                     "Refusing to create `{}` outside the project root `{}`. \
@@ -163,8 +343,10 @@ pub fn command_escapes_project_directory(command: &str, project_dir: &str) -> Op
             }
         }
 
+        // Absolute literals (drive:/unix) via extractor.
         for abs in extract_filesystem_path_literals(seg) {
-            let full = PathBuf::from(&abs);
+            let expanded = expand_user_path(&abs);
+            let full = PathBuf::from(&expanded);
             if !path_within_project(project_dir, &full) {
                 return Some(format!(
                     "Refusing to reference `{}` outside the project root `{}`. \
@@ -174,9 +356,158 @@ pub fn command_escapes_project_directory(command: &str, project_dir: &str) -> Op
                 ));
             }
         }
+
+        // Relative escapes + home/env + PowerShell path args + redirects.
+        for rel in extract_relative_escape_candidates(seg) {
+            let expanded = expand_user_path(&rel);
+            let full = resolve_relative_path(&cwd, &expanded);
+            if !path_within_project(project_dir, &full) {
+                return Some(format!(
+                    "Refusing to reference `{rel}` outside the project root `{}`. \
+                     Use paths inside the project directory.",
+                    root.display()
+                ));
+            }
+        }
+        for target in parse_redirect_targets(seg) {
+            if target.trim().is_empty() {
+                continue;
+            }
+            let expanded = expand_user_path(target.trim());
+            let full = resolve_relative_path(&cwd, &expanded);
+            if !path_within_project(project_dir, &full) {
+                return Some(format!(
+                    "Refusing to write redirect target `{}` outside the project root `{}`.",
+                    target.trim(),
+                    root.display()
+                ));
+            }
+        }
+        // PowerShell file cmdlets: Get-Content/Set-Content/Add-Content etc.
+        for ps_path in extract_powershell_path_args(seg) {
+            let expanded = expand_user_path(&ps_path);
+            let full = resolve_relative_path(&cwd, &expanded);
+            if !path_within_project(project_dir, &full) {
+                return Some(format!(
+                    "Refusing to reference `{ps_path}` outside the project root `{}`.",
+                    root.display()
+                ));
+            }
+        }
     }
 
     None
+}
+
+/// Tokens that may escape even without drive/leading-slash: `../x`,
+/// `..\x`, `~/x`, `$HOME/...`, `%VAR%/...`, `$env:VAR/...`.
+fn extract_relative_escape_candidates(segment: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in split_shell_token_quoted(segment) {
+        let t = token.trim_matches(|c| c == '"' || c == '\'').trim();
+        if t.is_empty() {
+            continue;
+        }
+        // Strip trailing punctuation from prose.
+        let t = t.trim_end_matches([',', ';', ')']).trim();
+        if t.starts_with("../")
+            || t == ".."
+            || t.starts_with("..\\")
+            || t.starts_with("~/")
+            || t == "~"
+            || t.starts_with("$HOME")
+            || t.starts_with("$env:")
+            || t.starts_with('%')
+            || (t.contains("..") && (t.contains('/') || t.contains('\\')))
+        {
+            out.push(t.to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn split_shell_token_quoted(segment: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    for ch in segment.chars() {
+        match ch {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                cur.push(ch);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                cur.push(ch);
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !cur.trim().is_empty() {
+                    out.push(cur.trim().to_string());
+                }
+                cur.clear();
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur.trim().to_string());
+    }
+    out
+}
+
+/// PowerShell `*-Content -Path <p>` / `-LiteralPath <p>` / `Get-Item <p>`.
+fn extract_powershell_path_args(segment: &str) -> Vec<String> {
+    let tokens = split_shell_token_quoted(segment);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let lower = tokens[i].to_ascii_lowercase();
+        let is_cmdlet = lower.contains("content")
+            || lower.contains("get-item")
+            || lower.contains("get-childitem")
+            || lower.contains("remove-item")
+            || lower == "type"
+            || lower == "cat";
+        if is_cmdlet && i + 1 < tokens.len() {
+            // Skip flags, take `-Path <v>` value or bare next arg.
+            let mut j = i + 1;
+            while j < tokens.len() {
+                let t = tokens[j].trim_matches(|c| c == '"' || c == '\'');
+                if t.eq_ignore_ascii_case("-path")
+                    || t.eq_ignore_ascii_case("-literalpath")
+                    || t.eq_ignore_ascii_case("-filepath")
+                {
+                    if j + 1 < tokens.len() {
+                        let v = tokens[j + 1]
+                            .trim_matches(|c| c == '"' || c == '\'')
+                            .to_string();
+                        if !v.is_empty() && v != "1" && v != "2" {
+                            out.push(v);
+                        }
+                        j += 2;
+                        continue;
+                    }
+                    j += 1;
+                    continue;
+                }
+                if t.starts_with('-') {
+                    j += 1;
+                    continue;
+                }
+                if !t.is_empty() {
+                    out.push(t.to_string());
+                }
+                break;
+            }
+        }
+        i += 1;
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Extract filesystem paths that a shell command may create or modify.

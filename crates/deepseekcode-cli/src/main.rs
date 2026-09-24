@@ -38,6 +38,13 @@ fn turn_receipt_line(payload: &serde_json::Value, show: bool) -> Option<String> 
 #[derive(Parser)]
 #[command(name = "deepseekcode", about = "DeepSeekCode command-line interface")]
 struct Cli {
+    /// Remote server URL (e.g. http://127.0.0.1:4096). When set, commands use
+    /// the remote server instead of starting an embedded engine (P1-11).
+    #[arg(long, global = true, env = "DEEPSEEKCODE_SERVER_URL")]
+    url: Option<String>,
+    /// Server password for remote `--url` (or DEEPSEEKCODE_SERVER_PASSWORD).
+    #[arg(long, global = true, env = "DEEPSEEKCODE_SERVER_PASSWORD")]
+    password: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -46,7 +53,7 @@ struct Cli {
 enum Commands {
     /// Run a single prompt non-interactively
     Run {
-        #[arg(short, long)]
+        #[arg(short, long, default_value = ".")]
         directory: String,
         /// Auto-permit non-block policy rules (YOLO mode)
         #[arg(long)]
@@ -59,6 +66,10 @@ enum Commands {
         directory: String,
         #[arg(short, long, default_value = "4096")]
         port: u16,
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long)]
+        password: Option<String>,
         /// Auto-permit non-block policy rules (YOLO mode)
         #[arg(long)]
         auto: bool,
@@ -99,9 +110,10 @@ enum Commands {
         directory: String,
         #[arg(short, long)]
         session: Option<String>,
-        #[arg(long, default_value = "queue")]
+        // Default steer to match Desktop Settings "Steer (default)".
+        #[arg(long, default_value = "steer")]
         delivery: String,
-        #[arg(long, default_value = "true")]
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         resume: bool,
         text: String,
     },
@@ -161,6 +173,18 @@ enum PolicyCommands {
         reply: String,
         #[arg(short, long)]
         message: Option<String>,
+    },
+    /// List remembered project grants (previously missing).
+    Grants {
+        #[arg(short, long, default_value = ".")]
+        directory: String,
+    },
+    /// Delete a remembered grant by id.
+    GrantDelete {
+        #[arg(short, long, default_value = ".")]
+        directory: String,
+        #[arg(short, long)]
+        id: String,
     },
 }
 
@@ -276,6 +300,20 @@ enum SessionCommands {
         session: String,
         target: String,
     },
+    /// Interrupt a running session (previously missing; desktop-only).
+    Interrupt {
+        #[arg(short, long, default_value = ".")]
+        directory: String,
+        #[arg(short, long)]
+        session: String,
+    },
+    /// Delete a session.
+    Delete {
+        #[arg(short, long, default_value = ".")]
+        directory: String,
+        #[arg(short, long)]
+        session: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -342,7 +380,39 @@ enum ProjectDirectoryCommands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let logging = load_logging_config();
+    // P1-11: honor `--directory` for logging config (previously hardcoded `.`).
+    // Parse args first for the directory hint, then init logging.
+    let pre = Cli::parse();
+    let log_dir = directory_hint(&pre);
+    let logging = load_logging_config_for(&log_dir);
+    // Re-parse (cheap) for the match below; `pre` is reused for `--url`.
+    let cli = pre;
+    return run(cli, logging).await;
+}
+
+fn directory_hint(cli: &Cli) -> String {
+    match &cli.command {
+        Commands::Run { directory, .. }
+        | Commands::Prompt { directory, .. }
+        | Commands::SessionList { directory }
+        | Commands::Config { directory }
+        | Commands::Health { directory, .. } => directory.clone(),
+        Commands::Serve { directory, .. } => directory.clone(),
+        Commands::Session { command } => match command {
+            SessionCommands::List { directory }
+            | SessionCommands::Fork { directory, .. }
+            | SessionCommands::Export { directory, .. }
+            | SessionCommands::Revert { directory, .. }
+            | SessionCommands::Compact { directory, .. }
+            | SessionCommands::Move { directory, .. }
+            | SessionCommands::Interrupt { directory, .. }
+            | SessionCommands::Delete { directory, .. } => directory.clone(),
+        },
+        _ => ".".to_string(),
+    }
+}
+
+async fn run(cli: Cli, logging: LoggingConfig) -> anyhow::Result<()> {
     let run_ctx = init("cli", &logging);
     tracing::info!(
         target: deepseekcode_telemetry::APP,
@@ -350,8 +420,16 @@ async fn main() -> anyhow::Result<()> {
         "deepseekcode-cli starting"
     );
 
-    let cli = Cli::parse();
-    match cli.command {
+    // P1-11: global `--url`/`--password` (or env) route every command to a
+    // remote server instead of starting an embedded engine.
+    let Cli {
+        url: global_url,
+        password: global_password,
+        command,
+    } = cli;
+    let (url, password) = (global_url, global_password);
+
+    match command {
         Commands::Run {
             directory,
             auto,
@@ -360,7 +438,8 @@ async fn main() -> anyhow::Result<()> {
             if auto {
                 std::env::set_var("DEEPSEEKCODE_POLICY_MODE", "auto");
             }
-            let (engine, client) = scoped_client(&directory).await?;
+            let (engine, client) =
+                scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
             let session = client
                 .create_session(CreateSessionRequest {
                     id: None,
@@ -370,12 +449,15 @@ async fn main() -> anyhow::Result<()> {
                     provider_id: None,
                 })
                 .await?;
+            // P1-11: `run` is a fresh single-shot prompt — `steer`
+            // matches `prompt` default and Desktop behavior (previously
+            // `Queue`, splitting the two paths).
             let _message_id = client
                 .prompt(PromptRequest {
                     id: None,
                     session_id: session.id,
                     prompt,
-                    delivery: PromptDelivery::Queue,
+                    delivery: PromptDelivery::Steer,
                     resume: true,
                 })
                 .await?;
@@ -404,10 +486,17 @@ async fn main() -> anyhow::Result<()> {
                                 match client.list_session_events(session.id, since_seq).await {
                                     Ok(events) => {
                                         reconnect_backoff = std::time::Duration::from_millis(500);
+                                        let mut max_seq = since_seq;
                                         for event in events {
                                             if event.session_id != Some(session.id) {
+                                                max_seq = max_seq.max(event.seq);
                                                 continue;
                                             }
+                                            // Advance per-event so reconnects
+                                            // never reprint deltas (previously
+                                            // only `head` at end, causing dupes
+                                            // when head lagged).
+                                            max_seq = max_seq.max(event.seq);
                                             if event.kind == EventKind::SessionIdle {
                                                 return Ok(());
                                             }
@@ -441,9 +530,7 @@ async fn main() -> anyhow::Result<()> {
                                         // The server's `head` can lag behind what
                                         // this client already applied (e.g. after
                                         // a broadcast-lag gap).
-                                        if head > since_seq {
-                                            since_seq = head;
-                                        }
+                                        since_seq = since_seq.max(max_seq).max(head);
                                     }
                                     Err(e) => {
                                         tracing::warn!(
@@ -511,40 +598,91 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             }
-            engine.shutdown().await;
+            shutdown_opt(engine).await;
         }
         Commands::Serve {
             directory,
             port,
+            host,
+            password,
             auto,
         } => {
             if auto {
                 std::env::set_var("DEEPSEEKCODE_POLICY_MODE", "auto");
             }
-            let addr: SocketAddr = format!("127.0.0.1:{port}").parse()?;
+            let addr: SocketAddr = format!("{host}:{port}").parse()?;
             let db_path = dirs::data_dir()
                 .map(|p| p.join("deepseekcode").join("deepseekcode.db"))
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| "deepseekcode.db".into());
+            if let Some(parent) = std::path::Path::new(&db_path).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let password = password
+                .filter(|p| !p.trim().is_empty())
+                .or_else(|| std::env::var("DEEPSEEKCODE_SERVER_PASSWORD").ok());
             let db_url = format!("sqlite://{db_path}");
-            deepseekcode_server::serve(directory, db_url, addr, None).await?;
+            deepseekcode_server::serve(directory, db_url, addr, password).await?;
         }
         Commands::Upgrade { check_only } => {
-            if check_only {
+            // P1-11: real check against the release channel manifest
+            // (`packaging/desktop/windows/dist/latest.json` schema) instead of
+            // a println stub. Falls back to a clear message when offline.
+            let current = env!("CARGO_PKG_VERSION");
+            let manifest_url = std::env::var("DEEPSEEKCODE_UPDATE_URL").ok();
+            if let Some(url) = manifest_url {
+                match reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()
+                {
+                    Ok(http) => match http.get(&url).send().await {
+                        Ok(resp) => match resp.json::<serde_json::Value>().await {
+                            Ok(manifest) => {
+                                let latest = manifest
+                                    .get("version")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                let download = manifest
+                                    .get("url")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                if latest == current {
+                                    println!("DeepSeekCode {current} — up to date");
+                                } else {
+                                    println!(
+                                        "DeepSeekCode {current} — update available: {latest} ({download})"
+                                    );
+                                    if !check_only {
+                                        println!("Download the installer above or use your package manager.");
+                                    }
+                                }
+                            }
+                            Err(e) => println!(
+                                "DeepSeekCode {current} — update check failed to parse manifest: {e}"
+                            ),
+                        },
+                        Err(e) => println!(
+                            "DeepSeekCode {current} — update check failed (offline?): {e}"
+                        ),
+                    },
+                    Err(e) => println!("DeepSeekCode {current} — update check failed: {e}"),
+                }
+            } else if check_only {
                 println!(
-                    "DeepSeekCode {} — update check not configured",
-                    env!("CARGO_PKG_VERSION")
+                    "DeepSeekCode {current} — no update channel configured (set DEEPSEEKCODE_UPDATE_URL to a latest.json)"
                 );
             } else {
-                println!("Auto-update requires a release channel; use package manager for now.");
+                println!("Auto-update requires a release channel (DEEPSEEKCODE_UPDATE_URL); use package manager for now.");
             }
         }
         Commands::SessionList { directory } => {
-            let (engine, client) = scoped_client(&directory).await?;
+            eprintln!("warning: `session-list` is deprecated; use `session list`");
+            let (engine, client) =
+                scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
             for s in client.list_sessions().await? {
                 println!("{} {:?}", s.id, s.title);
             }
-            engine.shutdown().await;
+            shutdown_opt(engine).await;
         }
         Commands::Diagnostics { command } => match command {
             DiagnosticsCommands::Export { output, run_id } => {
@@ -556,37 +694,72 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Agent { command } => match command {
             AgentCommands::List { directory } => {
-                let (engine, client) = scoped_client(&directory).await?;
-                println!("build, plan, general (session agent is set per prompt)");
-                let _ = client;
-                engine.shutdown().await;
+                // P1-11: list from effective config (not hardcoded) so custom
+                // agents appear.
+                let cfg =
+                    deepseekcode_config::load_effective_config(camino::Utf8Path::new(&directory));
+                match cfg {
+                    Ok(c) => {
+                        let mut names: Vec<_> = c.agents.keys().cloned().collect();
+                        if names.is_empty() {
+                            names = vec!["build".into(), "plan".into(), "general".into()];
+                        }
+                        names.sort();
+                        for n in names {
+                            println!("{n}");
+                        }
+                    }
+                    Err(e) => {
+                        println!("build\nplan\ngeneral");
+                        eprintln!("warning: failed to load config, showing defaults: {e}");
+                    }
+                }
             }
             AgentCommands::Set {
                 directory,
                 agent,
                 session,
             } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 let session_id = resolve_session(&client, session.as_deref()).await?;
                 let session = client.get_session(session_id).await?;
-                let model = session.model_id.unwrap_or_else(|| "gpt-4o-mini".into());
-                let provider = session.provider_id.unwrap_or_else(|| "openai".into());
+                // P1-11: defaults from effective config, not hardcoded
+                // `gpt-4o-mini`/`openai` (previously diverged from Server).
+                let cfg =
+                    deepseekcode_config::load_effective_config(camino::Utf8Path::new(&directory))
+                        .ok();
+                let model = session
+                    .model_id
+                    .or_else(|| {
+                        cfg.as_ref()
+                            .and_then(|c| c.model.as_ref().and_then(|m| m.id.clone()))
+                    })
+                    .unwrap_or_else(|| "gpt-4o-mini".into());
+                let provider = session
+                    .provider_id
+                    .or_else(|| {
+                        cfg.as_ref()
+                            .and_then(|c| c.model.as_ref().and_then(|m| m.provider.clone()))
+                    })
+                    .unwrap_or_else(|| "openai".into());
                 client
                     .update_model(session_id, Some(&agent), &model, &provider)
                     .await?;
                 println!("agent set to {agent}");
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
         },
         Commands::Model { command } => match command {
             ModelCommands::List { directory } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 for provider in client.list_providers().await? {
                     for model in provider.models {
                         println!("{} {} ({})", provider.id, model.name, model.id);
                     }
                 }
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
             ModelCommands::Set {
                 directory,
@@ -594,23 +767,25 @@ async fn main() -> anyhow::Result<()> {
                 provider,
                 session,
             } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 let session_id = resolve_session(&client, session.as_deref()).await?;
                 let provider_id = provider.unwrap_or_else(|| "openai".into());
                 client
                     .update_model(session_id, None, &model, &provider_id)
                     .await?;
                 println!("model set to {model}");
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
         },
         Commands::Provider { command } => match command {
             ProviderCommands::List { directory } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 for p in client.list_providers().await? {
                     println!("{} {} connected={}", p.id, p.name, p.connected);
                 }
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
             ProviderCommands::Connect {
                 directory,
@@ -618,21 +793,23 @@ async fn main() -> anyhow::Result<()> {
                 api_key,
                 base_url,
             } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 client
                     .connect_provider(&provider, api_key, base_url)
                     .await?;
                 println!("connected {provider}");
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
             ProviderCommands::Disconnect {
                 directory,
                 provider,
             } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 client.disconnect_provider(&provider).await?;
                 println!("disconnected {provider}");
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
         },
         Commands::Prompt {
@@ -642,7 +819,8 @@ async fn main() -> anyhow::Result<()> {
             resume,
             text,
         } => {
-            let (engine, client) = scoped_client(&directory).await?;
+            let (engine, client) =
+                scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
             let session_id = resolve_session(&client, session.as_deref()).await?;
             let delivery = match delivery.as_str() {
                 "steer" => PromptDelivery::Steer,
@@ -658,27 +836,29 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .await?;
             println!("prompt submitted");
-            engine.shutdown().await;
+            shutdown_opt(engine).await;
         }
         Commands::Session { command } => match command {
             SessionCommands::List { directory } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 for s in client.list_sessions().await? {
                     println!("{} {:?} {}", s.id, s.title, s.updated_at);
                 }
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
             SessionCommands::Fork {
                 directory,
                 session,
                 until,
             } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 let session_id = SessionId::from_str(&session)?;
                 let until_id = until.as_deref().map(MessageId::from_str).transpose()?;
                 let forked = client.fork_session(session_id, until_id).await?;
                 println!("forked session {}", forked.id);
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
             SessionCommands::Export {
                 directory,
@@ -686,29 +866,32 @@ async fn main() -> anyhow::Result<()> {
                 no_sanitize,
                 output,
             } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 let session_id = SessionId::from_str(&session)?;
                 let data = client
                     .export_session_with_sanitize(session_id, !no_sanitize)
                     .await?;
                 std::fs::write(&output, serde_json::to_string_pretty(&data)?)?;
                 println!("exported to {}", output.display());
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
             SessionCommands::Revert {
                 directory,
                 session,
                 message,
             } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 let session_id = SessionId::from_str(&session)?;
                 let message_id = MessageId::from_str(&message)?;
                 client.revert_stage(session_id, message_id).await?;
                 println!("revert staged at {message}");
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
             SessionCommands::Compact { directory, session } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 let session_id = SessionId::from_str(&session)?;
                 let installed = client.compact_session(session_id).await?;
                 println!(
@@ -719,82 +902,108 @@ async fn main() -> anyhow::Result<()> {
                         "nothing to compact"
                     }
                 );
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
             SessionCommands::Move {
                 directory,
                 session,
                 target,
             } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 let session_id = SessionId::from_str(&session)?;
                 client.move_session(session_id, &target).await?;
                 println!("session moved to {target}");
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
+            }
+            SessionCommands::Interrupt { directory, session } => {
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
+                let session_id = SessionId::from_str(&session)?;
+                client.interrupt(session_id).await?;
+                println!("session {session_id} interrupted");
+                shutdown_opt(engine).await;
+            }
+            SessionCommands::Delete { directory, session } => {
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
+                let session_id = SessionId::from_str(&session)?;
+                client.delete_session(session_id).await?;
+                println!("session {session_id} deleted");
+                shutdown_opt(engine).await;
             }
         },
         Commands::Mcp { command } => match command {
             McpCommands::List { directory } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 for entry in client.list_mcp().await? {
                     println!("{}", serde_json::to_string(&entry)?);
                 }
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
             McpCommands::Connect { directory, name } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 client.connect_mcp(&name).await?;
                 println!("mcp {name} connected");
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
             McpCommands::Disconnect { directory, name } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 client.disconnect_mcp(&name).await?;
                 println!("mcp {name} disconnected");
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
         },
         Commands::Worktree { command } => match command {
             WorktreeCommands::List { directory } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 for entry in client.list_worktrees().await? {
                     println!("{}", serde_json::to_string(&entry)?);
                 }
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
             WorktreeCommands::Create { directory, branch } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 let created = client.create_worktree(branch.as_deref()).await?;
                 println!("{}", serde_json::to_string_pretty(&created)?);
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
             WorktreeCommands::Remove { directory, path } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 client.remove_worktree(&path).await?;
                 println!("removed worktree {path}");
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
             WorktreeCommands::Prune { directory } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 client.prune_worktrees().await?;
                 println!("pruned stale worktrees");
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
         },
         Commands::Project { command } => match command {
             ProjectCommands::Directories { command } => match command {
                 ProjectDirectoryCommands::List { directory } => {
-                    let (engine, client) = scoped_client(&directory).await?;
+                    let (engine, client) =
+                        scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                     for entry in client.list_project_directories().await? {
                         println!("{}", serde_json::to_string(&entry)?);
                     }
-                    engine.shutdown().await;
+                    shutdown_opt(engine).await;
                 }
                 ProjectDirectoryCommands::Add { directory, path } => {
-                    let (engine, client) = scoped_client(&directory).await?;
+                    let (engine, client) =
+                        scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                     let entry = client.add_project_directory(&path, None).await?;
                     println!("{}", serde_json::to_string_pretty(&entry)?);
-                    engine.shutdown().await;
+                    shutdown_opt(engine).await;
                 }
             },
         },
@@ -803,28 +1012,53 @@ async fn main() -> anyhow::Result<()> {
                 deepseekcode_config::load_effective_config(camino::Utf8Path::new(&directory))?;
             println!("{}", serde_json::to_string_pretty(&cfg)?);
         }
-        Commands::Health { directory, url } => {
-            if let Some(url) = url {
-                let client = DeepSeekCodeClient::new(url, directory);
-                client.health().await?;
-                println!("ok");
-            } else {
-                let (engine, client) = scoped_client(&directory).await?;
-                client.health().await?;
-                println!("ok");
-                engine.shutdown().await;
-            }
+        Commands::Health {
+            directory,
+            url: flag_url,
+        } => {
+            // Per-command `--url` wins over global `--url`.
+            let endpoint = flag_url.as_deref().or(url.as_deref());
+            let (engine, client) = scoped_client(endpoint, password.as_deref(), &directory).await?;
+            client.health().await?;
+            println!("ok");
+            shutdown_opt(engine).await;
         }
         Commands::Policy { command } => match command {
             PolicyCommands::Pending { directory } => {
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 for req in client.list_pending_policies().await? {
+                    // Show full decision context (previously only id/scope).
                     println!(
-                        "{} {} {} {:?}",
-                        req.id, req.scope, req.tool_name, req.patterns
+                        "{} scope={} tool={} patterns={:?} remember={:?} status={:?} desc={}",
+                        req.id,
+                        req.scope,
+                        req.tool_name,
+                        req.patterns,
+                        req.remember_patterns,
+                        req.status,
+                        req.description,
                     );
                 }
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
+            }
+            PolicyCommands::Grants { directory } => {
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
+                for grant in client.list_policy_grants().await? {
+                    println!(
+                        "{} scope={} pattern={} created={}",
+                        grant.id, grant.scope, grant.pattern, grant.created_at
+                    );
+                }
+                shutdown_opt(engine).await;
+            }
+            PolicyCommands::GrantDelete { directory, id } => {
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
+                client.delete_policy_grant(&id).await?;
+                println!("grant {id} deleted");
+                shutdown_opt(engine).await;
             }
             PolicyCommands::Reply {
                 directory,
@@ -833,13 +1067,20 @@ async fn main() -> anyhow::Result<()> {
                 message,
             } => {
                 use deepseekcode_schema::policy::{PolicyReply, PolicyReplyKind};
+                // Validate ULID id early (previously raw String passed through).
+                if deepseekcode_types::PermissionId::from_str(&id).is_err() {
+                    anyhow::bail!("invalid policy id: {id}");
+                }
                 let kind = match reply.to_ascii_lowercase().as_str() {
-                    "once" | "allow" | "permit" => PolicyReplyKind::Once,
+                    "once" => PolicyReplyKind::Once,
+                    "allow" => PolicyReplyKind::Once,
+                    "permit" => PolicyReplyKind::Once,
                     "project" | "always" => PolicyReplyKind::Project,
                     "reject" | "deny" => PolicyReplyKind::Reject,
                     other => anyhow::bail!("unknown reply kind: {other}"),
                 };
-                let (engine, client) = scoped_client(&directory).await?;
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 client
                     .reply_policy(
                         &id,
@@ -850,21 +1091,48 @@ async fn main() -> anyhow::Result<()> {
                     )
                     .await?;
                 println!("ok");
-                engine.shutdown().await;
+                shutdown_opt(engine).await;
             }
         },
     }
     Ok(())
 }
 
-async fn scoped_client(directory: &str) -> anyhow::Result<(EmbeddedEngine, DeepSeekCodeClient)> {
+/// Remote-or-embedded client scope (P1-11): `url` (`--url` /
+/// `DEEPSEEKCODE_SERVER_URL`) routes to a remote server instead of starting
+/// an embedded engine, so a `serve --password` remote is fully operable.
+/// Returns the client plus the owned engine when embedded (`None` for
+/// remote); keep it alive for the command duration via `shutdown_opt`.
+async fn scoped_client(
+    url: Option<&str>,
+    password: Option<&str>,
+    directory: &str,
+) -> anyhow::Result<(Option<EmbeddedEngine>, DeepSeekCodeClient)> {
+    let pw = password
+        .map(str::to_string)
+        .or_else(|| std::env::var("DEEPSEEKCODE_SERVER_PASSWORD").ok());
+    if let Some(url) = url {
+        let mut client = DeepSeekCodeClient::new(url, directory.to_string());
+        if let Some(password) = pw {
+            client = client.with_auth("deepseekcode", password);
+        }
+        // Fail fast on unreachable remote.
+        client.health().await?;
+        return Ok((None, client));
+    }
     let engine = EmbeddedEngine::start(directory).await?;
     let mut client =
         DeepSeekCodeClient::new(format!("http://{}", engine.addr), directory.to_string());
-    if let Ok(password) = std::env::var("DEEPSEEKCODE_SERVER_PASSWORD") {
+    if let Some(password) = pw {
         client = client.with_auth("deepseekcode", password);
     }
-    Ok((engine, client))
+    Ok((Some(engine), client))
+}
+
+async fn shutdown_opt(engine: Option<EmbeddedEngine>) {
+    if let Some(engine) = engine {
+        engine.shutdown().await;
+    }
 }
 
 async fn resolve_session(
@@ -882,8 +1150,9 @@ async fn resolve_session(
     Ok(latest.id)
 }
 
-fn load_logging_config() -> LoggingConfig {
-    deepseekcode_config::load_effective_config(camino::Utf8Path::new("."))
+fn load_logging_config_for(directory: &str) -> LoggingConfig {
+    // P1-11: respect `--directory` (previously hardcoded `.`, ignoring the flag).
+    deepseekcode_config::load_effective_config(camino::Utf8Path::new(directory))
         .map(|c| c.logging)
         .unwrap_or_default()
 }

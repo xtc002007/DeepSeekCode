@@ -82,7 +82,15 @@ impl CredentialsStore {
     }
 
     pub async fn delete(&self, provider_id: &str) -> Result<()> {
-        let _ = try_keyring_delete(provider_id);
+        // Surface keyring failures instead of swallowing: callers log them.
+        if let Err(e) = try_keyring_delete(provider_id) {
+            tracing::warn!(
+                target: deepseekcode_telemetry::APP,
+                provider_id = provider_id,
+                error = %e,
+                "keyring delete failed; sqlite row still removed"
+            );
+        }
         sqlx::query(r#"DELETE FROM credentials WHERE provider_id = ?"#)
             .bind(provider_id)
             .execute(&self.pool)
@@ -92,13 +100,34 @@ impl CredentialsStore {
     }
 
     pub async fn list_connected(&self) -> Result<Vec<String>> {
-        let rows = sqlx::query_scalar::<_, String>(
-            r#"SELECT provider_id FROM credentials ORDER BY provider_id"#,
+        let rows = sqlx::query_as::<_, (String, String)>(
+            r#"SELECT provider_id, encrypted_value FROM credentials ORDER BY provider_id"#,
         )
         .fetch_all(&self.pool)
         .await
         .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-        Ok(rows)
+        // Only report rows whose payload actually decrypts; corrupt /
+        // wrong-machine rows are skipped (and warned) instead of reported
+        // as connected.
+        let mut out = Vec::new();
+        for (provider_id, stored) in rows {
+            if let Some(payload) = stored.strip_prefix(ENCRYPTED_PREFIX) {
+                if decrypt_secret(&self.cipher, payload).is_ok() {
+                    out.push(provider_id);
+                } else {
+                    tracing::warn!(
+                        target: deepseekcode_telemetry::APP,
+                        provider_id = %provider_id,
+                        "credential undecryptable; hiding from connected list"
+                    );
+                }
+            } else if stored == KEYRING_MARKER {
+                if let Ok(Some(_)) = try_keyring_get(&provider_id) {
+                    out.push(provider_id);
+                }
+            }
+        }
+        Ok(out)
     }
 
     async fn upsert_metadata(
@@ -152,7 +181,72 @@ fn try_keyring_delete(provider_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// v2 key derivation: per-machine salt file + 50k SHA-256 iterations.
+/// Falls back to v1 only for decrypting legacy rows (see `derive_legacy_key`).
+fn machine_salt() -> Vec<u8> {
+    // Stable per-machine salt stored outside the DB so a copied DB alone is
+    // insufficient for offline decryption. Best-effort: env override for CI.
+    if let Ok(salt) = std::env::var("DEEPSEEKCODE_CRED_SALT") {
+        return salt.into_bytes();
+    }
+    let path = dirs::config_dir()
+        .map(|p| p.join("deepseekcode").join(".cred_salt"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".deepseekcode-cred-salt"));
+    if let Ok(existing) = std::fs::read(&path) {
+        if existing.len() >= 16 {
+            return existing;
+        }
+    }
+    let mut salt = vec![0u8; 32];
+    if getrandom::getrandom(&mut salt).is_err() {
+        // Fail-closed salt: process-unique but not persisted; decrypt of old
+        // rows will fail loudly instead of silently using a weak key.
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        for (i, b) in salt.iter_mut().enumerate() {
+            *b = ((nanos >> (i % 8)) ^ (i as u128 * 0x9E3779B97F4A7C15)) as u8;
+        }
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, &salt);
+    salt
+}
+
 fn derive_local_key() -> [u8; 32] {
+    derive_v2_key(&machine_salt())
+}
+
+fn derive_v2_key(salt: &[u8]) -> [u8; 32] {
+    // 50k-iteration SHA-256 KDF (no extra dep): user+host+version+salt.
+    let user = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_default();
+    let host = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_default();
+    let mut key = [0u8; 32];
+    let mut hasher = Sha256::new();
+    hasher.update(b"deepseekcode-credentials-v2");
+    hasher.update(salt);
+    hasher.update(user.as_bytes());
+    hasher.update(host.as_bytes());
+    let mut digest: Vec<u8> = hasher.finalize().to_vec();
+    for _ in 0..50_000 {
+        let mut h = Sha256::new();
+        h.update(&digest);
+        h.update(salt);
+        digest = h.finalize().to_vec();
+    }
+    key.copy_from_slice(&digest[..32]);
+    key
+}
+
+fn derive_legacy_key() -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"deepseekcode-credentials-v1");
     if let Ok(user) = std::env::var("USERNAME").or_else(|_| std::env::var("USER")) {
@@ -165,19 +259,25 @@ fn derive_local_key() -> [u8; 32] {
 }
 
 fn encrypt_secret(cipher: &Aes256Gcm, secret: &str) -> Result<String> {
-    let nonce_bytes = rand_bytes(12);
+    // Fail-closed: never fall back to predictable nonces; surface the error.
+    let mut nonce_bytes = vec![0u8; 12];
+    getrandom::getrandom(&mut nonce_bytes)
+        .map_err(|e| DeepSeekCodeError::Storage(format!("rand: {e}")))?;
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
         .encrypt(nonce, secret.as_bytes())
         .map_err(|e| DeepSeekCodeError::Storage(format!("encrypt: {e}")))?;
-    let mut payload = nonce_bytes;
-    payload.extend(ciphertext);
-    Ok(format!("{ENCRYPTED_PREFIX}{}", STANDARD.encode(payload)))
+    Ok(encode_secret(&nonce_bytes, &ciphertext))
 }
 
 fn decrypt_secret(cipher: &Aes256Gcm, payload: &str) -> Result<String> {
+    // Payloads are `v2:<base64>` or legacy bare base64 (v1 key).
+    let (version, b64) = match payload.split_once(':') {
+        Some(("v2", rest)) => ("v2", rest),
+        _ => ("v1", payload),
+    };
     let bytes = STANDARD
-        .decode(payload)
+        .decode(b64)
         .map_err(|e| DeepSeekCodeError::Storage(format!("decode: {e}")))?;
     if bytes.len() <= 12 {
         return Err(DeepSeekCodeError::Storage(
@@ -185,33 +285,31 @@ fn decrypt_secret(cipher: &Aes256Gcm, payload: &str) -> Result<String> {
         ));
     }
     let (nonce_bytes, ciphertext) = bytes.split_at(12);
-    let plaintext = cipher
-        .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
-        .map_err(|e| DeepSeekCodeError::Storage(format!("decrypt: {e}")))?;
+    let try_decrypt = |c: &Aes256Gcm| {
+        c.decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
+            .map_err(|e| DeepSeekCodeError::Storage(format!("decrypt: {e}")))
+    };
+    // v2 first; legacy rows fall back to v1 key (then callers should re-store
+    // to rotate). Distinguish corrupt vs wrong-machine via error chain.
+    let plaintext = match version {
+        "v2" => try_decrypt(cipher).or_else(|_| {
+            let legacy =
+                Aes256Gcm::new_from_slice(&derive_legacy_key()).expect("valid AES key length");
+            try_decrypt(&legacy)
+        })?,
+        _ => {
+            let legacy =
+                Aes256Gcm::new_from_slice(&derive_legacy_key()).expect("valid AES key length");
+            try_decrypt(&legacy).or_else(|_| try_decrypt(cipher))?
+        }
+    };
     String::from_utf8(plaintext).map_err(|e| DeepSeekCodeError::Storage(e.to_string()))
 }
 
-fn rand_bytes(len: usize) -> Vec<u8> {
-    let mut out = vec![0u8; len];
-    if getrandom::getrandom(&mut out).is_ok() {
-        return out;
-    }
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let mut hasher = DefaultHasher::new();
-    std::thread::current().id().hash(&mut hasher);
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .hash(&mut hasher);
-    let mut state = hasher.finish();
-    for byte in &mut out {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        *byte = (state >> 33) as u8;
-    }
-    out
+fn encode_secret(nonce: &[u8], ciphertext: &[u8]) -> String {
+    let mut payload = nonce.to_vec();
+    payload.extend_from_slice(ciphertext);
+    format!("{ENCRYPTED_PREFIX}v2:{}", STANDARD.encode(payload))
 }
 
 #[cfg(test)]

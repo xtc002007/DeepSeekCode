@@ -227,25 +227,9 @@ fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
 fn fetch_remote_index(url: &str) -> Vec<SkillEntry> {
     // Issue-9: 5s timeout + entry bound, mirroring `load_instruction_url`.
     // A hanging skills index must never block `drain` nor flap the catalog
-    // prefix every turn.
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build();
-    let Ok(client) = client else {
-        return Vec::new();
-    };
-    // Same executor hygiene as instruction URLs: never park an async worker.
-    let response = match crate::system_context::source::blocking_http_get(&client, url) {
-        Ok(resp) if resp.status().is_success() => resp,
-        Ok(resp) => {
-            tracing::warn!(
-                target: deepseekcode_telemetry::APP,
-                url = %url,
-                status = %resp.status(),
-                "skills index fetch failed"
-            );
-            return Vec::new();
-        }
+    // prefix every turn. P1-9: async client (no `blocking` feature).
+    let content = match crate::system_context::source::blocking_http_get(url) {
+        Ok(text) => text,
         Err(e) => {
             tracing::warn!(
                 target: deepseekcode_telemetry::APP,
@@ -256,7 +240,7 @@ fn fetch_remote_index(url: &str) -> Vec<SkillEntry> {
             return Vec::new();
         }
     };
-    let value: Value = match response.json() {
+    let value: Value = match serde_json::from_str(&content) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(

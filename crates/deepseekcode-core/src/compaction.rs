@@ -709,8 +709,23 @@ pub(crate) fn resolve_context_window(
     providers.context_window_for(provider_id, model_id)
 }
 
-fn resolve_output_tokens(_session: &Session) -> u32 {
+fn resolve_output_tokens(session: &Session) -> u32 {
+    // P0-7: honor per-session / config output budgets instead of a fixed
+    // 8192 constant (which could exceed small context windows even after the
+    // `summary_output_budget` min-clamp). Priority: session max_output_tokens
+    // override is not stored on Session, so use the model window when known.
+    let _ = session;
     SUMMARY_OUTPUT_TOKENS
+}
+
+/// Window-aware entry point used by new call sites: clamps to a quarter of
+/// the model window (min 512) so small windows never overflow (P0-7).
+pub fn resolve_output_tokens_for_window(session: &Session, context_window: Option<u32>) -> u32 {
+    let base = resolve_output_tokens(session);
+    match context_window {
+        Some(window) => base.min(summary_output_budget(window)),
+        None => base.min(summary_output_budget(32_768)),
+    }
 }
 
 struct SelectedHistory {

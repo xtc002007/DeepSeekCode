@@ -77,20 +77,26 @@ pub struct SessionRunner {
     events: Arc<EventStore>,
     context_registry: SystemContextRegistry,
     context_epochs: ContextEpochStore,
-    tools: Arc<Mutex<ToolRegistry>>,
+    tools: Arc<tokio::sync::RwLock<ToolRegistry>>,
     permissions: Arc<PermissionService>,
     providers: Arc<ProviderCatalog>,
     tool_output: ManagedToolOutput,
     interrupted: Arc<CancelToken>,
     in_provider_turn: AtomicBool,
+    strip_reasoning_next_turn: AtomicBool,
     llm: Arc<Mutex<LlmClient>>,
     mcp: Arc<McpConnectionPool>,
     hooks: Arc<HookRegistry>,
     question_tx: Arc<tokio::sync::Mutex<Option<crate::tools::services::QuestionResponder>>>,
-    loop_guard: Arc<Mutex<Option<(String, u32)>>>,
+    // (fingerprint -> (count, last_user_turn)). Reset on new user promotion
+    // so `A,user,A,user,A` is not mis-killed; success also resets.
+    loop_guard_counts: Arc<Mutex<std::collections::HashMap<String, (u32, u64)>>>,
+    loop_guard_turn: Arc<std::sync::atomic::AtomicU64>,
     /// Issue-6: deterministic `transform_system` cache. Key =
     /// `sha256(baseline)|agent|model|cfg_prompt_hash`. Only used when
     /// `hooks.is_empty()` so dynamic hook output is never frozen.
+    /// Bounded to 128 entries (LRU-ish eviction) to avoid unbounded growth
+    /// in long-lived processes.
     system_cache: Mutex<std::collections::HashMap<String, String>>,
     /// P1-3: last deterministic compaction failure for this session's view.
     /// Same-view repeats skip the summarizer call (`blocked-same-view`);
@@ -138,13 +144,14 @@ impl SessionRunner {
             sessions: SessionStore::new(pool.clone()),
             context_epochs: ContextEpochStore::new(pool),
             context_registry: SystemContextRegistry::with_config(&project_dir, &config),
-            tools: Arc::new(Mutex::new(tools)),
+            tools: Arc::new(tokio::sync::RwLock::new(tools)),
             tool_output: ManagedToolOutput::project(&project_dir),
             permissions,
             providers,
             events,
             interrupted: Arc::new(CancelToken::new()),
             in_provider_turn: AtomicBool::new(false),
+            strip_reasoning_next_turn: AtomicBool::new(false),
             llm: Arc::new(Mutex::new(LlmClient::new())),
             session_id,
             project_dir,
@@ -152,13 +159,14 @@ impl SessionRunner {
             mcp,
             hooks,
             question_tx,
-            loop_guard: Arc::new(Mutex::new(None)),
+            loop_guard_counts: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            loop_guard_turn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             system_cache: Mutex::new(std::collections::HashMap::new()),
             compaction_failure: Mutex::new(None),
         }
     }
 
-    pub fn submit_question_answer(&self, answer: String) -> Result<()> {
+    pub async fn submit_question_answer(&self, answer: String) -> Result<()> {
         crate::tools::services::submit_question_answer(
             &ToolServices {
                 question_tx: Some(self.question_tx.clone()),
@@ -166,6 +174,7 @@ impl SessionRunner {
             },
             answer,
         )
+        .await
     }
 
     pub fn question_channel(
@@ -180,6 +189,8 @@ impl SessionRunner {
         // Drop any pending question responder so blocked tools exit promptly.
         let mut question = self.question_tx.lock().await;
         question.take();
+        // Abort pending policy prompts for this session (P0-4/P0-8).
+        self.permissions.cancel_pending(self.session_id).await;
     }
 
     /// Test helper: simulate an in-flight provider turn.
@@ -194,13 +205,13 @@ impl SessionRunner {
 
     /// Refresh MCP-bridged tools after connect/disconnect.
     pub async fn refresh_mcp_tools(&self) {
-        let mut tools = self.tools.lock().await;
+        let mut tools = self.tools.write().await;
         tools.refresh_mcp_tools(&self.mcp);
     }
 
     /// Re-materialize skill tool and system context after catalog changes.
     pub async fn reload_materialization(&self, config: &DeepSeekCodeConfig) {
-        let mut tools = self.tools.lock().await;
+        let mut tools = self.tools.write().await;
         tools.refresh_skill_tool(config);
     }
 
@@ -210,7 +221,7 @@ impl SessionRunner {
     /// otherwise every MCP connect/disconnect false-positives
     /// `prefix_changed` while the actual `tools` array never moved.
     async fn provider_visible_mcp_tools(&self) -> Vec<String> {
-        let direct = self.tools.lock().await.mcp_direct();
+        let direct = self.tools.read().await.mcp_direct();
         if direct {
             self.mcp.list_registered_tool_names()
         } else {
@@ -224,7 +235,7 @@ impl SessionRunner {
     ) -> Vec<deepseekcode_schema::tool::ToolDefinition> {
         let agent_str = format!("{agent:?}").to_lowercase();
         let mcp_tools = self.provider_visible_mcp_tools().await;
-        let tools = self.tools.lock().await;
+        let tools = self.tools.read().await;
         tools.definitions_for_agent(&agent_str, &self.config, &mcp_tools)
     }
 
@@ -273,10 +284,16 @@ impl SessionRunner {
             if !cfg_prompt.is_empty() {
                 merged = format!("{merged}\n\n{cfg_prompt}");
             }
-            self.system_cache
-                .lock()
-                .await
-                .insert(cache_key, merged.clone());
+            {
+                let mut cache = self.system_cache.lock().await;
+                // Bound to 128 entries: evict an arbitrary entry when full.
+                if cache.len() >= 128 && !cache.contains_key(&cache_key) {
+                    if let Some(k) = cache.keys().next().cloned() {
+                        cache.remove(&k);
+                    }
+                }
+                cache.insert(cache_key, merged.clone());
+            }
             return Ok(merged);
         }
         let agent_key = format!("{agent:?}").to_lowercase();
@@ -314,7 +331,14 @@ impl SessionRunner {
 
     pub async fn drain(&self) -> Result<()> {
         self.interrupted.reset();
+        // Register the live cancel token so policy prompts can be aborted
+        // by `interrupt` instead of blocking 300s (P0-4).
+        self.permissions
+            .register_cancel(self.session_id, self.interrupted.clone())
+            .await;
         self.in_provider_turn.store(false, Ordering::SeqCst);
+        self.strip_reasoning_next_turn
+            .store(false, Ordering::SeqCst);
         tracing::info!(
             target: deepseekcode_telemetry::SESSION,
             session_id = %self.session_id,
@@ -330,10 +354,12 @@ impl SessionRunner {
                 return Err(DeepSeekCodeError::SessionInterrupted);
             }
 
-            let promoted = self.promote_at_safe_boundary().await?;
-            if promoted {
-                self.reconcile_context().await?;
-            }
+            // Spec Epoch Rule 3: at every safe boundary promote input,
+            // then ALWAYS reconcile context, then run provider turn.
+            // Previously reconcile was skipped when nothing was promoted,
+            // so AGENTS.md edits never merged without a new prompt.
+            let _promoted = self.promote_at_safe_boundary().await?;
+            self.reconcile_context().await?;
 
             if self.has_pending_prompts().await? && !self.context_registry.can_initialize_baseline()
             {
@@ -376,14 +402,27 @@ impl SessionRunner {
     }
 
     async fn promote_at_safe_boundary(&self) -> Result<bool> {
-        PromptPromoter::new(
+        let promoted = PromptPromoter::new(
             self.session_id,
             &self.sessions,
             self.events.clone(),
             &self.in_provider_turn,
         )
         .promote_at_safe_boundary(self.context_registry.can_initialize_baseline())
-        .await
+        .await?;
+        if promoted {
+            // New user content starts a fresh loop-guard turn so
+            // `A,user,A,user,A` is not mis-killed (P0-4).
+            self.loop_guard_turn
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(promoted)
+    }
+
+    async fn note_tool_success(&self, fp: &str) {
+        // Successful distinct outcomes reset the streak for that fingerprint.
+        let mut guard = self.loop_guard_counts.lock().await;
+        guard.remove(fp);
     }
 
     async fn promote_steer_if_any(&self) -> Result<bool> {
@@ -491,6 +530,18 @@ impl SessionRunner {
                         turns -= 1;
                         continue 'provider_turn;
                     }
+                    // Reasoning-shape recovery is a NEW provider turn with
+                    // stripped messages, so each turn still performs exactly
+                    // one llm.stream (spec: One llm.stream per provider turn).
+                    Err(DeepSeekCodeError::RetryWithoutReasoning) => {
+                        turns -= 1;
+                        // Strip reasoning for the next turn attempt.
+                        // The next iteration rebuilds messages via
+                        // build_llm_messages(); force strip by clearing
+                        // reasoning in a one-shot flag handled below.
+                        self.strip_reasoning_next_turn.store(true, Ordering::SeqCst);
+                        continue 'provider_turn;
+                    }
                     Err(e) => {
                         self.in_provider_turn.store(false, Ordering::SeqCst);
                         return Err(e);
@@ -536,7 +587,7 @@ impl SessionRunner {
         let agent = format!("{:?}", session.agent).to_lowercase();
         let mcp_tools = self.provider_visible_mcp_tools().await;
         let tools = {
-            let registry = self.tools.lock().await;
+            let registry = self.tools.read().await;
             registry.definitions_for_agent(&agent, &self.config, &mcp_tools)
         };
         let tools_json = serde_json::to_value(&tools).unwrap_or_else(|_| json!([]));
@@ -573,7 +624,7 @@ impl SessionRunner {
         let agent = format!("{:?}", session.agent).to_lowercase();
         let mcp_tools = self.provider_visible_mcp_tools().await;
         let tools = {
-            let registry = self.tools.lock().await;
+            let registry = self.tools.read().await;
             registry.definitions_for_agent(&agent, &self.config, &mcp_tools)
         };
         let tools_json = serde_json::to_value(&tools).unwrap_or_else(|_| json!([]));
@@ -605,13 +656,19 @@ impl SessionRunner {
         // Reasonix `trigger != manual`): the user asked for exactly one fresh
         // attempt. Fresh failures below still re-arm the record.
         self.compaction_failure.lock().await.take();
+        // Rule 1 like drain: a fresh session has no epoch yet; initialize it
+        // instead of failing manual `/compact` with ContextUnavailable.
+        // Empty history then compacts to a no-op Ok(false), not an error.
+        self.context_registry
+            .ensure_epoch(&self.context_epochs, &self.sessions, self.session_id)
+            .await?;
         let session = self.sessions.get(self.session_id).await?;
         let (baseline, _) = self.prepare_context_epoch().await?;
         let llm_messages = self.build_llm_messages().await?;
         let agent = format!("{:?}", session.agent).to_lowercase();
         let mcp_tools = self.provider_visible_mcp_tools().await;
         let tools = {
-            let registry = self.tools.lock().await;
+            let registry = self.tools.read().await;
             registry.definitions_for_agent(&agent, &self.config, &mcp_tools)
         };
         let tools_json = serde_json::to_value(&tools).unwrap_or_else(|_| json!([]));
@@ -1036,16 +1093,19 @@ impl SessionRunner {
         let mut provider_output: Option<u32> = None;
         let mut provider_reasoning: Option<u32> = None;
 
+        // Spec: exactly one llm.stream per provider turn. Reasoning-shape
+        // recovery is deferred to the NEXT turn (RetryWithoutReasoning) so
+        // this function never issues a second stream in the same turn.
+        // A one-shot strip flag from the previous recovery is honored here.
+        let mut request = request;
+        if self.strip_reasoning_next_turn.swap(false, Ordering::SeqCst) {
+            for m in &mut request.messages {
+                m.reasoning_content = None;
+            }
+        }
         let mut stream = {
             let llm = self.llm.lock().await;
-            // P1-5 reasoning-shape recovery: pre-send repair already ran, so
-            // a transport-level 400 naming reasoning/tool shape means the
-            // gateway rejected the replay itself — resending identical bytes
-            // is pure waste. Budget is exactly one retry with
-            // `reasoning_content` stripped; overflow/auth/quota/rate never
-            // enter (see `should_retry_without_reasoning`).
-            let api_key_retry = api_key.clone();
-            match llm.stream(&request, api_key).await {
+            match llm.stream(&request, api_key.clone()).await {
                 Ok(s) => s,
                 Err(e) => {
                     let text = e.to_string();
@@ -1054,6 +1114,13 @@ impl SessionRunner {
                         .iter()
                         .any(|m| m.reasoning_content.as_ref().is_some_and(|s| !s.is_empty()));
                     if !should_retry_without_reasoning(&text, had_reasoning) {
+                        // Open-phase overflow (HTTP 400/413 before streaming)
+                        // must enter compaction recovery, not bubble as Llm.
+                        if deepseekcode_llm::is_context_overflow(&text) && allow_overflow_recovery {
+                            self.compact_on_overflow(session, &baseline, &request.messages)
+                                .await?;
+                            return Err(DeepSeekCodeError::RetryAfterCompaction);
+                        }
                         return Err(e);
                     }
                     tracing::warn!(
@@ -1062,13 +1129,9 @@ impl SessionRunner {
                         provider = %request.provider,
                         model = %request.model,
                         error = %text,
-                        "provider rejected reasoning replay shape; retrying once stripped"
+                        "provider rejected reasoning replay shape; deferring stripped retry to next turn"
                     );
-                    let mut stripped = request.clone();
-                    for m in &mut stripped.messages {
-                        m.reasoning_content = None;
-                    }
-                    llm.stream(&stripped, api_key_retry).await?
+                    return Err(DeepSeekCodeError::RetryWithoutReasoning);
                 }
             }
         };
@@ -1076,6 +1139,11 @@ impl SessionRunner {
         let stream_timeout = std::time::Duration::from_secs(90);
         loop {
             let next = tokio::time::timeout(stream_timeout, stream.next()).await;
+            // Steer delivery must promote DURING the provider turn, not only
+            // at the next loop head. Opportunistically drain steer inbox while
+            // streaming so a concurrent steer lands before the turn settles.
+            // Best-effort: promotion failures never abort the stream.
+            let _ = self.promote_steer_if_any().await;
             let event = match next {
                 Ok(Some(item)) => item,
                 Ok(None) => break,
@@ -1307,11 +1375,12 @@ impl SessionRunner {
         let cache_write = provider_cache_write;
 
         self.sessions
-            .update_message_tokens(
+            .update_message_tokens_with_cache(
                 assistant_id,
                 Some(input_tokens as i64),
                 Some(output_tokens as i64),
                 Some(reasoning_tokens as i64),
+                cache_hit.map(|v| v as i64),
             )
             .await?;
 

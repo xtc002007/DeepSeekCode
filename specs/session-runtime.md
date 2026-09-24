@@ -49,54 +49,41 @@ Implementation must match these rules; tests assert parity via JSON fixtures.
 
 ## Plan / Build Workflow
 
-Plan mode produces implementation plans under `.deepseekcode/plan/<plan_id>/`:
-
-- `PLAN.md` — flexible markdown body (no fixed section schema)
-- `meta.json` — machine metadata (`plan_id`, `session_id`, `title`, `status`, timestamps)
-
-### Plan agent
-
-- Tools: `read`, `grep`, `glob`, `list`, `write`, `edit`, `skill`, `question`, `plan_complete`
-- Policy: block `edit`/`bash` globally; permit `.deepseekcode/plan/**` writes; permit `question` and `plan_complete`
-- Runner always injects the built-in plan system prompt (config `agents.plan.system_prompt` appends)
-
-### Completion
-
-`plan_complete` validates the plan file exists with minimum content, writes `meta.json`, and emits `plan.completed` with `{ plan_id, plan_path, title, summary, session_id }`.
-
-### Question tool
-
-`question` supports `options` plus `allow_custom` (default `true`). Desktop UI always offers a final custom-input path when options are present.
-
-### Implement from plan
-
-Desktop switches the session to `build`, prefills the composer with an implementation prompt referencing `plan_path`, and waits for the user to submit. Dismiss state for the prominent implement dock persists in `session_plan_ui`.
-
-## Plan / Build Workflow
-
 Plan mode produces implementation plans under `<project>/.deepseekcode/plan/<plan_id>/`:
 
-- `PLAN.md` — flexible markdown body (no fixed section template)
+- `PLAN.md` — flexible markdown body (no fixed section schema; "template"
+  was a wording variant of the same rule)
 - `meta.json` — machine metadata (`plan_id`, `session_id`, `title`, `status`, timestamps)
 
 ### Plan agent
 
-- Tools: `read`, `grep`, `glob`, `list`, `write`, `edit`, `skill`, `question`, `plan_complete`
-- Policy: block `edit`/`bash` outside `.deepseekcode/plan/**`; permit `question` and `plan_complete`
+- Provider-visible tools: `read`, `grep`, `glob`, `list`, `skill`, `question`,
+  `plan_complete`, `tool_result_page` (paged recovery for large outputs).
+  `write`/`edit`/`bash`/`apply_patch` are NOT provider-visible in plan mode;
+  writes are confined to `.deepseekcode/plan/**` via the plan-scoped policy.
+- Policy: `block` `edit`/`bash`/`apply_patch` outside `.deepseekcode/plan/**`;
+  `permit` writes under `.deepseekcode/plan/**`; `permit` `question` and
+  `plan_complete`. (Earlier drafts said "block globally"; the scoped form
+  here is canonical.)
 - Runner always injects the built-in plan system prompt (config `agents.plan.system_prompt` appends)
 
 ### plan_complete
 
-Validates `primary_path` exists with minimum content length, writes `meta.json`, emits `plan.completed`.
+Validates `primary_path` (alias: `plan_path`) exists with minimum content
+length (200 bytes, Unicode-aware char count), writes `meta.json`, emits
+`plan.completed` with `{ plan_id, plan_path, title, summary, session_id }`.
 
 ### Question tool
 
-- `allow_custom` defaults to `true`
-- Desktop UI appends an "Other (custom input)" option and text field when options are provided
+- `options` plus `allow_custom` (default `true`)
+- Desktop UI always offers a final custom-input path ("Other (custom input)"
+  option + text field) when options are present
 
 ### Implement from plan
 
-Desktop switches session agent to `build`, prefills the composer with an implementation prompt referencing the plan path, and waits for user confirmation before sending.
+Desktop switches session agent to `build`, prefills the composer with an
+implementation prompt referencing the plan path, and waits for user
+confirmation (submit) before sending.
 
 ### Persistence
 

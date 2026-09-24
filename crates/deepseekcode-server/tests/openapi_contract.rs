@@ -129,7 +129,24 @@ async fn sse_gap_too_large_when_replay_exceeds_limit() {
         .await
         .expect("sse");
     assert_eq!(resp.status(), 200);
-    let body = resp.text().await.expect("body");
+    // Read incrementally: SSE is an infinite stream (history + live +
+    // keep-alive), so `resp.text()` would wait for EOF forever. The gap
+    // marker is the first frame when replay exceeds the limit.
+    let body = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        use futures::StreamExt;
+        let mut stream = resp.bytes_stream();
+        let mut buf = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.expect("sse chunk");
+            buf.extend_from_slice(&chunk);
+            if buf.windows(13).any(|w| w == b"gap_too_large") || buf.len() > 65_536 {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    })
+    .await
+    .expect("gap marker within 15s");
     assert!(
         body.contains("gap_too_large"),
         "expected gap marker in SSE body, got: {body}"

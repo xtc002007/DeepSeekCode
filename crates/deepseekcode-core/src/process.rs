@@ -60,8 +60,12 @@ impl SessionChildPidGuard {
     }
 
     /// Detach without unregistering (used when ownership is handed over).
-    pub fn disarm(mut self) {
-        self.armed = false;
+    /// Consumes self without running `Drop` unregister so the PID stays
+    /// tracked; callers must eventually `unregister_session_child_pid`.
+    /// Previously `disarm` only flipped a flag on a by-value self that was
+    /// then dropped with `armed=false`, leaking the entry forever.
+    pub fn disarm(self) {
+        std::mem::forget(self);
     }
 }
 

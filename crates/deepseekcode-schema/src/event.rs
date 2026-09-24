@@ -102,57 +102,77 @@ pub struct EventEnvelope {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct PromptAdmittedPayload {
+    #[schema(value_type = String)]
+    #[schemars(with = "String")]
     pub message_id: MessageId,
     pub delivery: crate::session::PromptDelivery,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct MessageDeltaPayload {
+    #[schema(value_type = String)]
+    #[schemars(with = "String")]
     pub message_id: MessageId,
     pub delta: String,
     pub part_index: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ToolStartedPayload {
+    #[schema(value_type = String)]
+    #[schemars(with = "String")]
     pub tool_call_id: ToolCallId,
     pub tool_name: String,
     pub input: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
+    // Unified with ToolResultEnvelope.metadata (always object `{}` when
+    // absent, never null) so diff_stats survives both paths.
+    #[serde(default = "default_metadata_object")]
+    #[schema(value_type = serde_json::Value)]
+    pub metadata: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ToolCompletedPayload {
+    #[schema(value_type = String)]
+    #[schemars(with = "String")]
     pub tool_call_id: ToolCallId,
     pub tool_name: String,
     pub output: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
+    #[serde(default = "default_metadata_object")]
+    #[schema(value_type = serde_json::Value)]
+    pub metadata: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+fn default_metadata_object() -> serde_json::Value {
+    serde_json::Value::Object(Default::default())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct PermissionRequestedPayload {
+    #[schema(value_type = String)]
+    #[schemars(with = "String")]
     pub permission_id: PermissionId,
     pub tool_name: String,
     pub description: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct TodoUpdatedPayload {
     pub todos: Vec<crate::todo::TodoItem>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ToolProgressPayload {
+    #[schema(value_type = String)]
+    #[schemars(with = "String")]
     pub tool_call_id: ToolCallId,
     pub tool_name: String,
     pub chunk: String,
@@ -164,15 +184,19 @@ fn default_stdout_stream() -> String {
     "stdout".into()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct PermissionResolvedPayload {
+    #[schema(value_type = String)]
+    #[schemars(with = "String")]
     pub permission_id: PermissionId,
     pub tool_name: String,
     pub status: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct QuestionRequestedPayload {
+    #[schema(value_type = String)]
+    #[schemars(with = "String")]
     pub tool_call_id: ToolCallId,
     pub question: String,
     #[serde(default)]
@@ -185,7 +209,7 @@ fn default_allow_custom() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ActivityUpdatedPayload {
     pub since_seq: i64,
 }

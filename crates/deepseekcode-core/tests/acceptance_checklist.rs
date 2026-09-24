@@ -169,6 +169,7 @@ async fn acceptance_question_answer_roundtrip() {
         },
         "yes".into(),
     )
+    .await
     .expect("submit");
     assert_eq!(answer_task.await.expect("join")["answer"], "yes");
 }

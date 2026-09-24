@@ -15,7 +15,24 @@ members = [
     "crates/deepseekcode-desktop",
     "examples/plugins/hello-hook",
 ]
-default-members = ["crates/deepseekcode-cli"]
+# P1-9: bare `cargo build/test` covers everything except the desktop shell
+# (previously CLI-only, masking server/SDK breakage). Desktop is excluded
+# because it depends on a git `gpui` revision (network); build it explicitly
+# via `cargo build -p deepseekcode-desktop`.
+default-members = [
+    "crates/deepseekcode-types",
+    "crates/deepseekcode-schema",
+    "crates/deepseekcode-config",
+    "crates/deepseekcode-telemetry",
+    "crates/deepseekcode-storage",
+    "crates/deepseekcode-llm",
+    "crates/deepseekcode-core",
+    "crates/deepseekcode-plugin",
+    "crates/deepseekcode-server",
+    "crates/deepseekcode-sdk",
+    "crates/deepseekcode-cli",
+    "examples/plugins/hello-hook",
+]
 
 [workspace.package]
 version = "0.1.2"
@@ -62,12 +79,27 @@ jsonc-parser = { version = "0.27", features = ["serde"] }
 axum = { version = "0.8", features = ["ws", "macros"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
-reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "blocking"], default-features = false }
+# P1-9: `blocking` removed (deadlocks when misused inside async; no caller
+# may use blocking client). `socks`/`http2`/`system-proxy` kept for VPN support.
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "rustls-tls-native-roots", "socks", "http2", "system-proxy"], default-features = false }
 eventsource-stream = "0.2"
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono"] }
 refinery = { version = "0.8" }
+tokio-stream = { version = "0.1", features = ["sync"] }
+# Pinned-IP transport stack (DeepSeek VPN fallback only) — workspace-pinned so
+# `deepseekcode-llm` cannot drift from the reqwest TLS stack independently.
+hyper = { version = "1.10" }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "webpki-tokio", "native-tokio", "ring"] }
+http = { version = "1.4" }
+http-body-util = { version = "0.1" }
+bytes = { version = "1.12" }
+tower-service = { version = "0.3" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = { version = "1.0" }
+rustls-native-certs = { version = "0.8" }
 
 # IDs & time
 ulid = { version = "1.2", features = ["serde"] }
@@ -125,10 +157,10 @@ wiremock = "0.6"
 lto = "thin"
 codegen-units = 1
 
-[profile.dist]
-inherits = "release"
-lto = "thin"
-codegen-units = 1
+# P1-9: `[profile.dist]` removed — it contradicted
+# `[workspace.metadata.dist] dist = false` below (cargo-dist disabled for this
+# workspace; releases go through packaging/channels.toml + release-plz).
+# Keeping both suggested dist builds work; they do not.
 
 [profile.dev]
 debug = 1

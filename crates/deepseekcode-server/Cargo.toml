@@ -12,6 +12,7 @@ deepseekcode-config = { workspace = true }
 deepseekcode-core = { workspace = true }
 deepseekcode-plugin = { workspace = true }
 deepseekcode-storage = { workspace = true }
+deepseekcode-llm = { workspace = true }
 deepseekcode-telemetry = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
@@ -28,9 +29,10 @@ portable-pty = { workspace = true }
 chrono = { workspace = true }
 camino = { workspace = true }
 similar = { workspace = true }
-tokio-stream = { version = "0.1", features = ["sync"] }
-base64 = "0.22"
+tokio-stream = { workspace = true }
+base64 = { workspace = true }
 ulid = { workspace = true }
+jsonc-parser = { workspace = true }
 
 [dev-dependencies]
 deepseekcode-core = { workspace = true }

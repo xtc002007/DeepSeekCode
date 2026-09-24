@@ -8,12 +8,29 @@ use ulid::Ulid;
 
 pub const REQUEST_ID_HEADER: &str = "x-deepseekcode-request-id";
 
+fn sanitize_request_id(raw: &str) -> Option<String> {
+    // Client-supplied IDs are echoed + logged: cap length and charset to
+    // block log injection / oversized-header DoS.
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 64 {
+        return None;
+    }
+    if trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
 pub async fn request_id_middleware(mut req: Request<Body>, next: Next) -> Response {
     let request_id = req
         .headers()
         .get(REQUEST_ID_HEADER)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
+        .and_then(sanitize_request_id)
         .unwrap_or_else(|| Ulid::new().to_string());
 
     let span = tracing::span!(

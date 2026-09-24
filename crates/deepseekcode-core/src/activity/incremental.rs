@@ -172,6 +172,7 @@ pub fn patch_tool_started(
         status: ActivityStatus::Running,
         detail_ref: Some(tool_call_id.to_string()),
         text: title.map(String::from),
+        started_at: None,
     };
     push_tool_leaf_to_active_turn(tree, leaf)
 }
@@ -282,6 +283,7 @@ pub fn patch_assistant_message_delta(
         status: ActivityStatus::Running,
         detail_ref: None,
         text: Some(delta.to_string()),
+        started_at: None,
     }));
     true
 }

@@ -70,8 +70,70 @@ pub struct LlmRequest {
 /// Single source of truth so `compaction` and `LlmRequest` never disagree
 /// (previously `session.provider_id`-only vs `base_url`-aware diverged and
 /// custom `openai-compatible` + DeepSeek URL silently took the legacy path).
+/// Host-suffix detector shared by all DeepSeek gates: `evil-deepseek.com.evil.com`
+/// must NOT match (P0-5). Single source of truth with `providers::deepseek`.
+pub fn is_deepseek_host_url(url: &str) -> bool {
+    let host = url
+        .split("://")
+        .last()
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    host == "deepseek.com" || host.ends_with(".deepseek.com")
+}
+
 pub fn is_deepseek_request(provider: &str, base_url: Option<&str>) -> bool {
-    provider == "deepseek" || base_url.is_some_and(|u| u.contains("deepseek.com"))
+    provider.trim().eq_ignore_ascii_case("deepseek") || base_url.is_some_and(is_deepseek_host_url)
+}
+
+impl LlmRequest {
+    /// Validate before any network call: empty provider/model, malformed
+    /// base URL, and `Some(0)` max tokens are rejected early (P0-5).
+    pub fn validate(&self) -> Result<(), deepseekcode_types::DeepSeekCodeError> {
+        if self.provider.trim().is_empty() {
+            return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
+                "llm provider must not be empty".into(),
+            ));
+        }
+        if self.model.trim().is_empty() {
+            return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
+                "llm model must not be empty".into(),
+            ));
+        }
+        if self.model.len() > 256 {
+            return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
+                "llm model name too long".into(),
+            ));
+        }
+        if let Some(base) = self.base_url.as_deref() {
+            let t = base.trim();
+            if t.is_empty() || t.len() > 512 || t.contains([' ', '\0', '\n', '\r']) {
+                return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
+                    "invalid llm base_url".into(),
+                ));
+            }
+            let lower = t.to_ascii_lowercase();
+            if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+                return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
+                    "llm base_url must start with http(s)://".into(),
+                ));
+            }
+        }
+        if self.max_output_tokens == Some(0) {
+            return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
+                "max_output_tokens must be > 0 or omitted".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Shared thinking normalizer (Issues 2+4): one mapping for provider extras,
@@ -258,7 +320,7 @@ mod tests {
         assert!(base.is_deepseek());
         let via_url = LlmRequest {
             provider: "openai-compatible".into(),
-            base_url: Some("https://api.deepseek.com/v1".into()),
+            base_url: Some("https://api.deepseek.com".into()),
             ..base.clone()
         };
         assert!(via_url.is_deepseek());

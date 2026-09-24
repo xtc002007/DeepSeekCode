@@ -5,12 +5,15 @@ use serde_json::Value;
 use std::path::Path;
 
 /// Map a tool name to its primary policy scope.
+/// P0-8: `apply_patch` keeps its own scope (plan defaults now block it
+/// explicitly); `tool_result_page` is `read` (paged recovery for large
+/// outputs must work in plan mode, which has no `task` tool).
 pub fn tool_scope(tool_name: &str) -> String {
     match tool_name {
-        "write" | "edit" | "apply_patch" => "edit".into(),
-        "read" => "read".into(),
-        "bash" => "bash".into(),
-        "powershell" => "bash".into(),
+        "write" | "edit" => "edit".into(),
+        "apply_patch" => "apply_patch".into(),
+        "read" | "tool_result_page" => "read".into(),
+        "bash" | "powershell" | "shell" => "bash".into(),
         "grep" => "grep".into(),
         "glob" => "glob".into(),
         "list" => "list".into(),
@@ -20,8 +23,12 @@ pub fn tool_scope(tool_name: &str) -> String {
         "task" => "task".into(),
         "lsp" => "lsp".into(),
         "question" => "question".into(),
-        "plan_complete" => "plan".into(),
-        "todowrite" | "todo_write" | "todoread" => "edit".into(),
+        "plan_complete" | "plan.complete" | "plan" => "plan".into(),
+        "todowrite" | "todo_write" => "edit".into(),
+        // todoread is read-only: must not inherit edit blocks.
+        "todoread" | "todo_read" => "read".into(),
+        "todo" => "edit".into(),
+        "use_capability" => "task".into(),
         _ if tool_name.starts_with("mcp_") => "mcp".into(),
         _ => tool_name.to_string(),
     }
@@ -86,7 +93,11 @@ pub fn remember_patterns_for_workspace(
 ) -> Vec<String> {
     let patterns = match tool_scope(tool_name).as_str() {
         "bash" => {
-            let cmd = input["command"].as_str().unwrap_or("");
+            let cmd = input
+                .get("command")
+                .and_then(|v| v.as_str())
+                .or_else(|| input.get("cmd").and_then(|v| v.as_str()))
+                .unwrap_or("");
             let prefix = bash_command_prefix(cmd);
             if prefix.is_empty() {
                 vec!["*".into()]
@@ -95,7 +106,16 @@ pub fn remember_patterns_for_workspace(
             }
         }
         "read" | "edit" | "list" | "glob" | "grep" => path_patterns(input),
-        _ => vec!["*".into()],
+        // Scoped remembers: never fall back to global `*` permit.
+        "question" => vec!["question".into(), "*".into()],
+        "plan" => vec!["plan".into(), "*".into()],
+        "skill" => skill_patterns(input),
+        "task" => task_patterns(input),
+        "lsp" => lsp_patterns(input),
+        "webfetch" => url_patterns(input),
+        "websearch" => query_patterns(input),
+        "mcp" => vec![tool_name.to_string(), "*".into()],
+        _ => vec![tool_name.to_string(), "*".into()],
     };
     if let Some(dir) = working_dir {
         return patterns
@@ -134,7 +154,11 @@ pub fn outside_workspace_paths(working_dir: &str, input: &Value, tool_name: &str
 }
 
 fn bash_patterns(input: &Value) -> Vec<String> {
-    let cmd = input["command"].as_str().unwrap_or("");
+    let cmd = input
+        .get("command")
+        .and_then(|v| v.as_str())
+        .or_else(|| input.get("cmd").and_then(|v| v.as_str()))
+        .unwrap_or("");
     let mut patterns = vec![cmd.to_string()];
     let prefix = bash_command_prefix(cmd);
     if !prefix.is_empty() {
@@ -145,15 +169,61 @@ fn bash_patterns(input: &Value) -> Vec<String> {
 }
 
 fn bash_command_prefix(cmd: &str) -> String {
-    cmd.split_whitespace().take(2).collect::<Vec<_>>().join(" ")
+    // Quote-aware first-two-tokens: `git commit -m "a b"` -> `git commit`,
+    // `"C:\Program Files\git.exe" status` keeps quoted binary intact.
+    let tokens = shell_tokens(cmd);
+    tokens.into_iter().take(2).collect::<Vec<_>>().join(" ")
+}
+
+fn shell_tokens(cmd: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    for ch in cmd.chars() {
+        match ch {
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !cur.is_empty() {
+                    out.push(cur.clone());
+                    cur.clear();
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 fn path_patterns(input: &Value) -> Vec<String> {
     let mut out = Vec::new();
-    for key in ["path", "file", "file_path", "target"] {
+    for key in [
+        "path",
+        "file",
+        "file_path",
+        "target",
+        "dir",
+        "directory",
+        "cwd",
+        "working_directory",
+    ] {
         if let Some(p) = input.get(key).and_then(|v| v.as_str()) {
-            out.push(p.to_string());
+            if !p.trim().is_empty() {
+                out.push(p.to_string());
+            }
         }
+    }
+    // ApplyPatch carries paths inside the unified diff, not top-level keys.
+    if let Some(patch) = input.get("patch").and_then(|v| v.as_str()) {
+        out.extend(crate::tools::parse_patch_paths(patch));
     }
     if out.is_empty() {
         out.push("*".into());
@@ -162,12 +232,10 @@ fn path_patterns(input: &Value) -> Vec<String> {
 }
 
 fn grep_patterns(input: &Value) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(p) = input["pattern"].as_str() {
-        out.push(p.to_string());
-    }
-    out.extend(path_patterns(input));
-    out
+    // Policy globs match FILES, never the search string itself.
+    // Including `pattern` (the query) caused query text to be evaluated
+    // against path rules (false blocks/permits).
+    path_patterns(input)
 }
 
 fn glob_patterns(input: &Value) -> Vec<String> {
@@ -218,21 +286,38 @@ fn task_patterns(input: &Value) -> Vec<String> {
 }
 
 fn lsp_patterns(input: &Value) -> Vec<String> {
-    if let Some(op) = input["operation"].as_str() {
-        vec![op.to_string()]
-    } else {
-        vec!["*".into()]
+    // LspTool schema uses `command`+`method`+`params`; legacy `operation`
+    // kept as fallback so method-granular rules actually hit.
+    if let Some(m) = input
+        .get("method")
+        .and_then(|v| v.as_str())
+        .or_else(|| input.get("operation").and_then(|v| v.as_str()))
+    {
+        if !m.trim().is_empty() {
+            return vec![m.to_string()];
+        }
     }
+    vec!["*".into()]
 }
 
 fn collect_paths_from_input(input: &Value, tool_name: &str, out: &mut Vec<String>) {
     match tool_scope(tool_name).as_str() {
         "bash" => {
-            if let Some(cmd) = input["command"].as_str() {
-                for token in cmd.split_whitespace() {
-                    if looks_like_path(token) {
-                        out.push(token.to_string());
-                    }
+            let cmd = input
+                .get("command")
+                .and_then(|v| v.as_str())
+                .or_else(|| input.get("cmd").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            // Quote-aware tokenization + redirection targets (`> ../out`,
+            // `2>file`) + `~`/`$HOME`/`..` so escapes can't hide.
+            for token in shell_tokens(cmd) {
+                let t = token.trim_matches(|c| c == '"' || c == '\'').trim();
+                let t = t.trim_start_matches(['>', '<']);
+                if t.is_empty() {
+                    continue;
+                }
+                if looks_like_path(t) {
+                    out.push(t.to_string());
                 }
             }
         }
@@ -243,10 +328,16 @@ fn collect_paths_from_input(input: &Value, tool_name: &str, out: &mut Vec<String
 }
 
 fn looks_like_path(token: &str) -> bool {
-    token.starts_with('/')
-        || token.starts_with("./")
-        || token.starts_with("../")
-        || token.contains('\\')
+    let t = token.trim_matches(|c| c == '"' || c == '\'');
+    t.starts_with('/')
+        || t.starts_with("./")
+        || t.starts_with("../")
+        || t.starts_with('~')
+        || t.starts_with("$HOME")
+        || t.starts_with("%")
+        || t.contains('\\')
+        || t.contains('/')
+        || t.contains("..")
 }
 
 fn is_outside_workspace(root: &Path, path: &str) -> bool {
@@ -258,9 +349,9 @@ fn is_outside_workspace(root: &Path, path: &str) -> bool {
     !crate::project_context::path_within_project(&project_dir, Path::new(&normalized))
 }
 
-/// Fingerprint for loop-guard detection.
+/// Fingerprint for loop-guard detection (canonical: sorted keys, trimmed).
 pub fn tool_fingerprint(tool_name: &str, input: &Value) -> String {
-    format!("{tool_name}:{}", input)
+    deepseekcode_types::tool_fingerprint_canonical(tool_name, input)
 }
 
 #[allow(dead_code)]

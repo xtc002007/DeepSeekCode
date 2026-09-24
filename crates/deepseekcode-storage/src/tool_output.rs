@@ -56,8 +56,32 @@ impl ManagedToolOutput {
 
         std::fs::create_dir_all(&self.base_dir).map_err(DeepSeekCodeError::Io)?;
 
-        let file_name = format!("{}_{}_{}.json", session_id, tool_call_id, tool_name);
+        fn sanitize_component(s: &str) -> String {
+            s.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .take(64)
+                .collect()
+        }
+        let file_name = format!(
+            "{}_{}_{}.json",
+            session_id,
+            sanitize_component(tool_call_id),
+            sanitize_component(tool_name)
+        );
         let path = self.base_dir.join(&file_name);
+        // Containment: sanitized components cannot contain separators, but
+        // verify the join stays inside base_dir regardless.
+        if path.parent() != Some(self.base_dir.as_path()) {
+            return Err(DeepSeekCodeError::InvalidInput(
+                "invalid tool output path".into(),
+            ));
+        }
         let serialized = serde_json::to_string_pretty(output).map_err(DeepSeekCodeError::Serde)?;
         std::fs::write(&path, &serialized).map_err(DeepSeekCodeError::Io)?;
 
@@ -115,12 +139,26 @@ fn project_bounded_output(original: &Value, preview: &str, path: &Path) -> Value
 
 fn project_bounded_body(original: &Value, preview: &str, path: &Path) -> Value {
     if original.get("stdout").is_some() {
-        let lines: Vec<&str> = preview.splitn(2, '\n').collect();
-        let (stdout, stderr) = if lines.len() == 2 {
-            (lines[0], lines[1])
+        // `preview` is head + marker + tail; the marker line always contains
+        // "output truncated". Split stdout/stderr by re-deriving from the
+        // ORIGINAL value instead of splitting preview on the first newline
+        // (which misplaced multi-line stdout into stderr).
+        let orig_stdout = original
+            .get("stdout")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let orig_stderr = original
+            .get("stderr")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        // Keep the bounded preview as stdout and preserve stderr tail (8KiB).
+        let stderr_tail = if orig_stderr.len() > 8 * 1024 {
+            &orig_stderr[orig_stderr.len() - 8 * 1024..]
         } else {
-            (preview, "")
+            orig_stderr
         };
+        let _ = orig_stdout;
+        let (stdout, stderr) = (preview, stderr_tail);
         let mut bounded = original.clone();
         if let Some(obj) = bounded.as_object_mut() {
             obj.insert("stdout".into(), json!(stdout));

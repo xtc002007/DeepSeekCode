@@ -10,7 +10,7 @@ pub fn format_summary_line(summary: &ActivitySummary) -> String {
         parts.push(format!("Edited {} files", summary.files_edited));
     }
     if summary.files_explored > 0 {
-        parts.push(format!("explored {} files", summary.files_explored));
+        parts.push(format!("Explored {} files", summary.files_explored));
     }
     if summary.searches > 0 {
         parts.push(format!("{} searches", summary.searches));
@@ -35,6 +35,31 @@ pub fn format_summary_line(summary: &ActivitySummary) -> String {
     }
 }
 
+/// Header variant of the turn summary, e.g. `Explore 5 files`.
+/// Base verb forms so it reads naturally in front of a duration:
+/// `Explore 5 files, Worked for 12s`. Returns `None` when there is nothing
+/// worth summarizing (the caller then shows the bare duration label).
+pub fn format_summary_header(summary: &ActivitySummary) -> Option<String> {
+    let mut parts = Vec::new();
+    if summary.files_edited > 0 {
+        parts.push(format!("Edit {} files", summary.files_edited));
+    }
+    if summary.files_explored > 0 {
+        parts.push(format!("Explore {} files", summary.files_explored));
+    }
+    if summary.searches > 0 {
+        parts.push(format!("{} searches", summary.searches));
+    }
+    if summary.commands > 0 {
+        parts.push(format!("Run {} commands", summary.commands));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
+}
+
 pub fn format_message_preview(verb: &str, text: &str) -> String {
     let preview: String = text.lines().take(2).collect::<Vec<_>>().join(" ");
     let truncated = if preview.chars().count() > 120 {
@@ -52,9 +77,15 @@ pub fn format_message_preview(verb: &str, text: &str) -> String {
 pub fn running_prefix(status: ActivityStatus, _kind: ActivityKind) -> &'static str {
     if status == ActivityStatus::Running {
         "◐ "
+    } else if status == ActivityStatus::Stale {
+        "◌ "
     } else {
         ""
     }
+}
+
+pub fn is_live_running(status: ActivityStatus) -> bool {
+    status == ActivityStatus::Running
 }
 
 pub fn format_leaf_line(leaf: &ActivityLeaf) -> String {
@@ -90,6 +121,18 @@ pub fn format_leaf_line(leaf: &ActivityLeaf) -> String {
             }
             return line;
         }
+    }
+
+    // Stale leaves are terminal: never show the live "Running …" line,
+    // instead suffix so users know the turn never closed (10min watchdog).
+    if leaf.status == ActivityStatus::Stale {
+        let object = format_target(&leaf.target);
+        let base = if object.is_empty() {
+            leaf.verb.clone()
+        } else {
+            format!("{} {}", leaf.verb, object)
+        };
+        return format!("{prefix}{base} (stale — timed out)");
     }
 
     let object = format_target(&leaf.target);
@@ -266,6 +309,7 @@ mod tests {
             status: ActivityStatus::Completed,
             detail_ref: None,
             text: None,
+            started_at: None,
         };
         assert!(format_leaf_line(&leaf).contains("Edited"));
         assert!(format_leaf_line(&leaf).contains("+21 -1"));
@@ -282,10 +326,33 @@ mod tests {
             status: ActivityStatus::Completed,
             detail_ref: None,
             text: Some("请分析这个项目的架构设计".into()),
+            started_at: None,
         };
         let line = format_leaf_line(&leaf);
         assert!(line.starts_with("You · "));
         assert!(line.contains("架构"));
+    }
+
+    #[test]
+    fn summary_header_uses_base_forms_and_none_when_empty() {
+        let explored = ActivitySummary {
+            files_explored: 5,
+            ..Default::default()
+        };
+        assert_eq!(
+            format_summary_header(&explored).as_deref(),
+            Some("Explore 5 files")
+        );
+        let mixed = ActivitySummary {
+            files_edited: 2,
+            commands: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            format_summary_header(&mixed).as_deref(),
+            Some("Edit 2 files, Run 1 commands")
+        );
+        assert_eq!(format_summary_header(&ActivitySummary::default()), None);
     }
 
     #[test]
@@ -299,6 +366,7 @@ mod tests {
             status: ActivityStatus::Completed,
             detail_ref: None,
             text: Some("Here is the analysis of your project.".into()),
+            started_at: None,
         };
         let line = format_leaf_line(&leaf);
         assert!(line.starts_with("Assistant · "));
@@ -318,6 +386,7 @@ mod tests {
             status: ActivityStatus::Running,
             detail_ref: Some("b2".into()),
             text: Some("[stdout] tests passed".into()),
+            started_at: None,
         };
         let line = format_leaf_line(&leaf);
         assert!(line.contains("tests passed"));
@@ -336,6 +405,7 @@ mod tests {
             status: ActivityStatus::Running,
             detail_ref: Some("b1".into()),
             text: None,
+            started_at: None,
         };
         let line = format_leaf_line(&leaf);
         assert!(line.starts_with('◐'));

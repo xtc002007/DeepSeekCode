@@ -8,10 +8,22 @@ pub fn render_user_message_card(
     leaf_id: &str,
     text: &str,
     theme: &ThemeTokens,
+    view: &gpui::Entity<crate::workspace::WorkspaceView>,
 ) -> impl IntoElement {
+    use crate::selectable_text::selectable_plain;
     let theme = theme.clone();
     let copy_text = text.to_string();
     let copy_id = ElementId::Name(SharedString::from(format!("copy-user-{leaf_id}")));
+    let body = selectable_plain(
+        view,
+        format!("{leaf_id}#user"),
+        text.to_string(),
+        gpui::font(crate::theme::font_ui(&theme)),
+        theme.text_primary,
+        theme.typography.text_xs,
+        crate::theme::leading_relaxed(&theme),
+        true,
+    );
     div()
         .w_full()
         .flex()
@@ -42,11 +54,7 @@ pub fn render_user_message_card(
                 .py_1p5()
                 .rounded_md()
                 .bg(theme.accent_muted)
-                .border_1()
-                .border_color(theme.border_faint)
-                .text_xs()
-                .line_height(crate::theme::leading_relaxed(&theme))
-                .text_color(theme.text_primary)
-                .child(text.to_string())
+                .cursor(CursorStyle::IBeam)
+                .child(body)
         })
 }

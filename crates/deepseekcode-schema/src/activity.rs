@@ -49,6 +49,10 @@ pub enum ActivityStatus {
     Completed,
     Failed,
     Cancelled,
+    /// Running past the stale timeout without close events (unclosed turn).
+    /// Terminal for busy indicators; purely presentational, never persisted
+    /// as a new event kind.
+    Stale,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
@@ -131,6 +135,10 @@ pub struct ActivityLeaf {
     pub detail_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Wall-clock when this leaf entered Running (event created_at).
+    /// Used to render Stale after timeout without new events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, JsonSchema)]

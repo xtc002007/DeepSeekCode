@@ -12,3 +12,31 @@ pub mod websearch;
 
 pub use registry::ToolRegistry;
 pub use services::{CancelToken, EventToolProgressSink, ToolProgressSink, ToolServices};
+
+/// Extract file paths from a unified diff `patch` string for policy checks.
+/// Parses `+++ b/<path>` / `+++ <path>` headers; used by policy pattern
+/// extraction so `apply_patch` cannot bypass `outside_workspace` guards.
+pub fn parse_patch_paths(patch: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in patch.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("+++ ") {
+            let mut p = rest.trim();
+            // Strip git a/ b/ prefixes and trailing timestamps/tabs.
+            if let Some(s) = p.strip_prefix("b/") {
+                p = s;
+            } else if let Some(s) = p.strip_prefix("a/") {
+                p = s;
+            }
+            let p = p.split('\t').next().unwrap_or(p).trim();
+            let p = p.trim_matches('"').trim();
+            if p.is_empty() || p == "/dev/null" {
+                continue;
+            }
+            out.push(p.to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}

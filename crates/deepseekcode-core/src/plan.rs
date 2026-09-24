@@ -5,11 +5,15 @@ use deepseekcode_schema::plan::SessionPlanSummary;
 use std::collections::HashSet;
 
 /// Collect completed plans for a session from durable events.
+/// Deduplicated by `plan_id` (latest event wins) and sorted by
+/// `completed_at` so reordered replays select the same actionable plan
+/// (P0-8: previously duplicates accumulated and `rfind` depended on log order).
 pub fn session_plans_from_events(
     events: &[EventEnvelope],
     dismissed: &HashSet<String>,
 ) -> Vec<SessionPlanSummary> {
-    let mut plans = Vec::new();
+    use std::collections::HashMap;
+    let mut latest: HashMap<String, SessionPlanSummary> = HashMap::new();
     for event in events {
         if event.kind != EventKind::PlanCompleted {
             continue;
@@ -30,23 +34,37 @@ pub fn session_plans_from_events(
             .as_str()
             .filter(|s| !s.is_empty())
             .map(String::from);
-        plans.push(SessionPlanSummary {
-            plan_id: plan_id.clone(),
-            plan_path,
-            title,
-            summary,
-            completed_at: event.created_at.to_rfc3339(),
-            implement_prompt_dismissed: dismissed.contains(&plan_id),
-        });
+        latest.insert(
+            plan_id.clone(),
+            SessionPlanSummary {
+                plan_id: plan_id.clone(),
+                plan_path,
+                title,
+                summary,
+                completed_at: event.created_at.to_rfc3339(),
+                implement_prompt_dismissed: dismissed.contains(&plan_id),
+            },
+        );
     }
+    let mut plans: Vec<_> = latest.into_values().collect();
+    plans.sort_by(|a, b| {
+        a.completed_at
+            .cmp(&b.completed_at)
+            .then(a.plan_id.cmp(&b.plan_id))
+    });
     plans
 }
 
-/// Latest non-dismissed plan id, if any.
+/// Latest non-dismissed plan id, if any (by `completed_at` order).
 pub fn latest_actionable_plan_id(plans: &[SessionPlanSummary]) -> Option<String> {
     plans
         .iter()
-        .rfind(|p| !p.implement_prompt_dismissed)
+        .filter(|p| !p.implement_prompt_dismissed)
+        .max_by(|a, b| {
+            a.completed_at
+                .cmp(&b.completed_at)
+                .then(a.plan_id.cmp(&b.plan_id))
+        })
         .map(|p| p.plan_id.clone())
 }
 

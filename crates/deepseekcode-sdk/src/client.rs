@@ -16,47 +16,21 @@ pub enum EventStreamItem {
     Gap { head: i64, limit: i64 },
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FsEntry {
-    pub name: String,
-    pub path: String,
-    pub is_dir: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct FsTreePage {
-    pub entries: Vec<FsEntry>,
-    pub total: usize,
-    pub offset: usize,
-    pub limit: usize,
-}
+// P1-10: single source of truth — reuse `schema::project` types instead of
+// parallel local definitions (previously `FsEntry`/`FsTreeResponse` drifted
+// across SDK/schema/server).
+pub use deepseekcode_schema::project::{FsEntry, FsTreeResponse as FsTreePage};
 
 fn urlencoding_encode(s: &str) -> String {
-    let mut out = String::new();
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' | b'\\' | b':' => {
-                out.push(byte as char);
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
+    // Delegate to the `urlencoding` crate so Windows paths, spaces and CJK
+    // encode identically on every platform (previously `/`, `\`, `:` were
+    // left raw, causing double-encoding risks).
+    urlencoding::encode(s).into_owned()
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SkillInfo {
-    pub name: String,
-    pub description: String,
-    pub path: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PluginInfo {
-    pub name: String,
-    pub description: String,
-    pub path: String,
-}
+// P1-10: canonical API types live in schema; server re-exports the same
+// definitions, so SDK/server can never drift.
+pub use deepseekcode_schema::api::{PluginInfo, SkillInfo};
 
 #[derive(Clone)]
 pub struct DeepSeekCodeClient {
@@ -68,8 +42,11 @@ pub struct DeepSeekCodeClient {
 
 impl DeepSeekCodeClient {
     pub fn new(base_url: impl Into<String>, directory: impl Into<String>) -> Self {
+        // Proxy-aware client (system+env) with stream-safe timeouts, matching
+        // the server-side LlmClient. Previously `Client::new()` ignored VPN
+        // proxies and diverged from `http_client::build_auto_client`.
         Self {
-            http: Client::new(),
+            http: deepseekcode_llm::http_client::build_auto_client(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             directory: directory.into(),
             auth: None,
@@ -200,8 +177,14 @@ impl DeepSeekCodeClient {
         plan_id: &str,
     ) -> Result<()> {
         let path = format!("/api/v1/session/{session_id}/plans/{plan_id}/dismiss");
+        // Server returns `{"ok":true}` JSON (never empty-body 200).
         let _: serde_json::Value = self.post(&path, &serde_json::json!({})).await?;
         Ok(())
+    }
+
+    pub async fn session_cache_status(&self, session_id: SessionId) -> Result<serde_json::Value> {
+        let path = format!("/api/v1/session/{session_id}/cache-status");
+        self.get(&path).await
     }
 
     pub async fn latest_event_seq(&self, session_id: SessionId) -> Result<i64> {
@@ -803,6 +786,9 @@ impl DeepSeekCodeClient {
             .await
             .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
         let stream = response.bytes_stream().eventsource();
+        // Transport errors are surfaced as Gap markers with the last known
+        // head so callers can distinguish disconnect (retryable) from clean
+        // EOF (previously `Err(_)=>None` swallowed both).
         let mapped = stream.filter_map(move |event| async move {
             match event {
                 Ok(ev) => {
@@ -827,7 +813,17 @@ impl DeepSeekCodeClient {
                         .ok()
                         .map(EventStreamItem::Event)
                 }
-                Err(_) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        target: deepseekcode_telemetry::SERVER,
+                        error = %e,
+                        "sdk event stream transport error; emitting gap for retry"
+                    );
+                    Some(EventStreamItem::Gap {
+                        head: since_seq,
+                        limit: -1,
+                    })
+                }
             }
         });
         Ok(Box::pin(mapped))

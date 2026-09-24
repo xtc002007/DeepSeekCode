@@ -110,7 +110,29 @@ impl EmbeddedEngine {
         } else {
             DeepSeekCodeClient::new(format!("http://{addr}"), project_dir.clone())
         };
-        client.health().await?;
+        // Axum may not be listening yet: retry health briefly instead of
+        // single-shot flaky `connection refused`.
+        {
+            let mut last_err = String::new();
+            let mut ok = false;
+            for _ in 0..20 {
+                match client.health().await {
+                    Ok(()) => {
+                        ok = true;
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = e.to_string();
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
+            }
+            if !ok {
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(format!(
+                    "embedded engine health check failed: {last_err}"
+                )));
+            }
+        }
 
         tracing::info!(
             target: deepseekcode_telemetry::APP,
@@ -138,6 +160,11 @@ impl EmbeddedEngine {
 
     pub async fn shutdown(self) {
         tracing::info!(target: deepseekcode_telemetry::APP, "embedded engine shutting down");
+        // Interrupt live drains so no turn is left half-written in SQLite.
+        {
+            let engine = self.engine.read().await;
+            engine.interrupt_all().await;
+        }
         let _ = self.shutdown_tx.send(true);
         let handle = self.handle;
         let abort = handle.abort_handle();

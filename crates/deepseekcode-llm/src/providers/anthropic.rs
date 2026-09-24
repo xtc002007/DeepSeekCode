@@ -12,11 +12,13 @@ use std::pin::Pin;
 use std::time::Duration;
 
 /// Non-streaming requests have no natural end, so cap them outright.
+#[allow(dead_code)]
 const GENERATE_TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// The official Anthropic API authenticates via `x-api-key`; third-party
 /// Anthropic-compatible proxies customised via `base_url` almost universally
 /// expect `Authorization: Bearer` instead.
+#[allow(dead_code)]
 fn authenticated_builder(
     http: &Client,
     url: &str,
@@ -47,17 +49,36 @@ pub async fn generate(
     request: &LlmRequest,
     api_key: Option<String>,
 ) -> Result<crate::request::LlmResponse> {
-    let api_key =
-        api_key.ok_or_else(|| DeepSeekCodeError::Llm("Anthropic API key not set".into()))?;
+    let api_key = api_key
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| DeepSeekCodeError::Llm("Anthropic API key not set".into()))?;
     let body = build_body(request);
     let url = AnthropicMessagesEndpoint.resolve(request.base_url.as_deref());
 
-    let response = authenticated_builder(&http, &url, request.base_url.as_deref(), &api_key)
-        .timeout(GENERATE_TOTAL_TIMEOUT)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| DeepSeekCodeError::Llm(e.to_string()))?;
+    // Route through proxy-aware fallback (auto->direct->proxy) like
+    // openai/deepseek so VPN ON/OFF both work.
+    let response = crate::http_client::post_json_with_fallback_auth(
+        http,
+        &url,
+        &api_key,
+        &body,
+        true,
+        |b: reqwest::RequestBuilder| {
+            let builder = b.header("anthropic-version", "2023-06-01");
+            if request
+                .base_url
+                .as_deref()
+                .map(is_official_anthropic_endpoint)
+                .unwrap_or(true)
+            {
+                builder.header("x-api-key", api_key.clone())
+            } else {
+                builder.bearer_auth(api_key.clone())
+            }
+        },
+    )
+    .await
+    .map_err(DeepSeekCodeError::Llm)?;
 
     if !response.status().is_success() {
         let text = response.text().await.unwrap_or_default();
@@ -86,10 +107,39 @@ pub async fn generate(
         }
     }
 
+    // Preserve usage (P0-5: previously `None`, blinding billing and
+    // `/cache-status` for Anthropic). Anthropic shape:
+    // `{usage:{input_tokens,output_tokens,cache_read_input_tokens,
+    // cache_creation_input_tokens}}`.
+    let usage = value.get("usage").map(|u| crate::request::TokenUsage {
+        input_tokens: u
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
+        output_tokens: u
+            .get("output_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
+        reasoning_tokens: None,
+        cache_tokens: u
+            .get("cache_read_input_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
+        cache_hit: u
+            .get("cache_read_input_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
+        cache_miss: None,
+        cache_write: u
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
+    });
+
     Ok(crate::request::LlmResponse {
         content,
         tool_calls,
-        usage: None,
+        usage,
         reasoning_content: None,
     })
 }
@@ -99,17 +149,36 @@ pub async fn stream(
     request: &LlmRequest,
     api_key: Option<String>,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent>> + Send>>> {
-    let api_key =
-        api_key.ok_or_else(|| DeepSeekCodeError::Llm("Anthropic API key not set".into()))?;
+    let api_key = api_key
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| DeepSeekCodeError::Llm("Anthropic API key not set".into()))?;
     let mut body = build_body(request);
     body["stream"] = json!(true);
     let url = AnthropicMessagesEndpoint.resolve(request.base_url.as_deref());
 
-    let response = authenticated_builder(&http, &url, request.base_url.as_deref(), &api_key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| DeepSeekCodeError::Llm(e.to_string()))?;
+    // Same fallback as generate; no per-request timeout here (streaming is
+    // guarded by the runner idle watchdog + no global read_timeout on streams).
+    let response = crate::http_client::post_json_stream_with_fallback_auth(
+        http,
+        &url,
+        &api_key,
+        &body,
+        |b: reqwest::RequestBuilder| {
+            let builder = b.header("anthropic-version", "2023-06-01");
+            if request
+                .base_url
+                .as_deref()
+                .map(is_official_anthropic_endpoint)
+                .unwrap_or(true)
+            {
+                builder.header("x-api-key", api_key.clone())
+            } else {
+                builder.bearer_auth(api_key.clone())
+            }
+        },
+    )
+    .await
+    .map_err(DeepSeekCodeError::Llm)?;
 
     if !response.status().is_success() {
         let text = response.text().await.unwrap_or_default();
@@ -244,16 +313,28 @@ fn build_body(request: &LlmRequest) -> Value {
     }
     flush_tool_results(&mut messages, &mut pending_tool_results);
 
+    // Honor request.max_output_tokens (model透传); default 4096 preserved.
+    let max_tokens = request.max_output_tokens.unwrap_or(4096);
+    let tools: Vec<Value> = request
+        .tools
+        .iter()
+        .map(|t| {
+            json!({
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.input_schema,
+            })
+        })
+        .collect();
     let mut body = json!({
         "model": request.model,
-        "max_tokens": 4096,
+        "max_tokens": max_tokens,
         "messages": messages,
-        "tools": request.tools.iter().map(|t| json!({
-            "name": t.name,
-            "description": t.description,
-            "input_schema": t.input_schema,
-        })).collect::<Vec<_>>(),
     });
+    // Omit empty tools: some gateways reject `"tools":[]`.
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(tools);
+    }
     if !request.system.is_empty() {
         body["system"] = json!(request.system);
     }
