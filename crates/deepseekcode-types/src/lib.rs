@@ -1,6 +1,7 @@
 pub mod branding;
 pub mod error;
 pub mod ids;
+pub mod paths;
 pub mod tool_arguments;
 
 pub use branding::{
@@ -9,6 +10,8 @@ pub use branding::{
 };
 pub use error::{DeepSeekCodeError, Result};
 pub use ids::*;
+pub use paths::{config_dir, data_dir, home_dir};
 pub use tool_arguments::{
-    normalize_tool_arguments, parse_tool_arguments, tool_fingerprint_canonical,
+    normalize_tool_arguments, normalize_tool_arguments_for_fingerprint, parse_tool_arguments,
+    tool_fingerprint_canonical,
 };

@@ -95,8 +95,7 @@ impl EventKind {
 pub struct EventEnvelope {
     pub seq: i64,
     pub kind: EventKind,
-    #[schema(value_type = Option<String>)]
-    #[schemars(with = "Option<String>")]
+
     pub session_id: Option<SessionId>,
     pub payload: serde_json::Value,
     pub created_at: DateTime<Utc>,
@@ -104,16 +103,12 @@ pub struct EventEnvelope {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct PromptAdmittedPayload {
-    #[schema(value_type = String)]
-    #[schemars(with = "String")]
     pub message_id: MessageId,
     pub delivery: crate::session::PromptDelivery,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct MessageDeltaPayload {
-    #[schema(value_type = String)]
-    #[schemars(with = "String")]
     pub message_id: MessageId,
     pub delta: String,
     pub part_index: usize,
@@ -121,8 +116,6 @@ pub struct MessageDeltaPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ToolStartedPayload {
-    #[schema(value_type = String)]
-    #[schemars(with = "String")]
     pub tool_call_id: ToolCallId,
     pub tool_name: String,
     pub input: serde_json::Value,
@@ -137,8 +130,6 @@ pub struct ToolStartedPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ToolCompletedPayload {
-    #[schema(value_type = String)]
-    #[schemars(with = "String")]
     pub tool_call_id: ToolCallId,
     pub tool_name: String,
     pub output: serde_json::Value,
@@ -157,8 +148,6 @@ fn default_metadata_object() -> serde_json::Value {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct PermissionRequestedPayload {
-    #[schema(value_type = String)]
-    #[schemars(with = "String")]
     pub permission_id: PermissionId,
     pub tool_name: String,
     pub description: String,
@@ -171,8 +160,6 @@ pub struct TodoUpdatedPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ToolProgressPayload {
-    #[schema(value_type = String)]
-    #[schemars(with = "String")]
     pub tool_call_id: ToolCallId,
     pub tool_name: String,
     pub chunk: String,
@@ -186,8 +173,6 @@ fn default_stdout_stream() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct PermissionResolvedPayload {
-    #[schema(value_type = String)]
-    #[schemars(with = "String")]
     pub permission_id: PermissionId,
     pub tool_name: String,
     pub status: String,
@@ -195,8 +180,6 @@ pub struct PermissionResolvedPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct QuestionRequestedPayload {
-    #[schema(value_type = String)]
-    #[schemars(with = "String")]
     pub tool_call_id: ToolCallId,
     pub question: String,
     #[serde(default)]

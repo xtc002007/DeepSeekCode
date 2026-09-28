@@ -15,8 +15,6 @@ pub enum PermissionStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct PermissionRequest {
-    #[schema(value_type = String)]
-    #[schemars(with = "String")]
     pub id: PermissionId,
     pub tool_name: String,
     pub description: String,

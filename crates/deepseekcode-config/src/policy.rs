@@ -168,12 +168,12 @@ fn legacy_pattern_to_scope(pattern: &str) -> String {
 
 fn expand_home(pattern: &str) -> String {
     if let Some(rest) = pattern.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = deepseekcode_types::home_dir() {
             return format!("{}/{}", home.display(), rest);
         }
     }
     if let Some(rest) = pattern.strip_prefix("$HOME/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = deepseekcode_types::home_dir() {
             return format!("{}/{}", home.display(), rest);
         }
     }

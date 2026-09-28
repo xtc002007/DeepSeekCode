@@ -69,6 +69,27 @@ Response must include:\n\
 - Recommendations for what should be done next\n\n\
 Any attempt to use tools is a critical violation. Respond with text ONLY.";
 
+/// Shared merge for both `transform_system` paths (cached fast path and
+/// hook path): baseline + built-in plan prompt + config agent prompt, in that
+/// order. Previously duplicated inline with drift risk between the branches.
+fn merge_plan_prompt(
+    baseline: String,
+    agent: &deepseekcode_schema::agent::AgentKind,
+    cfg_prompt: &str,
+) -> String {
+    let mut merged = baseline;
+    if matches!(agent, deepseekcode_schema::agent::AgentKind::Plan) {
+        let builtin = crate::agent::plan_system_prompt();
+        if !builtin.is_empty() {
+            merged = format!("{merged}\n\n{builtin}");
+        }
+    }
+    if !cfg_prompt.is_empty() {
+        merged = format!("{merged}\n\n{cfg_prompt}");
+    }
+    merged
+}
+
 pub struct SessionRunner {
     session_id: SessionId,
     project_dir: String,
@@ -274,16 +295,7 @@ impl SessionRunner {
             if let Some(hit) = self.system_cache.lock().await.get(&cache_key) {
                 return Ok(hit.clone());
             }
-            let mut merged = baseline;
-            if matches!(agent, deepseekcode_schema::agent::AgentKind::Plan) {
-                let builtin = crate::agent::plan_system_prompt();
-                if !builtin.is_empty() {
-                    merged = format!("{merged}\n\n{builtin}");
-                }
-            }
-            if !cfg_prompt.is_empty() {
-                merged = format!("{merged}\n\n{cfg_prompt}");
-            }
+            let merged = merge_plan_prompt(baseline, agent, cfg_prompt);
             {
                 let mut cache = self.system_cache.lock().await;
                 // Bound to 128 entries: evict an arbitrary entry when full.
@@ -297,23 +309,13 @@ impl SessionRunner {
             return Ok(merged);
         }
         let agent_key = format!("{agent:?}").to_lowercase();
-        let mut merged = baseline;
-        if matches!(agent, deepseekcode_schema::agent::AgentKind::Plan) {
-            let builtin = crate::agent::plan_system_prompt();
-            if !builtin.is_empty() {
-                merged = format!("{merged}\n\n{builtin}");
-            }
-        }
-        if let Some(prompt) = self
+        let cfg_prompt = self
             .config
             .agents
             .get(&agent_key)
             .and_then(|a| a.system_prompt.as_deref())
-        {
-            if !prompt.is_empty() {
-                merged = format!("{merged}\n\n{prompt}");
-            }
-        }
+            .unwrap_or("");
+        let merged = merge_plan_prompt(baseline, agent, cfg_prompt);
         let mut output = deepseekcode_plugin::ChatSystemTransformOutput {
             system: vec![merged],
         };

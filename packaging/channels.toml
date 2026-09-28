@@ -19,7 +19,9 @@ targets = [
 # GPUI desktop application — platform-specific installers.
 enabled = true
 package = "deepseekcode-desktop"
-binary = "deepseekcode"
+# Must match the [[bin]] name in crates/deepseekcode-desktop/Cargo.toml
+# (renamed from `deepseekcode` to avoid overwriting the CLI binary).
+binary = "deepseekcode-desktop"
 
 [[channels.desktop.platforms]]
 id = "windows-x64"
@@ -51,6 +53,8 @@ installer = "deb"
 
 [channels.crates]
 # release-plz: publish library crates to crates.io (binary crates stay publish=false).
+# Enablement checklist: set enabled=true, ensure every package below has a
+# crates.io-ready manifest (description/license/repository), then run release-plz.
 enabled = false
 tool = "release-plz"
 packages = [
@@ -62,9 +66,9 @@ packages = [
     "deepseekcode-llm",
     "deepseekcode-core",
     "deepseekcode-plugin",
+    "deepseekcode-embed",
     "deepseekcode-server",
     "deepseekcode-sdk",
-    "deepseekcode-cli",
 ]
 
 [signing]

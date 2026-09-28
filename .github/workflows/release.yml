@@ -67,6 +67,10 @@ jobs:
     if: needs.channels.outputs.desktop_windows_enabled == 'true'
     runs-on: windows-latest
     timeout-minutes: 120
+    permissions:
+      contents: write
+      attestations: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -147,6 +151,18 @@ jobs:
             -Sha256 $hash `
             -OutputPath "packaging/desktop/windows/dist/latest.json"
 
+      - name: Generate SBOM (SPDX) for the installer
+        uses: anchore/sbom-action@v0
+        with:
+          path: packaging/desktop/windows/dist/DeepSeekCode-${{ steps.version.outputs.version }}-x64-setup.exe
+          format: spdx-json
+          output-file: packaging/desktop/windows/dist/DeepSeekCode-${{ steps.version.outputs.version }}-x64-setup.spdx.json
+
+      - name: Attest installer provenance (SLSA via GitHub OIDC)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: packaging/desktop/windows/dist/DeepSeekCode-${{ steps.version.outputs.version }}-x64-setup.exe
+
       - name: Upload desktop artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -155,6 +171,7 @@ jobs:
             packaging/desktop/windows/dist/DeepSeekCode-*-x64-setup.exe
             packaging/desktop/windows/dist/DeepSeekCode-*-x64-setup.exe.minisig
             packaging/desktop/windows/dist/DeepSeekCode-*-x64-setup.sha256
+            packaging/desktop/windows/dist/DeepSeekCode-*-x64-setup.spdx.json
             packaging/desktop/windows/dist/latest.json
           if-no-files-found: error
 
@@ -170,7 +187,9 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
       - name: CLI channel disabled or not implemented in CI yet
         run: |
-          echo "Enable channels.cli in packaging/channels.toml and run: dist init --yes"
+          echo "To enable: 1) set channels.cli.enabled=true in packaging/channels.toml,"
+          echo "2) run 'dist init --yes' to materialize dist-workspace.toml targets,"
+          echo "3) replace this stub with the cargo-dist plan/apply jobs."
           exit 1
 
   # ── Channel C: crates.io (release-plz) — configured, disabled ──────────────
@@ -185,16 +204,22 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
       - name: Crates channel disabled
         run: |
-          echo "Enable channels.crates in packaging/channels.toml and configure release-plz.toml publish flags"
+          echo "To enable: 1) set channels.crates.enabled=true in packaging/channels.toml,"
+          echo "2) flip publish=false to unset in release-plz.toml for the listed packages,"
+          echo "3) replace this stub with the release-plz release-pr + publish jobs."
           exit 1
 
   publish-release:
     name: Publish GitHub Release
-    needs: [channels, validate, desktop-windows]
+    # All channels listed so enabling cli/crates later needs no workflow edit:
+    # disabled channels are `skipped`, which the condition accepts.
+    needs: [channels, validate, desktop-windows, cli-dist, crates-publish]
     if: |
       always() &&
       needs.validate.result == 'success' &&
-      (needs.desktop-windows.result == 'success' || needs.desktop-windows.result == 'skipped')
+      (needs.desktop-windows.result == 'success' || needs.desktop-windows.result == 'skipped') &&
+      (needs.cli-dist.result == 'success' || needs.cli-dist.result == 'skipped') &&
+      (needs.crates-publish.result == 'success' || needs.crates-publish.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

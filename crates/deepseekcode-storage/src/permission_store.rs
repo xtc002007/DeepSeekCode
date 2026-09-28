@@ -3,6 +3,13 @@ use deepseekcode_types::{DeepSeekCodeError, Result};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 
+/// Legacy compatibility store for the pre-policy allow/ask/deny system.
+///
+/// Deprecated for new code: project-scoped governance lives in
+/// `PolicyStore` (SQLite `policy_grants` plus in-memory rulesets).
+/// This table intentionally stays global and session-agnostic so old
+/// `permission/*` API wrappers keep working for one release cycle;
+/// do not add project scoping here, migrate callers instead.
 pub struct PermissionStore {
     pool: SqlitePool,
 }

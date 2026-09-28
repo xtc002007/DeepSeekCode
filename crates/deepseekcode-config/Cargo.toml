@@ -13,7 +13,6 @@ serde_json = { workspace = true }
 jsonc-parser = { workspace = true }
 thiserror = { workspace = true }
 camino = { workspace = true }
-dirs = "6.0"
 walkdir = { workspace = true }
 
 [dev-dependencies]

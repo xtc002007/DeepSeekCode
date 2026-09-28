@@ -338,6 +338,131 @@ async fn run_fixture(path: &PathBuf) -> Result<(), String> {
                 fixture.name
             );
         }
+        "context.compaction_replaces_baseline" => {
+            // Rule 5: compaction replaces the baseline from the current
+            // complete context. Seed epoch v1, revise the source, rebuild
+            // from the fresh complete context, and assert v2 is stored.
+            let registry = SystemContextRegistry::new(dir.path().to_string_lossy());
+            let epochs = deepseekcode_core::system_context::ContextEpochStore::new(pool.clone());
+            registry
+                .ensure_epoch(&epochs, &sessions, session_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            let before = epochs
+                .get(session_id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("{}: expected epoch", fixture.name))?;
+            assert!(
+                before.baseline.contains("Test instructions"),
+                "{}: expected v1 baseline",
+                fixture.name
+            );
+            std::fs::write(
+                dir.path().join("AGENTS.md"),
+                "# Agent\nRevised instructions.",
+            )
+            .map_err(|e| e.to_string())?;
+            let fresh = SystemContextRegistry::new(dir.path().to_string_lossy());
+            let generation = fresh.render_baseline().ok_or_else(|| {
+                format!(
+                    "{}: expected complete context after source edit",
+                    fixture.name
+                )
+            })?;
+            assert!(
+                generation.baseline.contains("Revised instructions"),
+                "{}: fresh baseline must reflect the edit",
+                fixture.name
+            );
+            let seq = sessions
+                .latest_message_seq(session_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            epochs
+                .replace_baseline(session_id, &generation, seq)
+                .await
+                .map_err(|e| e.to_string())?;
+            let after = epochs
+                .get(session_id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("{}: expected epoch", fixture.name))?;
+            assert!(
+                after.baseline.contains("Revised instructions"),
+                "{}: stored baseline must be replaced",
+                fixture.name
+            );
+        }
+        "tool.large_output_paged" => {
+            // Large outputs spill to managed files with a bounded projection;
+            // `tool_result_page` must reassemble the exact original bytes.
+            use deepseekcode_core::tools::registry::Tool;
+            use deepseekcode_storage::{ManagedToolOutput, ToolOutputLimits};
+            let store = ManagedToolOutput::project(dir.path());
+            let big = "x".repeat(100_000);
+            let bounded = store
+                .store(
+                    session_id,
+                    "call-1",
+                    "read",
+                    &serde_json::json!({ "content": big }),
+                    &ToolOutputLimits {
+                        max_lines: 10,
+                        max_bytes: 100,
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            if bounded.get("truncated").and_then(|v| v.as_bool()) != Some(true) {
+                return Err(format!("{}: expected bounded projection", fixture.name));
+            }
+            let file = bounded
+                .get("full_output_file")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("{}: missing full_output_file", fixture.name))?;
+            let tool = deepseekcode_core::tools::tool_result_page::ToolResultPageTool;
+            let ctx = deepseekcode_schema::tool::ToolContext {
+                session_id,
+                agent: "build".into(),
+                assistant_message_id: MessageId::new(),
+                tool_call_id: deepseekcode_types::ToolCallId::new(),
+                working_directory: dir.path().to_string_lossy().to_string(),
+                extras: Default::default(),
+            };
+            let mut offset = 0usize;
+            let mut rebuilt = String::new();
+            for _ in 0..32 {
+                let out = tool
+                    .execute(
+                        serde_json::json!({ "path": file, "offset": offset, "limit": 8192 }),
+                        &ctx,
+                    )
+                    .await
+                    .map_err(|e| format!("{}: page failed: {}", fixture.name, e.message))?;
+                rebuilt.push_str(out.get("page").and_then(|v| v.as_str()).unwrap_or(""));
+                offset = out.get("next_offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                if out.get("complete").and_then(|v| v.as_bool()) == Some(true) {
+                    break;
+                }
+            }
+            // The managed file holds the full envelope JSON (not the bare
+            // content string), so pages must reassemble to the FILE bytes.
+            let file_bytes = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
+            if rebuilt != file_bytes {
+                return Err(format!(
+                    "{}: paged reassembly mismatch ({} vs {} bytes)",
+                    fixture.name,
+                    rebuilt.len(),
+                    file_bytes.len()
+                ));
+            }
+            // And the envelope still parses back to the original content.
+            let parsed: serde_json::Value =
+                serde_json::from_str(&file_bytes).map_err(|e| e.to_string())?;
+            if parsed.get("content").and_then(|v| v.as_str()) != Some(big.as_str()) {
+                return Err(format!("{}: envelope content mismatch", fixture.name));
+            }
+        }
         "permission.ask" => {
             use deepseekcode_config::PolicyScopeConfig;
             use deepseekcode_schema::agent::AgentKind;
@@ -833,7 +958,7 @@ async fn run_all_fixtures() {
         if path.extension().and_then(|e| e.to_str()) == Some("json") {
             run_fixture(&path)
                 .await
-                .unwrap_or_else(|_| panic!("fixture {:?}", path));
+                .unwrap_or_else(|e| panic!("fixture {path:?}: {e}"));
             count += 1;
         }
     }

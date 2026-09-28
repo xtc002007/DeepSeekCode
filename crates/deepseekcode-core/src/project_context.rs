@@ -65,11 +65,11 @@ fn canonical_root(project_dir: &str) -> PathBuf {
 fn expand_user_path(raw: &str) -> String {
     let mut s = raw.trim().to_string();
     if s.starts_with("~/") || s == "~" {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = deepseekcode_types::home_dir() {
             s = format!("{}{}", home.display(), &s[1..]);
         }
     } else if s.starts_with("$HOME/") || s.starts_with("$HOME\\") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = deepseekcode_types::home_dir() {
             s = format!("{}{}", home.display(), &s[5..]);
         }
     } else if s.starts_with("%") {
@@ -97,7 +97,7 @@ fn expand_embedded_env(s: &str) -> String {
     let mut out = s.to_string();
     // $HOME embedded
     if out.contains("$HOME") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = deepseekcode_types::home_dir() {
             out = out.replace("$HOME", &home.display().to_string());
         }
     }

@@ -459,7 +459,7 @@ fn render_session_row(
     let running = session.running;
     let project_path = project_path.to_string();
 
-    let mut row = div()
+    let row = div()
         .pl_6()
         .pr_2()
         .py_1()

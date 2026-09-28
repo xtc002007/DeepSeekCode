@@ -639,6 +639,10 @@ async fn summarize(
         max_output_tokens: Some(max_output_tokens),
     };
 
+    // Transient transport errors propagate to the turn-level retry by design:
+    // recording them in `failure_slot` would wrongly park future turns behind
+    // `blocked-same-view` on mere blips. Only deterministic outcomes (empty
+    // summaries) arm the dedup; the P0-5 transport caps bound the burn.
     let mut stream = {
         let llm = ctx.llm.lock().await;
         llm.stream(&request, api_key).await?

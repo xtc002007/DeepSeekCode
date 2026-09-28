@@ -22,8 +22,11 @@ $privateKeyInline = [Environment]::GetEnvironmentVariable("DEEPSEEKCODE_SIGNING_
 $secretKeyPath = $keys.PrivateKey
 
 if ($privateKeyInline) {
-    $tempKey = Join-Path $env:TEMP "deepseekcode-signing.key"
+    # Unpredictable name (no pre-creation/symlink races) + owner-only ACL so
+    # other local users cannot read the key between write and delete.
+    $tempKey = Join-Path $env:TEMP ("deepseekcode-signing-{0}.key" -f ([guid]::NewGuid().ToString("N")))
     Set-Content -Path $tempKey -Value $privateKeyInline -Encoding utf8 -NoNewline
+    icacls $tempKey /inheritance:r /grant:r ("$env:USERNAME:(R,W)") | Out-Null
     $secretKeyPath = $tempKey
 } elseif (-not (Test-Path $secretKeyPath)) {
     if ($Required) {

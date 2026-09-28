@@ -41,7 +41,7 @@ pub fn resolve_logs_root(config: &LoggingConfig) -> std::path::PathBuf {
     if let Some(dir) = &config.dir {
         return std::path::PathBuf::from(dir);
     }
-    dirs::data_dir()
+    deepseekcode_types::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("deepseekcode")
         .join("logs")

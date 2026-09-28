@@ -137,7 +137,9 @@ impl FileSnapshotStore {
                  AND (m.seq > ? OR (fs.message_id IS NULL AND fs.created_at > (
                      SELECT created_at FROM messages WHERE session_id = ? AND seq = ? LIMIT 1
                  )))
-               ORDER BY fs.created_at ASC"#,
+                -- Insertion order (rowid), not wall-clock strings: clock
+                -- skew or same-second captures otherwise misorder reverts.
+                ORDER BY fs.rowid ASC"#,
         )
         .bind(session_id.to_string())
         .bind(boundary_seq)
@@ -152,8 +154,13 @@ impl FileSnapshotStore {
 
     /// Restore `target` from a stored snapshot. Deletes the file when the snapshot is a deletion marker.
     pub fn restore_snapshot(snapshot_path: &Path, target: &Path) -> Result<()> {
-        let marker = std::fs::read_to_string(snapshot_path).unwrap_or_default();
-        if marker.trim() == DELETED_MARKER {
+        // Exact-byte match: a text snapshot merely CONTAINING ".deleted"
+        // (even with different whitespace) must restore, not delete. Binary
+        // snapshots fall through to the byte-copy path with errors surfaced.
+        let is_deletion = std::fs::read(snapshot_path)
+            .map(|bytes| bytes == DELETED_MARKER.as_bytes())
+            .unwrap_or(false);
+        if is_deletion {
             if target.exists() {
                 if target.is_dir() {
                     std::fs::remove_dir_all(target).map_err(DeepSeekCodeError::Io)?;

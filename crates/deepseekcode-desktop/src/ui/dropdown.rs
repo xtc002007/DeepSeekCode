@@ -2,7 +2,6 @@
 
 use crate::theme::ThemeTokens;
 use crate::ui::icon::{render_icon, IconName};
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

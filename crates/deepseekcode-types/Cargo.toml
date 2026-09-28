@@ -13,3 +13,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 ulid = { workspace = true }
 chrono = { workspace = true }
+directories = { workspace = true }
+# Schema rendering for the ID newtypes only (no other schema surface lives
+# here). Already in the workspace graph via `schema`, so no new crates.
+schemars = { workspace = true }
+utoipa = { workspace = true }

@@ -526,8 +526,10 @@ pub(crate) fn agent_allowed_tools(
                 "list".into(),
                 "bash".into(),
                 "apply_patch".into(),
+                // Canonical `todowrite` only: the `todo_write` alias stays
+                // registered for executing old transcripts, but exposing both
+                // names would double-occupy the provider prefix.
                 "todowrite".into(),
-                "todo_write".into(),
                 "todoread".into(),
                 "skill".into(),
                 "webfetch".into(),

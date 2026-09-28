@@ -138,7 +138,7 @@ fn plan_defaults() -> PolicyRuleset {
 
 fn expand_ssh_gnupg(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = deepseekcode_types::home_dir() {
             return format!("{}/{}", home.display(), rest);
         }
     }

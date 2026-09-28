@@ -5,6 +5,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# Slim builds without the wasmtime stack (native plugins only):
+# `cargo build -p deepseekcode-cli --no-default-features` drops ~100MB of
+# compile. Core itself never names wasmtime types, so no `cfg` code is needed
+# here �?the flag forwards to `deepseekcode-plugin/wasm`.
+[features]
+default = ["wasm-plugins"]
+wasm-plugins = ["deepseekcode-plugin/wasm"]
+
 [dependencies]
 deepseekcode-types = { workspace = true }
 deepseekcode-schema = { workspace = true }
@@ -12,7 +20,9 @@ deepseekcode-config = { workspace = true }
 deepseekcode-telemetry = { workspace = true }
 deepseekcode-storage = { workspace = true }
 deepseekcode-llm = { workspace = true }
-deepseekcode-plugin = { workspace = true }
+# Full path spec (not workspace-inherited): per-edge default-features is
+# ignored on inherited edges. See workspace Cargo.toml note.
+deepseekcode-plugin = { path = "../deepseekcode-plugin", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -28,11 +38,9 @@ ignore = { workspace = true }
 walkdir = { workspace = true }
 similar = { workspace = true }
 ulid = { workspace = true }
-keyring = { workspace = true }
 sqlx = { workspace = true }
 reqwest = { workspace = true }
 sha2 = { workspace = true }
-dirs = "6.0"
 
 [dev-dependencies]
 tempfile = { workspace = true }

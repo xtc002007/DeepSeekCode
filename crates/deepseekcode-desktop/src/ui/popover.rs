@@ -146,7 +146,7 @@ pub fn render_project_remove_row(
                 .cursor_pointer()
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this, _, window, cx| {
+                    cx.listener(move |_this, _, window, cx| {
                         cx.stop_propagation();
                         let path = path.clone();
                         cx.defer_in(window, move |this, _, cx| {

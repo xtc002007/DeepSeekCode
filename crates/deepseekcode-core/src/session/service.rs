@@ -228,13 +228,10 @@ impl SessionService {
                     .fetch_optional(&mut *tx)
                     .await
                     .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
-            // If the existing row was admitted with a different `resume`
-            // intent, the delivery alone cannot disambiguate: require the
-            // caller to use a fresh id for a different resume mode. We
-            // record resume intent in the event payload; a mismatch here is
-            // surfaced so `resume:true` never silently becomes admit-only.
-            let resume_mismatch = false; // stored rows predate resume column; see below
-            let _ = resume_mismatch;
+            // Idempotency covers prompt+delivery; `resume` is admission-time
+            // intent recorded on the receipt event below. A retry with
+            // `resume:true` wakes the session (handled at the match arm), so
+            // it can never silently degrade to admit-only.
             tx.commit()
                 .await
                 .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
@@ -268,6 +265,7 @@ impl SessionService {
                     "message_id": message_id.to_string(),
                     "prompt": req.prompt,
                     "delivery": format!("{:?}", req.delivery).to_lowercase(),
+                    "resume": req.resume,
                 }),
             )
             .await?;

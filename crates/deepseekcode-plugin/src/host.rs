@@ -1,3 +1,5 @@
+#[cfg(not(feature = "wasm"))]
+use crate::wasm_stub::StubModule as Module;
 use async_trait::async_trait;
 use deepseekcode_types::Result;
 use libloading::{Library, Symbol};
@@ -5,21 +7,28 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(feature = "wasm")]
 use wasmtime::Module;
 
+#[cfg(not(feature = "wasm"))]
+use crate::hooks::SessionHook;
+use crate::hooks::{ChatSystemTransformInput, ChatSystemTransformOutput, HookRegistry};
+#[cfg(feature = "wasm")]
 use crate::hooks::{
-    ChatSystemTransformInput, ChatSystemTransformOutput, HookRegistry, SessionCompactingInput,
-    SessionCompactingOutput, SessionHook, ToolExecuteAfterInput, ToolExecuteAfterOutput,
-    ToolExecuteBeforeInput, ToolExecuteBeforeOutput,
+    SessionCompactingInput, SessionCompactingOutput, SessionHook, ToolExecuteAfterInput,
+    ToolExecuteAfterOutput, ToolExecuteBeforeInput, ToolExecuteBeforeOutput,
 };
+#[cfg(feature = "wasm")]
 use crate::wasm::WasmPluginRuntime;
 
+#[cfg(feature = "wasm")]
 struct WasmSessionHook {
     plugin_id: String,
     module: Module,
     exports: WasmHookExports,
 }
 
+#[cfg(feature = "wasm")]
 #[derive(Debug, Clone, Copy, Default)]
 struct WasmHookExports {
     chat_system_transform: bool,
@@ -28,6 +37,7 @@ struct WasmHookExports {
     session_compacting: bool,
 }
 
+#[cfg(feature = "wasm")]
 impl WasmHookExports {
     fn from_module(module: &Module) -> Self {
         let names: std::collections::HashSet<&str> = module.exports().map(|e| e.name()).collect();
@@ -47,6 +57,7 @@ impl WasmHookExports {
     }
 }
 
+#[cfg(feature = "wasm")]
 #[async_trait]
 impl SessionHook for WasmSessionHook {
     fn id(&self) -> &str {
@@ -236,24 +247,64 @@ impl PluginHost {
     }
 
     pub fn load_wasm_dir(&mut self, dir: &Path) -> Result<()> {
+        self.load_wasm_dir_with_trust(dir, &crate::verify::PluginTrust::default())
+    }
+
+    /// Load with explicit trust policy (see [`crate::verify::PluginTrust`]).
+    /// Every `.wasm` file passes signature/pin verification before it is
+    /// even validated as a module.
+    pub fn load_wasm_dir_with_trust(
+        &mut self,
+        dir: &Path,
+        trust: &crate::verify::PluginTrust,
+    ) -> Result<()> {
         if !dir.exists() {
             return Ok(());
         }
-        let engine = WasmPluginRuntime::create_engine();
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            if entry.path().extension().and_then(|e| e.to_str()) == Some("wasm") {
-                let path = entry.path();
-                WasmPluginRuntime::validate(&path)?;
-                let module = Module::from_file(&engine, &path)
-                    .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
-                self.wasm_modules.insert(
-                    path.file_name().unwrap().to_string_lossy().to_string(),
-                    module,
-                );
+        #[cfg(not(feature = "wasm"))]
+        {
+            let _ = trust;
+            // Fail closed: silently skipping user-provided .wasm files would
+            // hide a misconfigured slim build.
+            let has_wasm = std::fs::read_dir(dir)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("wasm"))
+                })
+                .unwrap_or(false);
+            if has_wasm {
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(format!(
+                    "wasm plugins are disabled in this build (found .wasm in {})",
+                    dir.display()
+                )));
             }
+            return Ok(());
         }
-        Ok(())
+        #[cfg(feature = "wasm")]
+        {
+            // Pins live next to the plugin dir's project metadata.
+            let pins_dir = dir
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| dir.to_path_buf());
+            let engine = WasmPluginRuntime::create_engine();
+            for entry in std::fs::read_dir(dir)? {
+                let entry = entry?;
+                if entry.path().extension().and_then(|e| e.to_str()) == Some("wasm") {
+                    let path = entry.path();
+                    crate::verify::verify_wasm_file(&path, &pins_dir, trust)?;
+                    WasmPluginRuntime::validate(&path)?;
+                    let module = Module::from_file(&engine, &path)
+                        .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+                    self.wasm_modules.insert(
+                        path.file_name().unwrap().to_string_lossy().to_string(),
+                        module,
+                    );
+                }
+            }
+            Ok(())
+        }
     }
 
     fn is_native_plugin(path: &Path) -> bool {
@@ -356,21 +407,49 @@ impl PluginHost {
     }
 
     pub fn load_from_config(&mut self, plugins: &[String], project_dir: &str) -> Result<()> {
+        self.load_from_config_with_trust(
+            plugins,
+            project_dir,
+            &crate::verify::PluginTrust::default(),
+        )
+    }
+
+    /// Load with explicit trust policy (see [`crate::verify::PluginTrust`]).
+    pub fn load_from_config_with_trust(
+        &mut self,
+        plugins: &[String],
+        project_dir: &str,
+        trust: &crate::verify::PluginTrust,
+    ) -> Result<()> {
         let local_dir = Path::new(project_dir).join(".deepseekcode").join("plugins");
-        self.load_wasm_dir(&local_dir)?;
+        self.load_wasm_dir_with_trust(&local_dir, trust)?;
         self.load_native_dir(&local_dir)?;
 
         for entry in plugins {
             let path = Path::new(entry);
             if path.extension().and_then(|e| e.to_str()) == Some("wasm") {
-                WasmPluginRuntime::validate(path)?;
-                let engine = WasmPluginRuntime::create_engine();
-                let module = Module::from_file(&engine, path)
-                    .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
-                self.wasm_modules.insert(
-                    path.file_name().unwrap().to_string_lossy().to_string(),
-                    module,
-                );
+                #[cfg(not(feature = "wasm"))]
+                {
+                    return Err(deepseekcode_types::DeepSeekCodeError::Other(format!(
+                        "wasm plugins are disabled in this build ({entry} not loaded)"
+                    )));
+                }
+                #[cfg(feature = "wasm")]
+                {
+                    crate::verify::verify_wasm_file(
+                        path,
+                        &crate::verify::pins_dir_for(project_dir, path),
+                        trust,
+                    )?;
+                    WasmPluginRuntime::validate(path)?;
+                    let engine = WasmPluginRuntime::create_engine();
+                    let module = Module::from_file(&engine, path)
+                        .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+                    self.wasm_modules.insert(
+                        path.file_name().unwrap().to_string_lossy().to_string(),
+                        module,
+                    );
+                }
             } else if Self::is_native_plugin(path) {
                 self.load_native_plugin(path)?;
             } else if entry == "hello-hook" || entry.ends_with("hello-hook") {
@@ -395,6 +474,7 @@ impl PluginHost {
         for hook in &self.native_hooks {
             registry.register(hook.clone());
         }
+        #[cfg(feature = "wasm")]
         for (name, module) in &self.wasm_modules {
             let exports = WasmHookExports::from_module(module);
             if !exports.has_any() {
@@ -409,11 +489,14 @@ impl PluginHost {
     }
 
     pub fn list(&self) -> Vec<String> {
-        self.plugins
+        let base = self
+            .plugins
             .iter()
             .map(|p| p.id().to_string())
-            .chain(self.native_hooks.iter().map(|h| h.id().to_string()))
-            .chain(self.wasm_modules.iter().filter_map(|(name, module)| {
+            .chain(self.native_hooks.iter().map(|h| h.id().to_string()));
+        #[cfg(feature = "wasm")]
+        {
+            base.chain(self.wasm_modules.iter().filter_map(|(name, module)| {
                 if WasmHookExports::from_module(module).has_any() {
                     Some(name.clone())
                 } else {
@@ -421,6 +504,13 @@ impl PluginHost {
                 }
             }))
             .collect()
+        }
+        #[cfg(not(feature = "wasm"))]
+        {
+            // `wasm_modules` is always empty without wasmtime; keep the shape.
+            let _ = &self.wasm_modules;
+            base.collect()
+        }
     }
 
     pub fn invoke_wasm(&self, name: &str) -> Result<bool> {
@@ -430,10 +520,21 @@ impl PluginHost {
     }
 
     pub fn invoke_wasm_export(&self, name: &str, export: &str) -> Result<()> {
-        let module = self.wasm_modules.get(name).ok_or_else(|| {
-            deepseekcode_types::DeepSeekCodeError::NotFound(format!("wasm plugin {name}"))
-        })?;
-        WasmPluginRuntime::invoke(module, name, export)
+        #[cfg(not(feature = "wasm"))]
+        {
+            let _ = (name, export);
+            let _ = &self.wasm_modules;
+            return Err(deepseekcode_types::DeepSeekCodeError::Other(
+                "wasm plugins are disabled in this build".into(),
+            ));
+        }
+        #[cfg(feature = "wasm")]
+        {
+            let module = self.wasm_modules.get(name).ok_or_else(|| {
+                deepseekcode_types::DeepSeekCodeError::NotFound(format!("wasm plugin {name}"))
+            })?;
+            WasmPluginRuntime::invoke(module, name, export)
+        }
     }
 }
 

@@ -9,6 +9,7 @@ members = [
     "crates/deepseekcode-llm",
     "crates/deepseekcode-core",
     "crates/deepseekcode-plugin",
+    "crates/deepseekcode-embed",
     "crates/deepseekcode-server",
     "crates/deepseekcode-sdk",
     "crates/deepseekcode-cli",
@@ -28,6 +29,7 @@ default-members = [
     "crates/deepseekcode-llm",
     "crates/deepseekcode-core",
     "crates/deepseekcode-plugin",
+    "crates/deepseekcode-embed",
     "crates/deepseekcode-server",
     "crates/deepseekcode-sdk",
     "crates/deepseekcode-cli",
@@ -49,8 +51,14 @@ deepseekcode-config = { path = "crates/deepseekcode-config" }
 deepseekcode-telemetry = { path = "crates/deepseekcode-telemetry" }
 deepseekcode-storage = { path = "crates/deepseekcode-storage" }
 deepseekcode-llm = { path = "crates/deepseekcode-llm" }
+# NOTE: per-edge `default-features = false` does NOT work combined with
+# `{ workspace = true }` inheritance (cargo ignores it with a warning, and
+# enabling any `wasm-plugins` feature then leaks wasmtime into slim builds).
+# Slim edges therefore spell out full `path` dependencies instead of
+# inheriting these five entries; do not "simplify" them back.
 deepseekcode-core = { path = "crates/deepseekcode-core" }
 deepseekcode-plugin = { path = "crates/deepseekcode-plugin" }
+deepseekcode-embed = { path = "crates/deepseekcode-embed" }
 deepseekcode-server = { path = "crates/deepseekcode-server" }
 deepseekcode-sdk = { path = "crates/deepseekcode-sdk" }
 deepseekcode-desktop = { path = "crates/deepseekcode-desktop" }
@@ -77,6 +85,9 @@ jsonc-parser = { version = "0.27", features = ["serde"] }
 
 # HTTP
 axum = { version = "0.8", features = ["ws", "macros"] }
+# Single WebSocket stack: axum 0.8 uses tokio-tungstenite 0.26; the desktop
+# PTY client must use the same (a direct 0.29 dep compiled a second stack).
+tokio-tungstenite = { version = "0.26" }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 # P1-9: `blocking` removed (deadlocks when misused inside async; no caller
@@ -100,6 +111,9 @@ tower-service = { version = "0.3" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = { version = "1.0" }
 rustls-native-certs = { version = "0.8" }
+
+# OS standard directories (maintained; replaces unmaintained `dirs`).
+directories = "6.0"
 
 # IDs & time
 ulid = { version = "1.2", features = ["serde"] }

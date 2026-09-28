@@ -1,7 +1,6 @@
 use crate::theme::ThemeTokens;
 use crate::ui::copy_button::render_copy_button;
 use crate::ui::icon::{render_icon_rgba, IconName};
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 pub fn render_user_message_card(

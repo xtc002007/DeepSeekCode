@@ -17,6 +17,8 @@
 | Active sessions | `active_sessions_empty.json` | sessions.active |
 | Permission ask | `permission_ask.json` | permission.requested / pending |
 | Compaction epoch | `compaction_epoch.json` | Context Epoch init |
+| Compaction replaces baseline | `compaction_replaces_baseline.json` | Rule 5: rebuild from complete context |
+| Large output paged | `large_output_paged.json` | bounded projection + tool_result_page reassembly |
 | Revert stage | `revert_stage.json` | sessions.revert.stage |
 | Overflow retry | `overflow_retry.json` | context overflow detection |
 | MCP tool bridge | `mcp_tool.json` | MCP bridged tool naming |

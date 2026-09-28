@@ -1,20 +1,28 @@
 use crate::todo::TodoItem;
-use async_trait::async_trait;
 use deepseekcode_types::{MessageId, SessionId, ToolCallId};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use utoipa::ToSchema;
 
 /// Todo persistence injected into `ToolContext` by `ToolRegistry`.
-#[async_trait]
+///
+/// Hand-desugared (`Pin<Box<dyn Future>>`) instead of `#[async_trait]` so
+/// this pure-types crate carries no proc-macro runtime dependency for a
+/// two-method trait. Lifetimes are explicit: the future may borrow `self`
+/// and `todos`.
 pub trait TodoStoreOps: Send + Sync {
-    async fn update_todos(
+    fn update_todos<'a>(
+        &'a self,
+        session_id: SessionId,
+        todos: &'a [TodoItem],
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<Vec<TodoItem>, String>> + Send + 'a>>;
+
+    fn get_todos(
         &self,
         session_id: SessionId,
-        todos: &[TodoItem],
-    ) -> std::result::Result<Vec<TodoItem>, String>;
-
-    async fn get_todos(&self, session_id: SessionId) -> std::result::Result<Vec<TodoItem>, String>;
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<Vec<TodoItem>, String>> + Send + '_>>;
 }
 
 #[derive(Clone, Default)]
@@ -35,6 +43,17 @@ pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+}
+
+/// Sort tool definitions by name for byte-stable provider payloads.
+///
+/// Previously a clone-sort buried in the LLM layer (`axis/protocol.rs`); the
+/// rule belongs to the schema contract because every transport (OpenAI,
+/// pinned, future) must serialize identically for the DeepSeek prefix cache:
+/// registry `HashMap` iteration is random and would otherwise break the
+/// prefix on every turn.
+pub fn sort_tool_definitions(defs: &mut [ToolDefinition]) {
+    defs.sort_by(|a, b| a.name.cmp(&b.name));
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -40,6 +40,37 @@ impl LocalMcpClient {
             .stdout
             .take()
             .ok_or_else(|| DeepSeekCodeError::Other("mcp stdout unavailable".into()))?;
+        // Drain stderr in the background: a piped-but-unread stderr blocks
+        // the child once the OS pipe buffer fills, hanging all requests.
+        // Bounded log capture (last 8KiB) keeps server errors diagnosable.
+        if let Some(stderr) = child.stderr.take() {
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut tail = Vec::new();
+                let mut buf = [0u8; 4096];
+                let mut reader = stderr;
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            tail.extend_from_slice(&buf[..n]);
+                            if tail.len() > 8192 {
+                                let excess = tail.len() - 8192;
+                                tail.drain(..excess);
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if !tail.is_empty() {
+                    tracing::debug!(
+                        target: deepseekcode_telemetry::APP,
+                        stderr = %String::from_utf8_lossy(&tail),
+                        "mcp server stderr closed"
+                    );
+                }
+            });
+        }
 
         Ok(Self {
             child,

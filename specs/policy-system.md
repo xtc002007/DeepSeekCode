@@ -77,7 +77,18 @@ For each extracted pattern, the last matching rule applies. Any `block` → deni
 | DELETE | `/api/v1/policy/grants/{id}` |
 | PUT | `/api/v1/policy/config` |
 
-Legacy `/api/v1/permission/*` routes remain as thin wrappers.
+Legacy `/api/v1/permission/*` routes remain as thin wrappers carrying a
+`Sunset` response header, and are **removed in v0.3.0** together with the
+legacy `permissions` table (see `PermissionStore` deprecation). Migration:
+
+| Legacy | Replacement | In-repo callers migrated |
+|--------|-------------|--------------------------|
+| `GET /api/v1/permission/pending` | `GET /api/v1/policy/pending` | desktop, CLI |
+| `POST /api/v1/permission/{id}/respond` | `POST /api/v1/policy/{id}/reply` | desktop, CLI |
+| `GET /api/v1/permission/grants` | `GET /api/v1/policy/grants` | CLI (`policy grants`) |
+| `DELETE /api/v1/permission/grants/{id}` | `DELETE /api/v1/policy/grants/{id}` | CLI (`policy grant-delete`) |
+| `PUT /api/v1/permission/config` | `PUT /api/v1/policy/config` | settings UI |
+| `permissions` SQLite table | `policy_grants` table | server wrappers only |
 
 ## Desktop UI
 

@@ -23,7 +23,9 @@ impl super::registry::Tool for ToolResultPageTool {
     }
 
     fn description(&self) -> &str {
-        "Read one page of a truncated tool output file (full_output_file). Args: path (required), offset (bytes, default 0), limit (bytes, default 16384, max 24576). Returns {path,offset,next_offset,total_bytes,sha256,complete,page}."
+        // NOTE: byte bounds must match PAGE_DEFAULT_BYTES / PAGE_MAX_BYTES;
+        // enforced by `schema_bounds_match_constants` below.
+        "Read one page of a truncated tool output file (full_output_file). Args: path (required), offset (bytes, default 0), limit (bytes, default 16384, max 24576). Returns {path,offset,next_offset,total_bytes,sha256,complete,out_of_range,page}."
     }
 
     fn input_schema(&self) -> Value {
@@ -32,7 +34,7 @@ impl super::registry::Tool for ToolResultPageTool {
             "properties": {
                 "path": {"type": "string"},
                 "offset": {"type": "integer", "minimum": 0},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 24576}
+                "limit": {"type": "integer", "minimum": 1, "maximum": PAGE_MAX_BYTES}
             },
             "required": ["path"]
         })
@@ -84,6 +86,8 @@ impl super::registry::Tool for ToolResultPageTool {
         })?;
         let total = bytes.len();
         if offset >= total {
+            // `out_of_range` distinguishes "past the end" from "empty file"
+            // (both yield an empty page with `complete: true`).
             return Ok(json!({
                 "path": path,
                 "offset": offset,
@@ -91,6 +95,7 @@ impl super::registry::Tool for ToolResultPageTool {
                 "total_bytes": total,
                 "sha256": format!("{:x}", Sha256::digest(&bytes)),
                 "complete": true,
+                "out_of_range": offset > total,
                 "page": "",
             }));
         }
@@ -154,5 +159,20 @@ mod tests {
         assert_eq!(out["total_bytes"], 100_000);
         assert_eq!(out["complete"], false);
         assert!((out["next_offset"].as_u64().unwrap() as usize) <= 16384);
+    }
+
+    #[test]
+    fn schema_bounds_match_constants() {
+        // The human-readable description and JSON schema must track
+        // PAGE_DEFAULT_BYTES / PAGE_MAX_BYTES (previously hardcoded 24576 in
+        // three places and already drifted once).
+        let tool = ToolResultPageTool;
+        let schema = tool.input_schema();
+        assert_eq!(
+            schema["properties"]["limit"]["maximum"].as_u64().unwrap(),
+            PAGE_MAX_BYTES as u64
+        );
+        assert!(tool.description().contains(&PAGE_MAX_BYTES.to_string()));
+        assert!(tool.description().contains(&PAGE_DEFAULT_BYTES.to_string()));
     }
 }

@@ -59,6 +59,14 @@ pub struct DeepSeekCodeConfig {
     pub shell: Option<String>,
     #[serde(default)]
     pub plugins: Vec<String>,
+    /// Refuse to load `.wasm` plugins without a valid `.wasm.minisig`
+    /// sidecar (default false = warn + hash-pin instead; see below).
+    #[serde(default)]
+    pub plugins_require_signatures: bool,
+    /// Minisign public keys (full `untrusted comment:` + base64 text) trusted
+    /// for `.wasm` sidecar verification. Empty = no signature authority.
+    #[serde(default)]
+    pub plugins_trusted_keys: Vec<String>,
     #[serde(default)]
     pub autoupdate: Option<AutoupdateConfig>,
     #[serde(default)]
@@ -195,6 +203,10 @@ pub struct PermissionsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
+    /// Plaintext file key (lowest precedence). Effective priority is:
+    /// connected store (encrypted SQLite + OS keychain) > this file value >
+    /// `<PROVIDER>_API_KEY` env vars. Prefer `provider connect` over
+    /// committing keys to `deepseekcode.jsonc`.
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub models: Option<Vec<String>>,

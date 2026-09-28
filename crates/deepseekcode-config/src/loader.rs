@@ -2,16 +2,36 @@ use crate::policy::{ruleset_permission, PolicyConfig, PolicyScopeConfig};
 use crate::schema::{DeepSeekCodeConfig, PolicyMode};
 use camino::{Utf8Path, Utf8PathBuf};
 use deepseekcode_schema::policy::PolicyRule;
-use deepseekcode_types::{DeepSeekCodeError, Result};
+use deepseekcode_types::{DeepSeekCodeError, Result, CONFIG_FILE, LEGACY_CONFIG_FILE, LOCAL_DIR};
 use std::collections::HashMap;
 use std::fs;
 
-const CONFIG_NAMES: &[&str] = &[
-    "deepseekcode.jsonc",
-    "deepseekcode.json",
-    "codevibe.jsonc",
-    "codevibe.json",
-];
+// Single source of truth: file/dir names derive from branding constants so a
+// rename cannot silently drop config discovery (previously hardcoded in four
+// places below).
+fn config_names() -> Vec<String> {
+    let mut names = vec![CONFIG_FILE.to_string()];
+    if let Some(json) = CONFIG_FILE.strip_suffix("jsonc") {
+        names.push(format!("{json}json"));
+    }
+    names.push(LEGACY_CONFIG_FILE.to_string());
+    if let Some(json) = LEGACY_CONFIG_FILE.strip_suffix("jsonc") {
+        names.push(format!("{json}json"));
+    }
+    names
+}
+
+fn config_stems() -> Vec<String> {
+    fn stem(name: &str) -> String {
+        name.split('.').next().unwrap_or(name).to_string()
+    }
+    vec![stem(CONFIG_FILE), stem(LEGACY_CONFIG_FILE)]
+}
+
+fn config_subdirs() -> Vec<String> {
+    // No branding const exists for the legacy subdir; kept literally.
+    vec![LOCAL_DIR.to_string(), ".codevibe".to_string()]
+}
 
 #[derive(Debug, Clone)]
 pub struct ConfigPaths {
@@ -23,11 +43,13 @@ pub struct ConfigPaths {
 pub fn discover_config_files(project_dir: &Utf8Path) -> Vec<Utf8PathBuf> {
     let mut files = Vec::new();
 
-    if let Some(global) = dirs::config_dir().and_then(|p| Utf8PathBuf::try_from(p).ok()) {
-        for global_name in ["deepseekcode", "codevibe"] {
-            let global_root = global.join(global_name);
-            for name in CONFIG_NAMES {
-                let path = global_root.join(name);
+    if let Some(global) =
+        deepseekcode_types::config_dir().and_then(|p| Utf8PathBuf::try_from(p).ok())
+    {
+        for global_name in config_stems() {
+            let global_root = global.join(&global_name);
+            for name in config_names() {
+                let path = global_root.join(&name);
                 if path.exists() {
                     files.push(path);
                 }
@@ -42,15 +64,15 @@ pub fn discover_config_files(project_dir: &Utf8Path) -> Vec<Utf8PathBuf> {
 
     let mut current = Some(project_dir.to_path_buf());
     while let Some(dir) = current {
-        for name in CONFIG_NAMES {
-            let path = dir.join(name);
+        for name in config_names() {
+            let path = dir.join(&name);
             if path.exists() {
                 files.push(path);
             }
         }
-        for subdir in [".deepseekcode", ".codevibe"] {
-            for name in CONFIG_NAMES {
-                let path = dir.join(subdir).join(name);
+        for subdir in config_subdirs() {
+            for name in config_names() {
+                let path = dir.join(&subdir).join(&name);
                 if path.exists() {
                     files.push(path);
                 }
@@ -242,7 +264,7 @@ fn merge_config(base: &mut DeepSeekCodeConfig, overlay: serde_json::Value) -> Re
 }
 
 pub fn config_paths(project_dir: &Utf8Path) -> ConfigPaths {
-    let global_dir = dirs::config_dir()
+    let global_dir = deepseekcode_types::config_dir()
         .and_then(|p| Utf8PathBuf::try_from(p).ok())
         .map(|p| p.join("deepseekcode"))
         .unwrap_or_else(|| Utf8PathBuf::from(".deepseekcode"));

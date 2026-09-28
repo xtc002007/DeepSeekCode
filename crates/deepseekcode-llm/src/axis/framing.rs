@@ -145,7 +145,23 @@ pub(crate) fn sse_data_payload(line: &str) -> Option<&str> {
 }
 
 pub(crate) fn parse_message_response(value: &Value) -> Result<crate::request::LlmResponse> {
+    // Malformed provider payloads previously defaulted silently (`""`, `{}`,
+    // `[]`), masking gateway bugs as empty turns. Warn with shape diagnostics;
+    // behavior (defaults) is unchanged for back-compat.
+    if value.get("choices").and_then(|c| c.as_array()).is_none() {
+        tracing::warn!(
+            target: deepseekcode_telemetry::LLM,
+            body_keys = ?value.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()),
+            "llm response has no choices array; defaulting to empty content"
+        );
+    }
     let choice = &value["choices"][0]["message"];
+    if choice.is_null() {
+        tracing::warn!(
+            target: deepseekcode_telemetry::LLM,
+            "llm response choices[0].message is missing; defaulting to empty content"
+        );
+    }
     let content = choice["content"].as_str().unwrap_or("").to_string();
     // Issue-1: preserve non-streaming reasoning so next-turn replay stays
     // byte-identical. DeepSeek returns `reasoning_content` alongside `content`.
@@ -159,13 +175,25 @@ pub(crate) fn parse_message_response(value: &Value) -> Result<crate::request::Ll
         .map(|calls| {
             calls
                 .iter()
-                .map(|c| LlmToolCall {
-                    id: c["id"].as_str().unwrap_or("").to_string(),
-                    name: c["function"]["name"].as_str().unwrap_or("").to_string(),
-                    arguments: serde_json::from_str(
-                        c["function"]["arguments"].as_str().unwrap_or("{}"),
-                    )
-                    .unwrap_or(serde_json::json!({})),
+                .map(|c| {
+                    let raw_args = c["function"]["arguments"].as_str().unwrap_or("{}");
+                    let arguments = match LlmToolCall::parse_arguments_strict(raw_args) {
+                        Ok(args) => args,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: deepseekcode_telemetry::LLM,
+                                tool = %c["function"]["name"].as_str().unwrap_or(""),
+                                error = %e,
+                                "llm tool arguments unparseable; defaulting to empty object"
+                            );
+                            serde_json::json!({})
+                        }
+                    };
+                    LlmToolCall {
+                        id: c["id"].as_str().unwrap_or("").to_string(),
+                        name: c["function"]["name"].as_str().unwrap_or("").to_string(),
+                        arguments,
+                    }
                 })
                 .collect()
         })

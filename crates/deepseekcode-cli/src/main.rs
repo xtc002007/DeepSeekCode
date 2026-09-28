@@ -127,6 +127,21 @@ enum Commands {
         #[command(subcommand)]
         command: McpCommands,
     },
+    /// Project filesystem commands
+    Fs {
+        #[command(subcommand)]
+        command: FsCommands,
+    },
+    /// List discovered skills
+    Skills {
+        #[arg(short, long, default_value = ".")]
+        directory: String,
+    },
+    /// List loaded plugins
+    Plugins {
+        #[arg(short, long, default_value = ".")]
+        directory: String,
+    },
     /// Git worktree commands
     Worktree {
         #[command(subcommand)]
@@ -314,6 +329,64 @@ enum SessionCommands {
         #[arg(short, long)]
         session: String,
     },
+    /// Show session todos.
+    Todo {
+        #[arg(short, long, default_value = ".")]
+        directory: String,
+        #[arg(short, long)]
+        session: String,
+    },
+    /// List completed plans for a session.
+    Plans {
+        #[arg(short, long, default_value = ".")]
+        directory: String,
+        #[arg(short, long)]
+        session: String,
+    },
+    /// Answer a pending session question.
+    Answer {
+        #[arg(short, long, default_value = ".")]
+        directory: String,
+        #[arg(short, long)]
+        session: String,
+        text: String,
+    },
+    /// Commit a staged revert.
+    RevertCommit {
+        #[arg(short, long, default_value = ".")]
+        directory: String,
+        #[arg(short, long)]
+        session: String,
+    },
+    /// Clear a staged revert without applying.
+    RevertClear {
+        #[arg(short, long, default_value = ".")]
+        directory: String,
+        #[arg(short, long)]
+        session: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum FsCommands {
+    /// List a directory within the project.
+    Tree {
+        #[arg(short, long, default_value = ".")]
+        directory: String,
+        #[arg(short, long, default_value = "")]
+        path: String,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Print a file within the project.
+    File {
+        #[arg(short, long, default_value = ".")]
+        directory: String,
+        #[arg(short, long)]
+        path: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -406,8 +479,19 @@ fn directory_hint(cli: &Cli) -> String {
             | SessionCommands::Compact { directory, .. }
             | SessionCommands::Move { directory, .. }
             | SessionCommands::Interrupt { directory, .. }
-            | SessionCommands::Delete { directory, .. } => directory.clone(),
+            | SessionCommands::Delete { directory, .. }
+            | SessionCommands::Todo { directory, .. }
+            | SessionCommands::Plans { directory, .. }
+            | SessionCommands::Answer { directory, .. }
+            | SessionCommands::RevertCommit { directory, .. }
+            | SessionCommands::RevertClear { directory, .. } => directory.clone(),
         },
+        Commands::Fs { command } => match command {
+            FsCommands::Tree { directory, .. } | FsCommands::File { directory, .. } => {
+                directory.clone()
+            }
+        },
+        Commands::Skills { directory } | Commands::Plugins { directory } => directory.clone(),
         _ => ".".to_string(),
     }
 }
@@ -611,7 +695,7 @@ async fn run(cli: Cli, logging: LoggingConfig) -> anyhow::Result<()> {
                 std::env::set_var("DEEPSEEKCODE_POLICY_MODE", "auto");
             }
             let addr: SocketAddr = format!("{host}:{port}").parse()?;
-            let db_path = dirs::data_dir()
+            let db_path = deepseekcode_types::data_dir()
                 .map(|p| p.join("deepseekcode").join("deepseekcode.db"))
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| "deepseekcode.db".into());
@@ -932,6 +1016,56 @@ async fn run(cli: Cli, logging: LoggingConfig) -> anyhow::Result<()> {
                 println!("session {session_id} deleted");
                 shutdown_opt(engine).await;
             }
+            SessionCommands::Todo { directory, session } => {
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
+                let session_id = SessionId::from_str(&session)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&client.session_todo(session_id).await?)?
+                );
+                shutdown_opt(engine).await;
+            }
+            SessionCommands::Plans { directory, session } => {
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
+                let session_id = SessionId::from_str(&session)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&client.list_session_plans(session_id).await?)?
+                );
+                shutdown_opt(engine).await;
+            }
+            SessionCommands::Answer {
+                directory,
+                session,
+                text,
+            } => {
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
+                let session_id = SessionId::from_str(&session)?;
+                client.submit_question_answer(session_id, &text).await?;
+                println!("answer submitted");
+                shutdown_opt(engine).await;
+            }
+            SessionCommands::RevertCommit { directory, session } => {
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
+                let session_id = SessionId::from_str(&session)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&client.revert_commit(session_id).await?)?
+                );
+                shutdown_opt(engine).await;
+            }
+            SessionCommands::RevertClear { directory, session } => {
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
+                let session_id = SessionId::from_str(&session)?;
+                client.revert_clear(session_id).await?;
+                println!("revert cleared");
+                shutdown_opt(engine).await;
+            }
         },
         Commands::Mcp { command } => match command {
             McpCommands::List { directory } => {
@@ -1007,6 +1141,50 @@ async fn run(cli: Cli, logging: LoggingConfig) -> anyhow::Result<()> {
                 }
             },
         },
+        Commands::Fs { command } => match command {
+            FsCommands::Tree {
+                directory,
+                path,
+                offset,
+                limit,
+            } => {
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
+                let page = client
+                    .fs_tree_page(
+                        if path.is_empty() { None } else { Some(&path) },
+                        Some(offset),
+                        Some(limit),
+                    )
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&page)?);
+                shutdown_opt(engine).await;
+            }
+            FsCommands::File { directory, path } => {
+                let (engine, client) =
+                    scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
+                print!("{}", client.fs_file(&path).await?);
+                shutdown_opt(engine).await;
+            }
+        },
+        Commands::Skills { directory } => {
+            let (engine, client) =
+                scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&client.list_skills().await?)?
+            );
+            shutdown_opt(engine).await;
+        }
+        Commands::Plugins { directory } => {
+            let (engine, client) =
+                scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&client.list_plugins().await?)?
+            );
+            shutdown_opt(engine).await;
+        }
         Commands::Config { directory } => {
             let cfg =
                 deepseekcode_config::load_effective_config(camino::Utf8Path::new(&directory))?;

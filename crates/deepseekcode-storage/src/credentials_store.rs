@@ -4,10 +4,12 @@ use aes_gcm::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use deepseekcode_types::{DeepSeekCodeError, Result};
+#[cfg(feature = "os-keychain")]
 use keyring::Entry;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
+#[cfg(feature = "os-keychain")]
 const KEYRING_SERVICE: &str = "deepseekcode";
 const KEYRING_MARKER: &str = "keyring";
 const ENCRYPTED_PREFIX: &str = "enc:";
@@ -151,11 +153,21 @@ impl CredentialsStore {
 }
 
 fn keyring_enabled() -> bool {
-    !std::env::var("DEEPSEEKCODE_DISABLE_KEYRING")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    // Compile-time gate first: `--no-default-features` builds (containers
+    // without D-Bus/Keychain) never touch the OS keychain at all.
+    #[cfg(not(feature = "os-keychain"))]
+    {
+        return false;
+    }
+    #[cfg(feature = "os-keychain")]
+    {
+        !std::env::var("DEEPSEEKCODE_DISABLE_KEYRING")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
 }
 
+#[cfg(feature = "os-keychain")]
 fn try_keyring_store(provider_id: &str, api_key: &str) -> Result<()> {
     let entry = Entry::new(KEYRING_SERVICE, provider_id)
         .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
@@ -164,6 +176,14 @@ fn try_keyring_store(provider_id: &str, api_key: &str) -> Result<()> {
         .map_err(|e| DeepSeekCodeError::Storage(format!("keyring store: {e}")))
 }
 
+#[cfg(not(feature = "os-keychain"))]
+fn try_keyring_store(_provider_id: &str, _api_key: &str) -> Result<()> {
+    Err(DeepSeekCodeError::Storage(
+        "os keychain disabled in this build".into(),
+    ))
+}
+
+#[cfg(feature = "os-keychain")]
 fn try_keyring_get(provider_id: &str) -> Result<Option<String>> {
     let entry = Entry::new(KEYRING_SERVICE, provider_id)
         .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
@@ -174,10 +194,21 @@ fn try_keyring_get(provider_id: &str) -> Result<Option<String>> {
     }
 }
 
+#[cfg(not(feature = "os-keychain"))]
+fn try_keyring_get(_provider_id: &str) -> Result<Option<String>> {
+    Ok(None)
+}
+
+#[cfg(feature = "os-keychain")]
 fn try_keyring_delete(provider_id: &str) -> Result<()> {
     if let Ok(entry) = Entry::new(KEYRING_SERVICE, provider_id) {
         let _ = entry.delete_credential();
     }
+    Ok(())
+}
+
+#[cfg(not(feature = "os-keychain"))]
+fn try_keyring_delete(_provider_id: &str) -> Result<()> {
     Ok(())
 }
 
@@ -189,7 +220,7 @@ fn machine_salt() -> Vec<u8> {
     if let Ok(salt) = std::env::var("DEEPSEEKCODE_CRED_SALT") {
         return salt.into_bytes();
     }
-    let path = dirs::config_dir()
+    let path = deepseekcode_types::config_dir()
         .map(|p| p.join("deepseekcode").join(".cred_salt"))
         .unwrap_or_else(|| std::path::PathBuf::from(".deepseekcode-cred-salt"));
     if let Ok(existing) = std::fs::read(&path) {
@@ -198,7 +229,7 @@ fn machine_salt() -> Vec<u8> {
         }
     }
     let mut salt = vec![0u8; 32];
-    if getrandom::getrandom(&mut salt).is_err() {
+    if getrandom::fill(&mut salt).is_err() {
         // Fail-closed salt: process-unique but not persisted; decrypt of old
         // rows will fail loudly instead of silently using a weak key.
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -261,7 +292,7 @@ fn derive_legacy_key() -> [u8; 32] {
 fn encrypt_secret(cipher: &Aes256Gcm, secret: &str) -> Result<String> {
     // Fail-closed: never fall back to predictable nonces; surface the error.
     let mut nonce_bytes = vec![0u8; 12];
-    getrandom::getrandom(&mut nonce_bytes)
+    getrandom::fill(&mut nonce_bytes)
         .map_err(|e| DeepSeekCodeError::Storage(format!("rand: {e}")))?;
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher

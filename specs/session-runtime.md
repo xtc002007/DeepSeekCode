@@ -31,6 +31,12 @@ Implementation must match these rules; tests assert parity via JSON fixtures.
 - Interrupts active execution; preserves durable inbox rows
 - Idle or missing session is no-op
 
+### sessions.fork
+- Creates a new session inheriting a prefix of history (`until_message_id`, or all)
+- Single atomic transaction: session row + messages + unpromoted inbox + epoch; any failure rolls back everything, never a half-forked session
+- Epoch is inherited as a snapshot clamped to the forked prefix (`min(src_baseline, fork_max)`), so the fork's baseline never references messages it does not contain
+- Unknown `agent` values are rejected (no silent fallback to `build`)
+
 ## Context Epoch Rules
 
 1. First complete baseline initializes epoch before any prompt becomes model-visible

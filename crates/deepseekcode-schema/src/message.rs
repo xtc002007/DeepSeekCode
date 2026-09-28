@@ -27,7 +27,7 @@ pub enum PartKind {
 pub struct MessagePart {
     pub kind: PartKind,
     pub text: Option<String>,
-    #[schema(value_type = Option<String>)]
+
     pub tool_call_id: Option<String>,
     pub tool_name: Option<String>,
     pub tool_input: Option<serde_json::Value>,
@@ -36,11 +36,8 @@ pub struct MessagePart {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct Message {
-    #[schema(value_type = String)]
-    #[schemars(with = "String")]
     pub id: MessageId,
-    #[schema(value_type = String)]
-    #[schemars(with = "String")]
+
     pub session_id: SessionId,
     pub role: MessageRole,
     pub parts: Vec<MessagePart>,

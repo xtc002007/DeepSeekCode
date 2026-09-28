@@ -264,12 +264,42 @@ async fn try_pinned_stream_400_retry(
 }
 
 /// True when a 400 body complains about DeepSeek-only fields.
+///
+/// Structured check (not raw substring): a plain `"thinking"` substring also
+/// matches legitimate bodies that merely MENTION thinking text, which used to
+/// trigger a wasteful bare retry doubling latency. We require an
+/// unknown-field-shaped error (`code`/`type`/`param` naming the field, or a
+/// message pairing the field name with unknown/unrecognized/unsupported).
 fn mentions_deepseek_only_field(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.contains("stream_options")
-        || lower.contains("thinking")
-        || lower.contains("unknown field")
+    const FIELDS: &[&str] = &["stream_options", "thinking", "reasoning_content"];
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        // Non-JSON bodies: only match explicit unknown-field phrasing.
+        let lower = text.to_ascii_lowercase();
+        return (lower.contains("unknown field")
+            || lower.contains("unknown parameter")
+            || lower.contains("unrecognized"))
+            && FIELDS.iter().any(|f| lower.contains(f));
+    };
+    let err = &value["error"];
+    let code = err.get("code").and_then(|v| v.as_str()).unwrap_or("");
+    let kind = err.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let param = err.get("param").and_then(|v| v.as_str()).unwrap_or("");
+    let message = err
+        .get("message")
+        .and_then(|v| v.as_str())
+        .or_else(|| value.get("message").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let names_field = [code, kind, param, message]
+        .iter()
+        .any(|s| FIELDS.iter().any(|f| s.to_ascii_lowercase().contains(f)));
+    if !names_field {
+        return false;
+    }
+    let lower = format!("{code} {kind} {param} {message}").to_ascii_lowercase();
+    lower.contains("unknown")
         || lower.contains("unrecognized")
+        || lower.contains("unsupported")
+        || lower.contains("invalid_request_error")
 }
 
 /// Enrich transport fallback errors with the endpoint + actionable hints.

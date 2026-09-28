@@ -288,13 +288,17 @@ pub fn authed_router(state: AppState) -> Router {
         .route("/api/v1/permission/pending", get(list_pending_permissions))
         .route("/api/v1/permission/{id}/respond", post(respond_permission))
         // Legacy thin wrappers for policy grants/config (spec: remain for one
-        // release cycle). Delegate to the same handlers.
-        .route("/api/v1/permission/grants", get(list_policy_grants))
+        // release cycle; removed in v0.3.0). Dedicated handlers so the
+        // `Sunset` marker lands only on the legacy paths.
+        .route("/api/v1/permission/grants", get(legacy_list_policy_grants))
         .route(
             "/api/v1/permission/grants/{id}",
-            delete(delete_policy_grant),
+            delete(legacy_delete_policy_grant),
         )
-        .route("/api/v1/permission/config", put(update_policy_config))
+        .route(
+            "/api/v1/permission/config",
+            put(legacy_update_policy_config),
+        )
         .route("/api/v1/policy/pending", get(list_pending_policies))
         .route("/api/v1/policy/{id}/reply", post(reply_policy))
         .route("/api/v1/policy/grants", get(list_policy_grants))
@@ -1201,11 +1205,23 @@ pub(crate) async fn disconnect_provider(
     }
 }
 
+/// Attach the legacy-compat `Sunset` marker: `permission/*` are thin
+/// wrappers kept for one release cycle per `specs/policy-system.md` and are
+/// removed in v0.3.0 (callers: desktop and CLI already use `policy/*`).
+fn legacy_sunset(response: impl IntoResponse) -> axum::response::Response {
+    const REMOVAL: &str = "v0.3.0; use /api/v1/policy/* instead";
+    let mut response = response.into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(REMOVAL) {
+        response.headers_mut().insert("sunset", value);
+    }
+    response
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/permission/pending",
     tag = "permission",
-    responses((status = 200, description = "Pending permissions", body = [PermissionRequest]))
+    responses((status = 200, description = "Pending permissions (DEPRECATED: use /api/v1/policy/pending; removed in v0.3.0)", body = [PermissionRequest]))
 )]
 pub(crate) async fn list_pending_permissions(
     State(state): State<AppState>,
@@ -1215,7 +1231,7 @@ pub(crate) async fn list_pending_permissions(
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
     let pending = location.permissions.list_pending_legacy().await;
-    Json(serde_json::json!(pending))
+    legacy_sunset(Json(serde_json::json!(pending)).into_response())
 }
 
 #[utoipa::path(
@@ -1224,7 +1240,7 @@ pub(crate) async fn list_pending_permissions(
     tag = "permission",
     params(("id" = String, Path, description = "Permission request ID")),
     request_body = PermissionResponse,
-    responses((status = 200, description = "Permission response recorded", body = crate::openapi::OkResponse))
+    responses((status = 200, description = "Permission response recorded (DEPRECATED: use /api/v1/policy/{id}/reply; removed in v0.3.0)", body = crate::openapi::OkResponse))
 )]
 pub(crate) async fn respond_permission(
     State(state): State<AppState>,
@@ -1236,14 +1252,15 @@ pub(crate) async fn respond_permission(
     let permission_id = parse_permission_path!(&id);
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
-    match location
+    let response = match location
         .permissions
         .respond_legacy(permission_id, req.status)
         .await
     {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => service_error_response(e).into_response(),
-    }
+    };
+    legacy_sunset(response)
 }
 
 #[utoipa::path(
@@ -1285,6 +1302,59 @@ pub(crate) async fn reply_policy(
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => service_error_response(e).into_response(),
     }
+}
+
+/// Legacy `permission/*` wrappers over the policy handlers. Each delegates
+/// and stamps the `Sunset` marker; removed in v0.3.0 with the legacy
+/// `permissions` table (see `PermissionStore` deprecation).
+#[utoipa::path(
+    get,
+    path = "/api/v1/permission/grants",
+    tag = "permission",
+    responses((status = 200, description = "Project policy grants (DEPRECATED: use /api/v1/policy/grants; removed in v0.3.0)", body = [PolicyGrant]))
+)]
+pub(crate) async fn legacy_list_policy_grants(
+    state: State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    legacy_sunset(list_policy_grants(state, headers).await.into_response())
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/permission/grants/{id}",
+    tag = "permission",
+    params(("id" = String, Path, description = "Grant ID")),
+    responses((status = 200, description = "Grant deleted (DEPRECATED: use /api/v1/policy/grants/{id}; removed in v0.3.0)", body = crate::openapi::OkResponse))
+)]
+pub(crate) async fn legacy_delete_policy_grant(
+    state: State<AppState>,
+    headers: HeaderMap,
+    path: Path<String>,
+) -> impl IntoResponse {
+    legacy_sunset(
+        delete_policy_grant(state, headers, path)
+            .await
+            .into_response(),
+    )
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/permission/config",
+    tag = "permission",
+    responses((status = 200, description = "Policy config saved (DEPRECATED: use /api/v1/policy/config; removed in v0.3.0)", body = crate::openapi::OkResponse))
+)]
+pub(crate) async fn legacy_update_policy_config(
+    state: State<AppState>,
+    headers: HeaderMap,
+    body: axum::Json<UpdatePolicyConfigRequest>,
+) -> impl IntoResponse {
+    legacy_sunset(
+        update_policy_config(state, headers, body)
+            .await
+            .into_response(),
+    )
 }
 
 #[utoipa::path(

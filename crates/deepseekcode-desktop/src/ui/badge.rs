@@ -1,6 +1,5 @@
 use crate::theme::ThemeTokens;
-use crate::ui::icon::{render_icon, render_icon_rgba, IconName};
-use gpui::prelude::FluentBuilder;
+use crate::ui::icon::{render_icon_rgba, IconName};
 use gpui::*;
 
 /// Badge shell — attach `.on_mouse_down(cx.listener(...))` when clickable.
@@ -78,7 +77,7 @@ pub fn render_status_badge(
     color: Rgba,
 ) -> impl IntoElement {
     let label = label.into();
-    let theme = theme.clone();
+    let _theme = theme.clone();
     div()
         .px_1()
         .text_xs()

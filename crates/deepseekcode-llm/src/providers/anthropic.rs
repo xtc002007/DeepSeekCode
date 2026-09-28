@@ -9,27 +9,25 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::time::Duration;
 
-/// Non-streaming requests have no natural end, so cap them outright.
-#[allow(dead_code)]
-const GENERATE_TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
-
-/// The official Anthropic API authenticates via `x-api-key`; third-party
+/// Build the auth closure shared by `generate` and `stream`: the official
+/// Anthropic API authenticates via `x-api-key`; third-party
 /// Anthropic-compatible proxies customised via `base_url` almost universally
-/// expect `Authorization: Bearer` instead.
-#[allow(dead_code)]
-fn authenticated_builder(
-    http: &Client,
-    url: &str,
+/// expect `Authorization: Bearer` instead. (Previously this logic was
+/// duplicated inline at both call sites plus a dead helper.)
+fn anthropic_auth(
     base_url: Option<&str>,
     api_key: &str,
-) -> reqwest::RequestBuilder {
-    let builder = http.post(url).header("anthropic-version", "2023-06-01");
-    if base_url.map(is_official_anthropic_endpoint).unwrap_or(true) {
-        ApiKeyAuth.apply(builder, api_key)
-    } else {
-        BearerAuth.apply(builder, api_key)
+) -> impl Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder + Clone {
+    let api_key = api_key.to_string();
+    let official = base_url.map(is_official_anthropic_endpoint).unwrap_or(true);
+    move |b: reqwest::RequestBuilder| {
+        let builder = b.header("anthropic-version", "2023-06-01");
+        if official {
+            ApiKeyAuth.apply(builder, &api_key)
+        } else {
+            BearerAuth.apply(builder, &api_key)
+        }
     }
 }
 
@@ -63,26 +61,16 @@ pub async fn generate(
         &api_key,
         &body,
         true,
-        |b: reqwest::RequestBuilder| {
-            let builder = b.header("anthropic-version", "2023-06-01");
-            if request
-                .base_url
-                .as_deref()
-                .map(is_official_anthropic_endpoint)
-                .unwrap_or(true)
-            {
-                builder.header("x-api-key", api_key.clone())
-            } else {
-                builder.bearer_auth(api_key.clone())
-            }
-        },
+        anthropic_auth(request.base_url.as_deref(), &api_key),
     )
     .await
     .map_err(DeepSeekCodeError::Llm)?;
 
     if !response.status().is_success() {
         let text = response.text().await.unwrap_or_default();
-        return Err(DeepSeekCodeError::Llm(text));
+        return Err(DeepSeekCodeError::Llm(
+            crate::axis::framing::sanitize_llm_error(&text),
+        ));
     }
 
     let value: Value = response
@@ -156,33 +144,23 @@ pub async fn stream(
     body["stream"] = json!(true);
     let url = AnthropicMessagesEndpoint.resolve(request.base_url.as_deref());
 
-    // Same fallback as generate; no per-request timeout here (streaming is
-    // guarded by the runner idle watchdog + no global read_timeout on streams).
+    // Same fallback as generate; streams carry the 10-minute total cap from
+    // the shared sender (runner idle watchdog owns sub-minute gaps).
     let response = crate::http_client::post_json_stream_with_fallback_auth(
         http,
         &url,
         &api_key,
         &body,
-        |b: reqwest::RequestBuilder| {
-            let builder = b.header("anthropic-version", "2023-06-01");
-            if request
-                .base_url
-                .as_deref()
-                .map(is_official_anthropic_endpoint)
-                .unwrap_or(true)
-            {
-                builder.header("x-api-key", api_key.clone())
-            } else {
-                builder.bearer_auth(api_key.clone())
-            }
-        },
+        anthropic_auth(request.base_url.as_deref(), &api_key),
     )
     .await
     .map_err(DeepSeekCodeError::Llm)?;
 
     if !response.status().is_success() {
         let text = response.text().await.unwrap_or_default();
-        return Err(DeepSeekCodeError::Llm(text));
+        return Err(DeepSeekCodeError::Llm(
+            crate::axis::framing::sanitize_llm_error(&text),
+        ));
     }
 
     let byte_stream = response.bytes_stream();
@@ -190,15 +168,33 @@ pub async fn stream(
         .map(|chunk| chunk.map_err(|e| DeepSeekCodeError::Llm(e.to_string())))
         .scan(
             (
-                String::new(),
+                Vec::<u8>::new(),
                 HashMap::<usize, (String, String, String)>::new(),
             ),
             |(buffer, tool_blocks), chunk| match chunk {
                 Ok(bytes) => {
-                    buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    // Byte-level buffering: never split multi-byte UTF-8
+                    // across chunks; normalize CRLF so `\r\n\r\n` frames split.
+                    buffer.extend_from_slice(&bytes);
+                    if buffer.len() > 1024 * 1024 {
+                        buffer.clear();
+                        return futures::future::ready(Some(vec![]));
+                    }
+                    let text = String::from_utf8_lossy(buffer).to_string();
+                    let normalized = text.replace("\r\n", "\n");
+                    let mut frames: Vec<String> = Vec::new();
+                    let mut remainder = normalized.as_str();
+                    while let Some(pos) = remainder.find("\n\n") {
+                        frames.push(remainder[..pos + 2].to_string());
+                        remainder = &remainder[pos + 2..];
+                    }
+                    // Drain consumed bytes; the remainder stays buffered.
+                    // Char-boundary safe: both views derive from the same
+                    // lossy text, so lengths agree on boundaries.
+                    let drain = (text.len() - remainder.len()).min(buffer.len());
+                    let _ = buffer.drain(..drain);
                     let mut events = Vec::new();
-                    while let Some(pos) = buffer.find("\n\n") {
-                        let frame = buffer.drain(..=pos).collect::<String>();
+                    for frame in &frames {
                         for line in frame.lines() {
                             let Some(data) = sse_data_payload(line) else {
                                 continue;

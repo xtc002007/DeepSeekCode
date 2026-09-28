@@ -1,6 +1,6 @@
 use crate::client::DeepSeekCodeClient;
 use deepseekcode_core::DeepSeekCodeEngine;
-use deepseekcode_server::{build_router, pty::PtyManager, state::AppState};
+use deepseekcode_embed::{build_router, pty::PtyManager, state::AppState};
 use deepseekcode_types::Result;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,7 +50,7 @@ impl EmbeddedEngine {
 
     async fn start_inner(project_dir: String) -> Result<Self> {
         let db_path = std::env::var("DEEPSEEKCODE_DB_PATH").unwrap_or_else(|_| {
-            dirs::data_dir()
+            deepseekcode_types::data_dir()
                 .map(|p| p.join("deepseekcode").join("deepseekcode.db"))
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| "deepseekcode.db".into())

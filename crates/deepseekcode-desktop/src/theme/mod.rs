@@ -7,16 +7,10 @@ pub mod themes;
 mod tokens;
 mod typography;
 
-pub use palette::{hex_hsla, hex_rgb};
 pub use radius::RadiusScale;
 pub use spacing::SpacingScale;
-pub use style::{
-    elevated_surface, focus_ring, font_mono, font_ui, leading_base, leading_relaxed, leading_sm,
-    leading_xs,
-};
-pub use tokens::{
-    ButtonTokens, ComponentTokens, DiffTokens, MarkdownTokens, SyntaxTokens, ThemeTokens,
-};
+pub use style::{font_mono, font_ui, leading_base, leading_relaxed, leading_sm, leading_xs};
+pub use tokens::ThemeTokens;
 pub use typography::TypographyScale;
 
 use crate::preferences::{load_preferences, save_preferences, AppPreferences, ThemeId};

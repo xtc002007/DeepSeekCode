@@ -29,11 +29,12 @@ if (-not $publicKey -and (Test-Path $publicKeyPath)) {
 }
 
 $repo = [Environment]::GetEnvironmentVariable("GITHUB_REPOSITORY")
-$endpoint = if ($repo) {
-    "https://github.com/$repo/releases/download/v$Version/$InstallerName"
-} else {
-    ""
+if (-not $repo) {
+    # Fail closed: an empty `url` previously shipped in latest.json, pointing
+    # auto-update at nothing. Pass -EndpointUrl explicitly for local builds.
+    throw "GITHUB_REPOSITORY is empty; cannot build a download URL. Set GITHUB_REPOSITORY (CI) or extend this script with -EndpointUrl for local manifests."
 }
+$endpoint = "https://github.com/$repo/releases/download/v$Version/$InstallerName"
 
 $manifest = [ordered]@{
     version = $Version

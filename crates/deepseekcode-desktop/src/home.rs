@@ -231,7 +231,7 @@ pub fn projects_from_api(
 }
 
 fn prefs_path() -> PathBuf {
-    dirs::data_dir()
+    deepseekcode_types::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("deepseekcode")
         .join("recent_projects.json")

@@ -45,6 +45,25 @@ impl ProviderCatalog {
     ) {
         for (id, cfg) in providers {
             if let Some(key) = &cfg.api_key {
+                // Plaintext file key: warn once per provider per process; the
+                // encrypted store (loaded after) and env vars take precedence
+                // per the documented priority. Never log the key itself.
+                static WARNED: std::sync::OnceLock<
+                    std::sync::Mutex<std::collections::HashSet<String>>,
+                > = std::sync::OnceLock::new();
+                let warned =
+                    WARNED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+                let fresh = warned
+                    .lock()
+                    .map(|mut set| set.insert(id.clone()))
+                    .unwrap_or(false);
+                if fresh {
+                    tracing::warn!(
+                        target: deepseekcode_telemetry::APP,
+                        provider_id = id.as_str(),
+                        "provider API key is stored in plaintext in deepseekcode.jsonc; prefer `provider connect` (encrypted store) or env vars"
+                    );
+                }
                 self.credentials
                     .write()
                     .await

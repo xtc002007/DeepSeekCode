@@ -310,7 +310,7 @@ pub fn instructions_source(
                     load_instruction_file(&base, &mut texts);
                 }
             }
-            if let Some(global) = dirs::config_dir() {
+            if let Some(global) = deepseekcode_types::config_dir() {
                 let global_agents = global.join("deepseekcode").join("AGENTS.md");
                 if global_agents.exists() {
                     if let Ok(content) = std::fs::read_to_string(&global_agents) {

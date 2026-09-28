@@ -890,7 +890,7 @@ fn render_node(
     theme: &crate::theme::ThemeTokens,
 ) -> gpui::AnyElement {
     use crate::activity_leaf::format_leaf_line;
-    use deepseekcode_schema::activity::{ActivityNode, ActivityStatus, ActivityTargetKind};
+    use deepseekcode_schema::activity::{ActivityNode, ActivityTargetKind};
     use gpui::prelude::FluentBuilder;
     use gpui::*;
 

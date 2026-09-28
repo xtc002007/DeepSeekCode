@@ -1,7 +1,7 @@
 //! Embedded SVG assets for GPUI icon rendering.
 
 use gpui::*;
-use rust_embed::{Embed, RustEmbed};
+use rust_embed::Embed;
 use std::borrow::Cow;
 
 #[derive(Embed)]

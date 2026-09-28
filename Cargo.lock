@@ -1775,7 +1775,6 @@ dependencies = [
  "deepseekcode-server",
  "deepseekcode-telemetry",
  "deepseekcode-types",
- "dirs",
  "futures",
  "reqwest",
  "serde_json",
@@ -1790,7 +1789,6 @@ dependencies = [
  "camino",
  "deepseekcode-schema",
  "deepseekcode-types",
- "dirs",
  "jsonc-parser",
  "serde",
  "serde_json",
@@ -1814,11 +1812,9 @@ dependencies = [
  "deepseekcode-storage",
  "deepseekcode-telemetry",
  "deepseekcode-types",
- "dirs",
  "futures",
  "glob",
  "ignore",
- "keyring",
  "libc",
  "reqwest",
  "serde",
@@ -1848,7 +1844,6 @@ dependencies = [
  "deepseekcode-sdk",
  "deepseekcode-telemetry",
  "deepseekcode-types",
- "dirs",
  "eventsource-stream",
  "futures",
  "gpui",
@@ -1876,6 +1871,41 @@ dependencies = [
  "tree-sitter-typescript",
  "unicode-segmentation",
  "winres",
+]
+
+[[package]]
+name = "deepseekcode-embed"
+version = "0.1.2"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "camino",
+ "chrono",
+ "deepseekcode-config",
+ "deepseekcode-core",
+ "deepseekcode-llm",
+ "deepseekcode-schema",
+ "deepseekcode-storage",
+ "deepseekcode-telemetry",
+ "deepseekcode-types",
+ "futures",
+ "ignore",
+ "jsonc-parser",
+ "portable-pty",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "similar",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tower-http",
+ "tracing",
+ "ulid",
+ "utoipa",
+ "wiremock",
 ]
 
 [[package]]
@@ -1921,6 +1951,7 @@ dependencies = [
  "libloading",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -1931,7 +1962,6 @@ dependencies = [
 name = "deepseekcode-schema"
 version = "0.1.2"
 dependencies = [
- "async-trait",
  "chrono",
  "deepseekcode-types",
  "schemars 0.8.22",
@@ -1948,13 +1978,12 @@ dependencies = [
  "camino",
  "deepseekcode-config",
  "deepseekcode-core",
+ "deepseekcode-embed",
  "deepseekcode-llm",
  "deepseekcode-schema",
- "deepseekcode-server",
  "deepseekcode-storage",
  "deepseekcode-telemetry",
  "deepseekcode-types",
- "dirs",
  "eventsource-stream",
  "futures",
  "ignore",
@@ -1973,34 +2002,18 @@ name = "deepseekcode-server"
 version = "0.1.2"
 dependencies = [
  "axum",
- "base64 0.22.1",
  "camino",
- "chrono",
  "deepseekcode-config",
  "deepseekcode-core",
- "deepseekcode-llm",
- "deepseekcode-plugin",
+ "deepseekcode-embed",
  "deepseekcode-schema",
  "deepseekcode-storage",
- "deepseekcode-telemetry",
  "deepseekcode-types",
  "futures",
- "ignore",
- "jsonc-parser",
- "portable-pty",
  "reqwest",
- "serde",
  "serde_json",
- "similar",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
- "tokio-stream",
- "tower",
- "tower-http",
- "tracing",
- "ulid",
- "utoipa",
  "wiremock",
 ]
 
@@ -2015,8 +2028,7 @@ dependencies = [
  "deepseekcode-schema",
  "deepseekcode-telemetry",
  "deepseekcode-types",
- "dirs",
- "getrandom 0.2.17",
+ "getrandom 0.3.4",
  "keyring",
  "refinery",
  "serde",
@@ -2038,7 +2050,6 @@ dependencies = [
  "chrono",
  "deepseekcode-config",
  "deepseekcode-types",
- "dirs",
  "serde",
  "serde_json",
  "tempfile",
@@ -2055,10 +2066,13 @@ name = "deepseekcode-types"
 version = "0.1.2"
 dependencies = [
  "chrono",
+ "directories",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "ulid",
+ "utoipa",
 ]
 
 [[package]]
@@ -2143,6 +2157,15 @@ dependencies = [
  "block-buffer 0.12.1",
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
+]
+
+[[package]]
+name = "directories"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16f5094c54661b38d03bd7e50df373292118db60b585c08a411c6d840017fe7d"
+dependencies = [
+ "dirs-sys",
 ]
 
 [[package]]

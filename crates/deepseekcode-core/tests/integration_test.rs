@@ -77,6 +77,75 @@ async fn session_service_prompt_admits_to_inbox() {
 }
 
 #[tokio::test]
+async fn session_service_prompt_id_reuse_rejects_differences() {
+    // The parity fixtures bypass `SessionService::prompt` (storage-level
+    // admit only), so idempotency conflicts are covered here instead:
+    // same message id with different content or delivery must fail loudly,
+    // never silently return the old receipt.
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("AGENTS.md"), "# Test\nYou are helpful.").unwrap();
+
+    let db = Arc::new(Database::open_in_memory().await.unwrap());
+    let service = test_service(&dir, db);
+
+    let session = service
+        .create(CreateSessionRequest {
+            id: None,
+            directory: dir.path().to_string_lossy().to_string(),
+            agent: None,
+            model_id: Some("gpt-4o-mini".into()),
+            provider_id: Some("openai".into()),
+        })
+        .await
+        .unwrap();
+
+    let message_id = service
+        .prompt(PromptRequest {
+            id: None,
+            session_id: session.id,
+            prompt: "Say hello".into(),
+            delivery: PromptDelivery::Queue,
+            resume: false,
+        })
+        .await
+        .unwrap();
+
+    let conflict = service
+        .prompt(PromptRequest {
+            id: Some(message_id),
+            session_id: session.id,
+            prompt: "Say something else".into(),
+            delivery: PromptDelivery::Queue,
+            resume: false,
+        })
+        .await;
+    assert!(
+        matches!(
+            conflict,
+            Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(_))
+        ),
+        "different content must conflict, got {conflict:?}"
+    );
+
+    let delivery_conflict = service
+        .prompt(PromptRequest {
+            id: Some(message_id),
+            session_id: session.id,
+            prompt: "Say hello".into(),
+            delivery: PromptDelivery::Steer,
+            resume: false,
+        })
+        .await;
+    assert!(
+        matches!(
+            delivery_conflict,
+            Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(_))
+        ),
+        "different delivery must conflict, got {delivery_conflict:?}"
+    );
+}
+
+#[tokio::test]
 async fn fork_session_copies_tool_parts() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("AGENTS.md"), "# Agent").unwrap();

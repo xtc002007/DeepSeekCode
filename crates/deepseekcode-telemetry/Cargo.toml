@@ -15,7 +15,6 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 ulid = { workspace = true }
 chrono = { workspace = true }
-dirs = "6.0"
 camino = { workspace = true }
 zip = { workspace = true }
 walkdir = { workspace = true }

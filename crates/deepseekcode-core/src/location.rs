@@ -115,7 +115,13 @@ impl LocationMap {
         mcp.connect_all().await;
 
         let mut plugin_host = PluginHost::new();
-        if let Err(e) = plugin_host.load_from_config(&config.plugins, &project_dir) {
+        let trust = deepseekcode_plugin::verify::PluginTrust {
+            require_signatures: config.plugins_require_signatures,
+            trusted_keys: config.plugins_trusted_keys.clone(),
+        };
+        if let Err(e) =
+            plugin_host.load_from_config_with_trust(&config.plugins, &project_dir, &trust)
+        {
             tracing::warn!(
                 target: deepseekcode_telemetry::APP,
                 error = %e,

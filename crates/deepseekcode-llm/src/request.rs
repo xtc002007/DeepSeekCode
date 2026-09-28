@@ -62,7 +62,12 @@ pub struct LlmRequest {
     pub base_url: Option<String>,
     /// Thinking depth (`high` default for DeepSeek). `None` = provider default.
     pub effort: Option<String>,
-    /// `None` or `Some(0)` = omit on DeepSeek official endpoint (server 384K ceiling).
+    /// Output cap tri-state (see `build_openai_chat_body` for the send rules):
+    /// - `None` → omit (provider default);
+    /// - `Some(0)` → omit (legacy "no cap" spelling, normalized, never sent);
+    /// - `Some(n > 0)` → send as `max_tokens`, EXCEPT on DeepSeek main turns
+    ///   (`tools` non-empty), which omit it so the server applies its 384K
+    ///   ceiling. Summary/compaction calls (empty `tools`) always send it.
     pub max_output_tokens: Option<u32>,
 }
 
@@ -96,7 +101,8 @@ pub fn is_deepseek_request(provider: &str, base_url: Option<&str>) -> bool {
 
 impl LlmRequest {
     /// Validate before any network call: empty provider/model, malformed
-    /// base URL, and `Some(0)` max tokens are rejected early (P0-5).
+    /// base URL, and absurd token caps are rejected early (P0-5).
+    /// `Some(0)` is accepted as the legacy "omit" spelling.
     pub fn validate(&self) -> Result<(), deepseekcode_types::DeepSeekCodeError> {
         if self.provider.trim().is_empty() {
             return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
@@ -127,12 +133,19 @@ impl LlmRequest {
                 ));
             }
         }
-        if self.max_output_tokens == Some(0) {
+        // `Some(0)` is the legacy "no cap" spelling: accepted and normalized
+        // to omit downstream (never sent). Only absurd values are rejected.
+        if self.max_output_tokens.is_some_and(|n| n > 1_000_000) {
             return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
-                "max_output_tokens must be > 0 or omitted".into(),
+                "max_output_tokens unreasonably large".into(),
             ));
         }
         Ok(())
+    }
+
+    /// Normalized output cap: `None` and `Some(0)` both mean "omit".
+    pub fn effective_max_output_tokens(&self) -> Option<u32> {
+        self.max_output_tokens.filter(|&n| n > 0)
     }
 }
 

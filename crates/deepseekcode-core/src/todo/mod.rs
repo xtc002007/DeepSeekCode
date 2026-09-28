@@ -24,20 +24,36 @@ impl TodoStore for deepseekcode_storage::TodoStore {
 /// Bridges storage `TodoStore` into schema `TodoStoreOps` for `ToolContext`.
 pub struct StorageTodoStoreOps(pub Arc<deepseekcode_storage::TodoStore>);
 
-#[async_trait]
 impl TodoStoreOps for StorageTodoStoreOps {
-    async fn update_todos(
-        &self,
+    fn update_todos<'a>(
+        &'a self,
         session_id: SessionId,
-        todos: &[TodoItem],
-    ) -> std::result::Result<Vec<TodoItem>, String> {
-        self.0
-            .update(session_id, todos)
-            .await
-            .map_err(|e| e.to_string())
+        todos: &'a [TodoItem],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::result::Result<Vec<TodoItem>, String>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.0
+                .update(session_id, todos)
+                .await
+                .map_err(|e| e.to_string())
+        })
     }
 
-    async fn get_todos(&self, session_id: SessionId) -> std::result::Result<Vec<TodoItem>, String> {
-        self.0.get(session_id).await.map_err(|e| e.to_string())
+    fn get_todos(
+        &self,
+        session_id: SessionId,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::result::Result<Vec<TodoItem>, String>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move { self.0.get(session_id).await.map_err(|e| e.to_string()) })
     }
 }

@@ -4,25 +4,36 @@ description = "Command-line interface for DeepSeekCode"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# Binary-only crate: distributed via cargo-dist/NSIS channels, never crates.io.
+publish = false
 
 [[bin]]
 name = "deepseekcode"
 path = "src/main.rs"
 
+# Slim native-only binary without the wasmtime stack:
+# `cargo build -p deepseekcode-cli --no-default-features`
+[features]
+default = ["wasm-plugins"]
+wasm-plugins = [
+    "deepseekcode-core/wasm-plugins",
+    "deepseekcode-sdk/wasm-plugins",
+    "deepseekcode-server/wasm-plugins",
+]
+
 [dependencies]
 deepseekcode-types = { workspace = true }
 deepseekcode-schema = { workspace = true }
-deepseekcode-core = { workspace = true }
+deepseekcode-core = { path = "../deepseekcode-core", default-features = false }
 deepseekcode-config = { workspace = true }
 deepseekcode-telemetry = { workspace = true }
-deepseekcode-sdk = { workspace = true }
+deepseekcode-sdk = { path = "../deepseekcode-sdk", default-features = false }
 clap = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 camino = { workspace = true }
 anyhow = { workspace = true }
-dirs = "6.0"
 serde_json = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
-deepseekcode-server = { workspace = true }
+deepseekcode-server = { path = "../deepseekcode-server", default-features = false }

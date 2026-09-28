@@ -1,15 +1,92 @@
 use deepseekcode_types::Result;
 use std::cell::RefCell;
 use std::path::Path;
-use wasmtime::{Caller, Engine, Instance, Linker, Module, Store, Val};
+use std::sync::OnceLock;
+use wasmtime::{Caller, Config, Engine, Instance, Linker, Module, ResourceLimiter, Store, Val};
 
 pub struct WasmPluginRuntime;
+
+/// Fuel per guest invocation: bounds CPU for untrusted plugin code.
+/// Exhaustion surfaces as a trap (propagated as a hook error, never fatal).
+pub const WASM_FUEL_PER_CALL: u64 = 10_000_000;
+/// Linear-memory ceiling per guest instance (64 MiB).
+pub const WASM_MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+/// Table/function cap per guest instance.
+pub const WASM_MAX_TABLE_ELEMENTS: usize = 10_000;
+
+/// Process-wide shared engine: compilation artifacts are cached across
+/// plugin loads instead of rebuilding an `Engine` per call (previously every
+/// `validate`/`invoke` paid full engine construction).
+fn shared_engine() -> &'static Engine {
+    static ENGINE: OnceLock<Engine> = OnceLock::new();
+    ENGINE.get_or_init(|| {
+        let mut config = Config::new();
+        config.consume_fuel(true);
+        Engine::new(&config).expect("wasmtime engine with fuel metering")
+    })
+}
+
+/// Per-instance memory/table limiter: guest `memory.grow` beyond the ceiling
+/// fails the grow (returns -1) instead of ballooning the host.
+struct PluginLimiter;
+
+impl ResourceLimiter for PluginLimiter {
+    fn memory_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        Ok(desired <= WASM_MAX_MEMORY_BYTES)
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        Ok(desired <= WASM_MAX_TABLE_ELEMENTS)
+    }
+}
+
+/// Build a fuel-metered, memory-limited store for one guest invocation.
+fn limited_store(state: WasmHostState) -> Result<Store<WasmHostState>> {
+    let engine = shared_engine();
+    let mut store = Store::new(engine, state);
+    store.set_fuel(WASM_FUEL_PER_CALL).map_err(|e| {
+        deepseekcode_types::DeepSeekCodeError::Other(format!("wasm fuel setup: {e}"))
+    })?;
+    store.limiter(|state| &mut state.limiter);
+    Ok(store)
+}
 
 /// Host state passed to WASM guest instances.
 pub struct WasmHostState {
     pub plugin_id: String,
     pub transformed_config: RefCell<Option<String>>,
     pub transform_output: RefCell<Option<String>>,
+    limiter: PluginLimiter,
+}
+
+impl WasmHostState {
+    fn new(plugin_id: String) -> Self {
+        Self {
+            plugin_id,
+            transformed_config: RefCell::new(None),
+            transform_output: RefCell::new(None),
+            limiter: PluginLimiter,
+        }
+    }
+
+    fn with_config(plugin_id: String, config: Option<String>) -> Self {
+        Self {
+            plugin_id,
+            transformed_config: RefCell::new(config),
+            transform_output: RefCell::new(None),
+            limiter: PluginLimiter,
+        }
+    }
 }
 
 pub(crate) fn read_guest_bytes(
@@ -178,8 +255,7 @@ fn invoke_buffer_hook_inner(
 
 impl WasmPluginRuntime {
     pub fn validate(path: &Path) -> Result<()> {
-        let engine = Engine::default();
-        let module = Module::from_file(&engine, path)
+        let module = Module::from_file(shared_engine(), path)
             .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
         let _ = module;
         Ok(())
@@ -335,23 +411,18 @@ impl WasmPluginRuntime {
         Ok(())
     }
 
+    /// Shared, fuel-metered engine handle (cheap clone). Prefer passing
+    /// `shared_engine()` directly; kept for callers constructing modules.
     pub fn create_engine() -> Engine {
-        Engine::default()
+        shared_engine().clone()
     }
 
     /// Instantiate a WASM module and invoke an export (defaults to `_initialize`).
     pub fn invoke(module: &Module, plugin_id: &str, export: &str) -> Result<()> {
-        let engine = Self::create_engine();
-        let mut linker = Linker::new(&engine);
+        let engine = shared_engine();
+        let mut linker = Linker::new(engine);
         Self::link_host_functions(&mut linker)?;
-        let mut store = Store::new(
-            &engine,
-            WasmHostState {
-                plugin_id: plugin_id.to_string(),
-                transformed_config: RefCell::new(None),
-                transform_output: RefCell::new(None),
-            },
-        );
+        let mut store = limited_store(WasmHostState::new(plugin_id.to_string()))?;
         let instance = linker
             .instantiate(&mut store, module)
             .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
@@ -376,18 +447,14 @@ impl WasmPluginRuntime {
             return Self::parse_system_transform_output(&output);
         }
 
-        let engine = Self::create_engine();
-        let mut linker = Linker::new(&engine);
+        let engine = shared_engine();
+        let mut linker = Linker::new(engine);
         Self::link_host_functions(&mut linker)?;
         let input = serde_json::json!({ "system": system, "model": model }).to_string();
-        let mut store = Store::new(
-            &engine,
-            WasmHostState {
-                plugin_id: plugin_id.to_string(),
-                transformed_config: RefCell::new(Some(input)),
-                transform_output: RefCell::new(None),
-            },
-        );
+        let mut store = limited_store(WasmHostState::with_config(
+            plugin_id.to_string(),
+            Some(input),
+        ))?;
         let instance = linker
             .instantiate(&mut store, module)
             .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
@@ -426,17 +493,10 @@ impl WasmPluginRuntime {
         export: &str,
         input: &str,
     ) -> Result<Option<String>> {
-        let engine = Self::create_engine();
-        let mut linker = Linker::new(&engine);
+        let engine = shared_engine();
+        let mut linker = Linker::new(engine);
         Self::link_host_functions(&mut linker)?;
-        let mut store = Store::new(
-            &engine,
-            WasmHostState {
-                plugin_id: plugin_id.to_string(),
-                transformed_config: RefCell::new(None),
-                transform_output: RefCell::new(None),
-            },
-        );
+        let mut store = limited_store(WasmHostState::new(plugin_id.to_string()))?;
         let instance = linker
             .instantiate(&mut store, module)
             .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
@@ -487,18 +547,14 @@ impl WasmPluginRuntime {
             return Ok(Some(value));
         }
 
-        let engine = Self::create_engine();
-        let mut linker = Linker::new(&engine);
+        let engine = shared_engine();
+        let mut linker = Linker::new(engine);
         Self::link_host_functions(&mut linker)?;
         let input_str = input.to_string();
-        let mut store = Store::new(
-            &engine,
-            WasmHostState {
-                plugin_id: plugin_id.to_string(),
-                transformed_config: RefCell::new(Some(input_str)),
-                transform_output: RefCell::new(None),
-            },
-        );
+        let mut store = limited_store(WasmHostState::with_config(
+            plugin_id.to_string(),
+            Some(input_str),
+        ))?;
         let instance = linker
             .instantiate(&mut store, module)
             .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;

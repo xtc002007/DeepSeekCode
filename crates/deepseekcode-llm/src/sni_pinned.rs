@@ -41,7 +41,11 @@ use futures::{Stream, StreamExt};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const OPEN_TIMEOUT: Duration = Duration::from_secs(60);
-const TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
+/// Per-attempt cap for every pinned IP try (direct and proxy): with up to 4
+/// direct + 4 proxy attempts, the old 300s cap could stall the runner
+/// ~40min. 30s per IP bounds the worst case to ~4min while slow-but-working
+/// paths still succeed.
+const PER_IP_TIMEOUT: Duration = Duration::from_secs(30);
 const DOH_TTL: Duration = Duration::from_secs(600);
 const MAX_IPS: usize = 4;
 
@@ -53,15 +57,29 @@ pub fn is_pinnable_host(endpoint: &str) -> bool {
     host == "deepseek.com" || host.ends_with(".deepseek.com")
 }
 
-/// True for TUN fake-IP ranges (Clash default `198.18.0.1/16`, plus the
-/// encompassing benchmark `198.18.0.0/15`).
+/// True for non-routable IPv4 that a public API host must never resolve to:
+/// TUN fake-DNS ranges (Clash `198.18.0.0/15`), CGNAT (`100.64.0.0/10`, also
+/// used by some TUN stacks), RFC1918 private space, and link-local. Previous
+/// code only covered `198.18/15`, so `10/8` and `100.64/10` fake answers from
+/// other TUN setups slipped through to the pinned dial.
 fn is_fake_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
-            o[0] == 198 && (o[1] == 18 || o[1] == 19)
+            (o[0] == 198 && (o[1] == 18 || o[1] == 19))
+                || o[0] == 10
+                || (o[0] == 172 && (16..=31).contains(&o[1]))
+                || (o[0] == 192 && o[1] == 168)
+                || (o[0] == 100 && (64..=127).contains(&o[1]))
+                || (o[0] == 169 && o[1] == 254)
+                || (o[0] == 192 && o[1] == 0 && o[2] == 2)
+                || (o[0] == 198 && o[1] == 51 && o[2] == 100)
+                || (o[0] == 203 && o[1] == 0 && o[2] == 113)
         }
-        _ => false,
+        // NOTE: DoH queries are A-only, so AAAA answers never arrive here;
+        // IPv6-only networks remain unsupported by the pinned path (falls
+        // back to the reqwest/system path via callers).
+        IpAddr::V6(_) => false,
     }
 }
 
@@ -86,6 +104,18 @@ pub async fn doh_resolve(
         if let Some((at, ips)) = cache.get(host) {
             if at.elapsed() < DOH_TTL && !ips.is_empty() {
                 return Ok(ips.clone());
+            }
+        }
+    }
+    // Negative cache (60s): without it, an all-fake/all-failing answer
+    // re-hammers DoH on every LLM call instead of failing fast.
+    const NEG_TTL: Duration = Duration::from_secs(60);
+    let neg_key = format!("{host}\0neg");
+    {
+        let cache = doh_cache().read().await;
+        if let Some((at, ips)) = cache.get(&neg_key) {
+            if at.elapsed() < NEG_TTL && ips.is_empty() {
+                return Err(format!("DoH {host}: negative cache hit"));
             }
         }
     }
@@ -139,6 +169,12 @@ pub async fn doh_resolve(
             Err(e) => last_err = crate::http_client::transport_debug(&e),
         }
     }
+    // Remember the failure briefly so consecutive turns fail fast instead of
+    // re-issuing two DoH queries per LLM call.
+    doh_cache()
+        .write()
+        .await
+        .insert(neg_key, (Instant::now(), Vec::new()));
     Err(last_err)
 }
 
@@ -191,6 +227,9 @@ struct ProxyTarget {
     proxy_auth: Option<String>,
     real_ip: IpAddr,
     real_port: u16,
+    /// Origin hostname for the `Host` header: some proxies reject a literal
+    /// IP there even though the CONNECT authority must stay `ip:port`.
+    real_host: String,
 }
 
 /// Proxy-tunnel connector: TCP to the HTTP proxy, manual `CONNECT
@@ -222,8 +261,8 @@ impl tower_service::Service<Uri> for ProxiedPinnedConnector {
             })??;
             stream.set_nodelay(true).ok();
             let mut req = format!(
-                "CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\nProxy-Connection: Keep-Alive\r\n",
-                t.real_ip, t.real_port, t.real_ip, t.real_port
+                "CONNECT {}:{} HTTP/1.1\r\nHost: {}\r\nProxy-Connection: Keep-Alive\r\n",
+                t.real_ip, t.real_port, t.real_host
             );
             if let Some(auth) = &t.proxy_auth {
                 req.push_str(&format!("Proxy-Authorization: Basic {auth}\r\n"));
@@ -388,10 +427,9 @@ pub async fn post_pinned(
     let tls = tls_config();
     let mut last_err = String::new();
 
-    // Bound worst case: max 4 IPs x 30s each (P0-5: previously 4+4 x 300s
-    // could stall the runner ~40min). Per-IP timeout keeps VPN/DNS stalls
-    // bounded; callers still have the outer 300s/600s reqwest caps.
-    const PER_IP_TIMEOUT: Duration = Duration::from_secs(30);
+    // Bound worst case: max 4 IPs x 30s each (previously 4+4 x 300s could
+    // stall the runner ~40min). Per-IP timeout keeps VPN/DNS stalls bounded;
+    // callers still have the outer 300s/600s reqwest caps.
     let ips: Vec<_> = ips.into_iter().take(4).collect();
     // 1. direct to each real IP.
     for ip in &ips {
@@ -437,6 +475,7 @@ pub async fn post_pinned(
                         proxy_auth: auth.clone(),
                         real_ip: *ip,
                         real_port: port,
+                        real_host: host.clone(),
                     },
                 };
                 let https = hyper_rustls::HttpsConnectorBuilder::new()
@@ -514,6 +553,7 @@ pub async fn stream_pinned(
                             proxy_auth: auth.clone(),
                             real_ip: *ip,
                             real_port: port,
+                            real_host: host.clone(),
                         },
                     }),
                 ));
@@ -531,9 +571,9 @@ pub async fn stream_pinned(
                     .wrap_connector(c);
                 let client: Client<_, Full<Bytes>> =
                     Client::builder(TokioExecutor::new()).build(https);
-                tokio::time::timeout(TOTAL_TIMEOUT, request_via(&client, endpoint, bearer, body))
+                tokio::time::timeout(PER_IP_TIMEOUT, request_via(&client, endpoint, bearer, body))
                     .await
-                    .map_err(|_| format!("{label}: total timeout"))?
+                    .map_err(|_| format!("{label}: per-IP timeout (30s)"))?
             }
             ProxiedPinnedConnectorOrDirect::Proxied(c) => {
                 let https = hyper_rustls::HttpsConnectorBuilder::new()
@@ -543,9 +583,9 @@ pub async fn stream_pinned(
                     .wrap_connector(c);
                 let client: Client<_, Full<Bytes>> =
                     Client::builder(TokioExecutor::new()).build(https);
-                tokio::time::timeout(TOTAL_TIMEOUT, request_via(&client, endpoint, bearer, body))
+                tokio::time::timeout(PER_IP_TIMEOUT, request_via(&client, endpoint, bearer, body))
                     .await
-                    .map_err(|_| format!("{label}: total timeout"))?
+                    .map_err(|_| format!("{label}: per-IP timeout (30s)"))?
             }
         };
         match res {
@@ -575,19 +615,35 @@ pub async fn stream_pinned(
                     .map(|r| r.map_err(|e| DeepSeekCodeError::Llm(e.to_string())))
                     .scan(
                         (
-                            String::new(),
+                            Vec::<u8>::new(),
                             HashMap::<usize, (String, String, String)>::new(),
                         ),
                         |state, chunk| {
                             let (buffer, tool_acc) = state;
                             match chunk {
                                 Ok(bytes) => {
-                                    buffer.push_str(&String::from_utf8_lossy(&bytes));
+                                    // Byte-level buffering + CRLF normalization,
+                                    // mirroring the reqwest SSE paths.
+                                    buffer.extend_from_slice(&bytes);
+                                    if buffer.len() > 1024 * 1024 {
+                                        buffer.clear();
+                                        return futures::future::ready(Some(vec![]));
+                                    }
+                                    let text = String::from_utf8_lossy(buffer)
+                                        .to_string()
+                                        .replace("\r\n", "\n");
+                                    let mut frames: Vec<String> = Vec::new();
+                                    let mut remainder = text.as_str();
+                                    while let Some(pos) = remainder.find("\n\n") {
+                                        frames.push(remainder[..pos + 2].to_string());
+                                        remainder = &remainder[pos + 2..];
+                                    }
+                                    let drain = (text.len() - remainder.len()).min(buffer.len());
+                                    let _ = buffer.drain(..drain);
                                     let mut events = Vec::new();
-                                    while let Some(pos) = buffer.find("\n\n") {
-                                        let frame = buffer.drain(..=pos).collect::<String>();
+                                    for frame in &frames {
                                         events.extend(crate::providers::openai::parse_sse_frame(
-                                            &frame, tool_acc,
+                                            frame, tool_acc,
                                         ));
                                     }
                                     futures::future::ready(Some(events))
@@ -635,6 +691,11 @@ mod tests {
     fn fake_ip_ranges_detected() {
         assert!(is_fake_ip(&"198.18.0.82".parse().unwrap()));
         assert!(is_fake_ip(&"198.19.5.6".parse().unwrap()));
+        // Other TUN/CGNAT/private space must also be rejected for public hosts.
+        assert!(is_fake_ip(&"10.0.0.5".parse().unwrap()));
+        assert!(is_fake_ip(&"100.64.0.1".parse().unwrap()));
+        assert!(is_fake_ip(&"192.168.1.1".parse().unwrap()));
+        assert!(is_fake_ip(&"172.16.0.1".parse().unwrap()));
         assert!(!is_fake_ip(&"3.173.21.63".parse().unwrap()));
         assert!(!is_fake_ip(&"114.114.114.114".parse().unwrap()));
     }

@@ -558,7 +558,7 @@ fn render_general_section(
                 .font_family("Consolas")
                 .text_color(theme.text_secondary)
                 .child(
-                    dirs::data_dir()
+                    deepseekcode_types::data_dir()
                         .map(|d| d.join("deepseekcode").display().to_string())
                         .unwrap_or_else(|| "~/.local/share/deepseekcode".to_string()),
                 ),

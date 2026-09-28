@@ -264,7 +264,7 @@ impl WorkspaceView {
     pub(crate) fn show_bash_output_in_terminal(
         &mut self,
         detail_key: &str,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) {
         self.bash_output_detail_ref = Some(detail_key.to_string());
         let command = self

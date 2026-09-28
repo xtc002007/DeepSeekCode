@@ -13,6 +13,35 @@ impl Protocol for OpenAiChatProtocol {
     }
 }
 
+/// Whether `reasoning_content` is replayed for this request.
+///
+/// Explicit allowlist (previously two inline copies of the same gate, and
+/// silent drops elsewhere): only DeepSeek honors the field, and only when
+/// tools are present does replaying keep the prefix warm (without tools
+/// DeepSeek ignores it, so omitting saves tokens). Anthropic carries
+/// thinking in its own block types; OpenAI o1-style providers do not accept
+/// this field — both drop it here by design, never silently by accident.
+fn replays_reasoning(request: &LlmRequest, is_deepseek: bool) -> bool {
+    is_deepseek && !request.tools.is_empty()
+}
+
+/// Cache-aware reasoning replay for assistant messages (see
+/// [`replays_reasoning`]): replay the prior turn verbatim so the prefix hash
+/// stays warm.
+fn maybe_replay_reasoning(
+    msg: &mut Value,
+    m: &crate::request::LlmMessage,
+    request: &LlmRequest,
+    is_deepseek: bool,
+) {
+    if m.role != crate::request::LlmRole::Assistant || !replays_reasoning(request, is_deepseek) {
+        return;
+    }
+    if let Some(rc) = m.reasoning_content.as_deref().filter(|s| !s.is_empty()) {
+        msg["reasoning_content"] = json!(rc);
+    }
+}
+
 pub fn build_openai_chat_body(request: &LlmRequest, stream: bool) -> Value {
     // DeepSeek automatic prefix cache requires a byte-stable prefix:
     // system first, then append-only history, tools sorted by name.
@@ -57,28 +86,11 @@ pub fn build_openai_chat_body(request: &LlmRequest, stream: bool) -> Value {
             } else {
                 msg["content"] = json!(null);
             }
-            // Cache-aware reasoning replay (DeepSeek-only): when tools are
-            // present, replay the prior turn verbatim so the prefix hash
-            // stays warm. Without tools DeepSeek ignores the field, so omit
-            // it there to save tokens.
-            if is_deepseek && !request.tools.is_empty() {
-                if let Some(rc) = m.reasoning_content.as_deref().filter(|s| !s.is_empty()) {
-                    msg["reasoning_content"] = json!(rc);
-                }
-            }
+            maybe_replay_reasoning(&mut msg, m, request, is_deepseek);
             messages.push(msg);
         } else {
             let mut msg = json!({ "role": role, "content": m.content });
-            // Text-only assistant turns may still carry reasoning for cache
-            // continuity; replay it under the same DeepSeek+tools gate.
-            if m.role == crate::request::LlmRole::Assistant
-                && is_deepseek
-                && !request.tools.is_empty()
-            {
-                if let Some(rc) = m.reasoning_content.as_deref().filter(|s| !s.is_empty()) {
-                    msg["reasoning_content"] = json!(rc);
-                }
-            }
+            maybe_replay_reasoning(&mut msg, m, request, is_deepseek);
             messages.push(msg);
         }
     }
@@ -90,10 +102,8 @@ pub fn build_openai_chat_body(request: &LlmRequest, stream: bool) -> Value {
     });
 
     if !request.tools.is_empty() {
-        // Sort by name: HashMap iteration is random and would break the
-        // DeepSeek prefix on every turn.
         let mut tools = request.tools.clone();
-        tools.sort_by(|a, b| a.name.cmp(&b.name));
+        deepseekcode_schema::tool::sort_tool_definitions(&mut tools);
         body["tools"] = json!(tools
             .iter()
             .map(|t| json!({

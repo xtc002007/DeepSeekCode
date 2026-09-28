@@ -47,6 +47,17 @@ pub(crate) fn message_reasoning(msg: &Message) -> Option<String> {
 /// files; this only bounds what enters the request prefix so one huge `cat`
 /// cannot permanently poison the cache. Old prefixes stay byte-identical.
 pub(crate) const MAX_TOOL_PREFIX_BYTES: usize = 32 * 1024;
+/// Tail cap for head/tail truncation: error tails stay short so JSON and
+/// plain-text projections split identically (previously 8KiB vs unbounded
+/// per branch, making prefix bytes jitter on content type).
+pub(crate) const TRUNC_TAIL_CAP_BYTES: usize = 8 * 1024;
+
+/// Shared head/tail split: 2/3 head, remainder tail (capped), minus marker room.
+fn head_tail_budgets() -> (usize, usize) {
+    let head_budget = MAX_TOOL_PREFIX_BYTES * 2 / 3;
+    let tail_budget = (MAX_TOOL_PREFIX_BYTES - head_budget - 1024).min(TRUNC_TAIL_CAP_BYTES);
+    (head_budget, tail_budget)
+}
 
 pub(crate) fn truncate_tool_content_for_prefix(content: &str) -> String {
     if content.len() <= MAX_TOOL_PREFIX_BYTES {
@@ -66,10 +77,9 @@ pub(crate) fn truncate_tool_content_for_prefix(content: &str) -> String {
         }
         // Fall through to head/tail, but re-attach the recovery path.
         let recovery = extract_recovery_hint(&value);
-        let head_budget = MAX_TOOL_PREFIX_BYTES * 2 / 3;
-        let tail_budget = MAX_TOOL_PREFIX_BYTES - head_budget - 1024;
+        let (head_budget, tail_budget) = head_tail_budgets();
         let head = snap_to_char_boundary(content, head_budget);
-        let tail = snap_to_char_boundary_tail(content, tail_budget.min(8 * 1024));
+        let tail = snap_to_char_boundary_tail(content, tail_budget);
         let mut out = format!(
             "{head}\n…[truncated {} bytes — full output retained locally; recover with tool_result_page]…\n{tail}",
             content.len().saturating_sub(head.len() + tail.len())
@@ -81,8 +91,7 @@ pub(crate) fn truncate_tool_content_for_prefix(content: &str) -> String {
     }
     // Head/tail split preserves errors (usually at the tail) while staying
     // within budget. Snap to char boundaries to avoid splitting UTF-8.
-    let head_budget = MAX_TOOL_PREFIX_BYTES * 2 / 3;
-    let tail_budget = MAX_TOOL_PREFIX_BYTES - head_budget - 512;
+    let (head_budget, tail_budget) = head_tail_budgets();
     let head = snap_to_char_boundary(content, head_budget);
     let tail = snap_to_char_boundary_tail(content, tail_budget);
     format!(

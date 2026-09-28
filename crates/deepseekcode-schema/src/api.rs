@@ -96,8 +96,6 @@ pub struct McpConnectResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ForkRequest {
-    #[schema(value_type = Option<String>)]
-    #[schemars(with = "Option<String>")]
     pub until_message_id: Option<MessageId>,
 }
 

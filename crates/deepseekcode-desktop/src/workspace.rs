@@ -261,9 +261,8 @@ impl WorkspaceView {
             input.set_small_text(true, cx);
         });
         cx.subscribe(&prompt_input, |this, _, event, cx| {
-            if let PromptInputEvent::PasteImage { bytes, format } = event {
-                this.attach_clipboard_image(bytes.clone(), *format, cx);
-            }
+            let PromptInputEvent::PasteImage { bytes, format } = event;
+            this.attach_clipboard_image(bytes.clone(), *format, cx);
         })
         .detach();
         let api_key_input = cx.new(|cx| {
@@ -525,7 +524,7 @@ impl WorkspaceView {
     }
 
     fn prepare_project_context(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        if let Some(message) = Self::ensure_agents_md(path) {
+        if let Some(_message) = Self::ensure_agents_md(path) {
             tracing::info!(
                 target: deepseekcode_telemetry::DESKTOP,
                 path = %path.display(),
@@ -911,7 +910,7 @@ impl WorkspaceView {
 
     fn ensure_project_sessions_loaded(
         &mut self,
-        path_key: &str,
+        _path_key: &str,
         project_path: &str,
         cx: &mut Context<Self>,
     ) {
@@ -1656,7 +1655,7 @@ impl WorkspaceView {
     pub fn with_project(project_dir: PathBuf, cx: &mut Context<Self>) -> Self {
         let mut view = Self::new(cx);
         view.project_dir = Some(project_dir.clone());
-        if let Some(message) = Self::ensure_agents_md(&project_dir) {}
+        if let Some(_message) = Self::ensure_agents_md(&project_dir) {}
         view.bootstrap_project(project_dir, cx);
         view
     }
@@ -1837,7 +1836,7 @@ Describe this project so the AI assistant has context.\n\n\
                     this.create_session_for_project(PathBuf::from(path_str.clone()), cx);
                 });
             } else {
-                let _ = view.update(cx, |this, cx| {
+                let _ = view.update(cx, |this, _cx| {
                     this.session_id = session_id;
                 });
                 if session_id.is_some() {
@@ -3144,7 +3143,7 @@ Describe this project so the AI assistant has context.\n\n\
                     .or_else(|| event.payload["detail"].as_str())
                     .unwrap_or("Context sources refreshed")
                     .to_string();
-                let detail = event.payload["sources"]
+                let _detail = event.payload["sources"]
                     .as_array()
                     .map(|sources| {
                         sources
@@ -3196,8 +3195,8 @@ Describe this project so the AI assistant has context.\n\n\
                 self.activity.ignore_stale_run_events = true;
             }
             EventKind::McpStatusChanged => {
-                let name = event.payload["name"].as_str().unwrap_or("mcp");
-                let connected = event.payload["connected"].as_bool().unwrap_or(false);
+                let _name = event.payload["name"].as_str().unwrap_or("mcp");
+                let _connected = event.payload["connected"].as_bool().unwrap_or(false);
                 self.refresh_mcp_catalog(cx);
             }
             EventKind::RevertCommitted => {}

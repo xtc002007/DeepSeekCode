@@ -1,8 +1,7 @@
 //! Pure logic helpers for desktop (unit-testable without GPUI).
 
 use deepseekcode_schema::activity::{
-    ActivityGroupKind, ActivityKind, ActivityLeaf, ActivityMeta, ActivityNode, ActivityStatus,
-    ActivityTargetKind, ActivityTree,
+    ActivityGroupKind, ActivityKind, ActivityMeta, ActivityNode, ActivityTargetKind, ActivityTree,
 };
 use deepseekcode_schema::agent::AgentKind;
 use deepseekcode_schema::event::EventKind;

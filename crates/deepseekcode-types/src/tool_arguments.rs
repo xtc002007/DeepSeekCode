@@ -49,37 +49,53 @@ pub fn parse_tool_arguments(raw: &str) -> Value {
 }
 
 /// Unwrap `{"raw": "..."}` envelopes, re-parse concatenated fragments, and
-/// canonicalize (sorted keys, trimmed strings) so fingerprints are stable
-/// across key-order/whitespace variants.
+/// canonicalize (sorted keys) for execution. String values are preserved
+/// byte-for-byte: trimming here used to corrupt `write` content and `bash`
+/// commands with significant leading/trailing whitespace.
 pub fn normalize_tool_arguments(args: &Value) -> Value {
     let base = if let Some(raw) = args.get("raw").and_then(|v| v.as_str()) {
         parse_tool_arguments(raw)
     } else {
         args.clone()
     };
-    canonicalize_value(&base)
+    canonicalize_value(&base, false)
 }
 
-fn canonicalize_value(v: &Value) -> Value {
+/// Fingerprint-only variant: additionally trims strings so `A`, `A ` and key
+/// re-orderings share one loop-guard bucket. Never feed this to execution.
+pub fn normalize_tool_arguments_for_fingerprint(args: &Value) -> Value {
+    let base = if let Some(raw) = args.get("raw").and_then(|v| v.as_str()) {
+        parse_tool_arguments(raw)
+    } else {
+        args.clone()
+    };
+    canonicalize_value(&base, true)
+}
+
+fn canonicalize_value(v: &Value, trim_strings: bool) -> Value {
     match v {
         Value::Object(map) => {
             let mut sorted: Vec<(&String, &Value)> = map.iter().collect();
             sorted.sort_by(|a, b| a.0.cmp(b.0));
             let mut out = serde_json::Map::with_capacity(sorted.len());
             for (k, val) in sorted {
-                out.insert(k.clone(), canonicalize_value(val));
+                out.insert(k.clone(), canonicalize_value(val, trim_strings));
             }
             Value::Object(out)
         }
-        Value::Array(arr) => Value::Array(arr.iter().map(canonicalize_value).collect()),
-        Value::String(s) => Value::String(s.trim().to_string()),
+        Value::Array(arr) => Value::Array(
+            arr.iter()
+                .map(|item| canonicalize_value(item, trim_strings))
+                .collect(),
+        ),
+        Value::String(s) if trim_strings => Value::String(s.trim().to_string()),
         _ => v.clone(),
     }
 }
 
 /// Canonical fingerprint string for loop-guard: `tool:{canonical_json}`.
 pub fn tool_fingerprint_canonical(tool: &str, args: &Value) -> String {
-    let norm = normalize_tool_arguments(args);
+    let norm = normalize_tool_arguments_for_fingerprint(args);
     format!(
         "{tool}:{}",
         serde_json::to_string(&norm).unwrap_or_default()
@@ -111,5 +127,14 @@ mod tests {
         });
         let parsed = normalize_tool_arguments(&wrapped);
         assert_eq!(parsed["pattern"], "**/*.py");
+    }
+
+    #[test]
+    fn execution_normalize_preserves_significant_whitespace() {
+        let args = json!({"path": "a.txt", "content": "  indented  \n"});
+        let exec = normalize_tool_arguments(&args);
+        assert_eq!(exec["content"], "  indented  \n");
+        let fp = normalize_tool_arguments_for_fingerprint(&args);
+        assert_eq!(fp["content"], "indented");
     }
 }

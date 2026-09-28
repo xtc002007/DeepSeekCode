@@ -1,0 +1,6 @@
+{
+  "name": "compaction_replaces_baseline",
+  "given": { "session_exists": true, "pending_inbox": 0 },
+  "when": { "action": "context.compaction_replaces_baseline", "prompt": "", "delivery": "queue", "resume": false },
+  "then": { "inbox_count": 0, "history_count": 0, "events": [] }
+}

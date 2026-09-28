@@ -38,10 +38,13 @@ pub async fn basic_auth_middleware(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
 
-    // Basic rate-limit: at most 30 auth attempts per minute per process.
-    // Full per-IP limiting belongs in a gateway; this stops trivial brute force.
+    // Process-global throttle: >30 failed attempts/minute returns 429 with
+    // Retry-After instead of merely counting (previously the counter never
+    // enforced). Full per-IP limiting belongs in a gateway; this stops
+    // trivial brute force against an exposed server.
     static FAIL_WINDOW: std::sync::LazyLock<std::sync::Mutex<(std::time::Instant, u32)>> =
         std::sync::LazyLock::new(|| std::sync::Mutex::new((std::time::Instant::now(), 0)));
+    const MAX_FAILS_PER_MINUTE: u32 = 30;
     let authorized = auth_header.is_some_and(|h| {
         h.strip_prefix("Basic ")
             .and_then(|encoded| {
@@ -70,10 +73,34 @@ pub async fn basic_auth_middleware(
                 *guard = (now, 0);
             }
             guard.1 += 1;
+            if guard.1 > MAX_FAILS_PER_MINUTE {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::SERVER,
+                    path = %request.uri().path(),
+                    fails = guard.1,
+                    "basic auth throttled: too many failures"
+                );
+                let mut res = axum::http::Response::new(axum::body::Body::from(
+                    serde_json::json!({"error": "too many auth failures", "code": "rate_limited"})
+                        .to_string(),
+                ));
+                *res.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+                res.headers_mut()
+                    .insert(header::RETRY_AFTER, header::HeaderValue::from_static("60"));
+                res.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    header::HeaderValue::from_static("application/json"),
+                );
+                return res;
+            }
         }
     }
 
     if authorized {
+        // Success resets the window so legitimate typo bursts don't lock out.
+        if let Ok(mut guard) = FAIL_WINDOW.lock() {
+            *guard = (std::time::Instant::now(), 0);
+        }
         next.run(request).await
     } else {
         tracing::warn!(

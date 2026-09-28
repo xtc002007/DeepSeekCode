@@ -1,10 +1,13 @@
 use deepseekcode_schema::session::PromptDelivery;
+#[cfg(feature = "os-keychain")]
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+#[cfg(feature = "os-keychain")]
 const KEYRING_SERVICE: &str = "deepseekcode";
+#[cfg(feature = "os-keychain")]
 const SERVER_PASSWORD_ACCOUNT: &str = "server_password";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -115,7 +118,7 @@ impl From<&AppPreferences> for PreferencesFile {
 }
 
 pub fn preferences_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|dir| dir.join("deepseekcode").join("preferences.json"))
+    deepseekcode_types::data_dir().map(|dir| dir.join("deepseekcode").join("preferences.json"))
 }
 
 pub fn load_preferences() -> AppPreferences {
@@ -125,7 +128,7 @@ pub fn load_preferences() -> AppPreferences {
     let Ok(raw) = fs::read_to_string(&path) else {
         return AppPreferences::default();
     };
-    let Ok(mut file) = serde_json::from_str::<PreferencesFile>(&raw) else {
+    let Ok(file) = serde_json::from_str::<PreferencesFile>(&raw) else {
         return AppPreferences::default();
     };
 
@@ -176,11 +179,19 @@ fn save_preferences_file(path: &PathBuf, file: &PreferencesFile) -> std::io::Res
 }
 
 fn keyring_enabled() -> bool {
-    !std::env::var("DEEPSEEKCODE_DISABLE_KEYRING")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    #[cfg(not(feature = "os-keychain"))]
+    {
+        return false;
+    }
+    #[cfg(feature = "os-keychain")]
+    {
+        !std::env::var("DEEPSEEKCODE_DISABLE_KEYRING")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
 }
 
+#[cfg(feature = "os-keychain")]
 fn load_server_password() -> Option<String> {
     if !keyring_enabled() {
         return None;
@@ -201,6 +212,15 @@ fn load_server_password() -> Option<String> {
     }
 }
 
+#[cfg(not(feature = "os-keychain"))]
+fn load_server_password() -> Option<String> {
+    None
+}
+
+#[cfg(not(feature = "os-keychain"))]
+fn store_server_password(_password: Option<&str>) {}
+
+#[cfg(feature = "os-keychain")]
 fn store_server_password(password: Option<&str>) {
     if !keyring_enabled() {
         return;

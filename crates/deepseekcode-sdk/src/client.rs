@@ -10,6 +10,10 @@ use serde::de::DeserializeOwned;
 use std::pin::Pin;
 use std::str::FromStr;
 
+/// `limit` for transport-error gaps: the failure carries no replay bound, so
+/// callers must reconnect from `head` immediately instead of backfilling.
+pub const TRANSPORT_GAP_LIMIT: i64 = -1;
+
 #[derive(Debug, Clone)]
 pub enum EventStreamItem {
     Event(EventEnvelope),
@@ -821,7 +825,7 @@ impl DeepSeekCodeClient {
                     );
                     Some(EventStreamItem::Gap {
                         head: since_seq,
-                        limit: -1,
+                        limit: TRANSPORT_GAP_LIMIT,
                     })
                 }
             }
@@ -862,8 +866,14 @@ impl DeepSeekCodeClient {
             .unwrap_or(body);
         Err(match status.as_u16() {
             404 => deepseekcode_types::DeepSeekCodeError::NotFound(message),
-            400 => deepseekcode_types::DeepSeekCodeError::InvalidInput(message),
+            400 | 422 => deepseekcode_types::DeepSeekCodeError::InvalidInput(message),
+            401 => deepseekcode_types::DeepSeekCodeError::Llm(format!("unauthorized: {message}")),
             403 => deepseekcode_types::DeepSeekCodeError::PermissionDenied(message),
+            409 => deepseekcode_types::DeepSeekCodeError::AlreadyExists(message),
+            429 => deepseekcode_types::DeepSeekCodeError::Llm(format!("rate limited: {message}")),
+            502..=504 => deepseekcode_types::DeepSeekCodeError::Llm(format!(
+                "upstream unavailable: {message}"
+            )),
             _ => deepseekcode_types::DeepSeekCodeError::Other(format!("HTTP {status}: {message}")),
         })
     }

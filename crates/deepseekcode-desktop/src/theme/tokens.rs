@@ -1,4 +1,3 @@
-use super::palette::{hex_hsla, hex_rgb};
 use super::radius::RadiusScale;
 use super::spacing::SpacingScale;
 use super::typography::TypographyScale;

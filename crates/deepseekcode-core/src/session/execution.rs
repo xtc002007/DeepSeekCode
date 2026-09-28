@@ -36,7 +36,6 @@ pub struct SessionExecution {
         >,
     >,
     child_sessions: Mutex<HashMap<SessionId, Vec<SessionId>>>,
-    child_handles: Mutex<HashMap<SessionId, tokio::task::JoinHandle<()>>>,
     drain_handles: Mutex<HashMap<SessionId, tokio::task::JoinHandle<()>>>,
     /// Sessions whose current run cycle was cancelled by the user. Unlike the
     /// per-runner flag (reset on every `drain()` entry), this survives runner
@@ -93,7 +92,6 @@ impl SessionExecution {
             runners: Mutex::new(HashMap::new()),
             question_channels: Mutex::new(HashMap::new()),
             child_sessions: Mutex::new(HashMap::new()),
-            child_handles: Mutex::new(HashMap::new()),
             drain_handles: Mutex::new(HashMap::new()),
             interrupt_requested: tokio::sync::Mutex::new(HashSet::new()),
             active_session_ids,
@@ -275,6 +273,28 @@ impl SessionExecution {
         if self.is_interrupt_requested(session_id).await {
             return Err(deepseekcode_types::DeepSeekCodeError::SessionInterrupted);
         }
+        // RAII guard: `runner_for` or a panic between insert/remove must not
+        // leave a stale id in `active_session_ids` (previously `active()`
+        // reported phantom sessions after abnormal exits).
+        struct ActiveGuard<'a> {
+            set: Option<&'a tokio::sync::RwLock<std::collections::HashSet<SessionId>>>,
+            id: SessionId,
+        }
+        impl Drop for ActiveGuard<'_> {
+            fn drop(&mut self) {
+                if let Some(set) = self.set {
+                    // Best-effort synchronous cleanup; the async path below
+                    // removes it first in the normal case.
+                    if let Ok(mut guard) = set.try_write() {
+                        guard.remove(&self.id);
+                    }
+                }
+            }
+        }
+        let _active_guard = ActiveGuard {
+            set: self.active_session_ids.as_deref(),
+            id: session_id,
+        };
         if let Some(active) = &self.active_session_ids {
             active.write().await.insert(session_id);
         }
@@ -307,10 +327,17 @@ impl SessionExecution {
         let sessions = SessionStore::new(self.db.pool().clone());
         let parent = sessions.get(parent_id).await?;
         let child_id = SessionId::new();
+        // Unknown agents are rejected instead of silently becoming Build
+        // (consistent with `POST /api/v1/session/{id}/model`).
         let agent_kind = match agent.to_lowercase().as_str() {
+            "build" => deepseekcode_schema::agent::AgentKind::Build,
             "plan" => deepseekcode_schema::agent::AgentKind::Plan,
             "general" => deepseekcode_schema::agent::AgentKind::General,
-            _ => deepseekcode_schema::agent::AgentKind::Build,
+            other => {
+                return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
+                    format!("unknown agent: {other}"),
+                ))
+            }
         };
 
         sessions
@@ -384,11 +411,9 @@ impl SessionExecution {
             .remove(&parent_id)
             .unwrap_or_default();
         for child_id in children {
+            // Child tasks are spawned via `wake()` and tracked in
+            // `drain_handles` like any other drain; no second map exists.
             if let Some(handle) = self.drain_handles.lock().await.remove(&child_id) {
-                let _ = handle.await;
-                continue;
-            }
-            if let Some(handle) = self.child_handles.lock().await.remove(&child_id) {
                 let _ = handle.await;
             }
         }
@@ -445,6 +470,10 @@ impl SessionExecution {
     pub async fn drop_runner(&self, session_id: SessionId) {
         let _ = self.interrupt(session_id).await;
         self.runners.lock().await.remove(&session_id);
+        // Awaiting (not aborting) is intentional: callers (move/delete) need
+        // the drain to actually stop before mutating session state, and the
+        // interrupt above guarantees the drain exits at its next boundary
+        // instead of hanging. Aborting mid-DB-write could leave partial rows.
         if let Some(handle) = self.drain_handles.lock().await.remove(&session_id) {
             let _ = handle.await;
         }

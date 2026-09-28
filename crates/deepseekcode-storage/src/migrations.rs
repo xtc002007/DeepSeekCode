@@ -555,6 +555,36 @@ ALTER TABLE messages ADD COLUMN input_tokens INTEGER;
     }
 
     #[test]
+    fn embedded_migration_versions_are_unique_from_one() {
+        // `embed_migrations!` yields WalkDir filesystem order (V10 before V1
+        // on NTFS); `run()` sorts numerically before applying. This pins the
+        // precondition that makes the sort meaningful: versions start at 1
+        // with no duplicates (a duplicate would apply twice; a gap is fine).
+        // The ordering guarantee itself is proven by every in-memory DB test,
+        // which fails if backfills run against missing tables.
+        let mut versions: Vec<u32> = embedded::migrations::runner()
+            .get_migrations()
+            .iter()
+            .map(|m| m.version())
+            .collect();
+        assert!(!versions.is_empty());
+        versions.sort_unstable();
+        assert_eq!(versions[0], 1);
+        for pair in versions.windows(2) {
+            assert!(pair[0] < pair[1], "duplicate migration version");
+        }
+    }
+
+    #[test]
+    fn comment_only_chunks_are_skipped() {
+        assert!(is_comment_only("-- just a comment\n-- another"));
+        assert!(is_comment_only("/* block */"));
+        assert!(!is_comment_only(
+            "-- comment\nUPDATE messages SET seq = 1 WHERE seq = 0;"
+        ));
+    }
+
+    #[test]
     fn stable_checksum_is_line_ending_invariant() {
         let sql = "CREATE TABLE IF NOT EXISTS sessions (\n    id TEXT\n);\n";
         let crlf = sql.replace('\n', "\r\n");

@@ -64,11 +64,8 @@ pub struct PolicyReply {
 /// Pending or resolved policy prompt shown in the UI.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct PolicyRequest {
-    #[schema(value_type = String)]
-    #[schemars(with = "String")]
     pub id: PermissionId,
-    #[schema(value_type = String)]
-    #[schemars(with = "String")]
+
     pub session_id: SessionId,
     pub scope: String,
     pub tool_name: String,
