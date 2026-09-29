@@ -253,12 +253,22 @@ fn text_hash(text: &str) -> u64 {
 
 fn is_cjk(ch: char) -> bool {
     matches!(ch,
-        '\u{3400}'..='\u{4DBF}'
-        | '\u{4E00}'..='\u{9FFF}'
-        | '\u{3040}'..='\u{30FF}'
-        | '\u{AC00}'..='\u{D7AF}'
-        | '\u{FF00}'..='\u{FFEF}'
-        | '\u{3000}'..='\u{303F}')
+        '\u{2000}'..='\u{206F}' // General punctuation: — … “ ” ‘ ’ · ～
+        | '\u{2190}'..='\u{21FF}' // Arrows: → ⇒
+        | '\u{2600}'..='\u{27BF}' // Symbols/dingbats: ❌ ✅ ● ◆ … (emoji-safe breakable)
+        | '\u{2E80}'..='\u{2EFF}' // CJK radicals supplement
+        | '\u{2F00}'..='\u{2FDF}' // Kangxi radicals
+        | '\u{3000}'..='\u{303F}' // CJK symbols: 、 。 〈 〉 《 》 「 」 『 』 …
+        | '\u{3040}'..='\u{30FF}' // Hiragana/Katakana
+        | '\u{3100}'..='\u{312F}' // Bopomofo
+        | '\u{3200}'..='\u{32FF}' // Enclosed CJK
+        | '\u{3400}'..='\u{4DBF}' // Ext A
+        | '\u{4E00}'..='\u{9FFF}' // Unified ideographs
+        | '\u{AC00}'..='\u{D7AF}' // Hangul syllables
+        | '\u{F900}'..='\u{FAFF}' // Compatibility ideographs
+        | '\u{FE30}'..='\u{FE4F}' // Compatibility forms
+        | '\u{FF00}'..='\u{FFEF}' // Fullwidth ASCII/punct
+        | '\u{20000}'..='\u{2FA1F}') // Ext B–F + compat supplement
 }
 
 fn is_word_char(ch: char) -> bool {
@@ -280,6 +290,15 @@ fn is_closing_punct(ch: char) -> bool {
             | '》'
             | '」'
             | '』'
+            | '〉'
+            | '〕'
+            | '】'
+            | '’'
+            | '”'
+            | '…'
+            | '—'
+            | '～'
+            | '→'
             | '·'
             | ','
             | '.'
@@ -290,6 +309,7 @@ fn is_closing_punct(ch: char) -> bool {
             | ')'
             | ']'
             | '}'
+            | '>'
             | '%'
             | '‰'
             | '°'
@@ -300,7 +320,55 @@ fn is_closing_punct(ch: char) -> bool {
 fn is_opening_punct(ch: char) -> bool {
     matches!(
         ch,
-        '（' | '《' | '「' | '『' | '〈' | '(' | '[' | '{' | '<' | '“' | '‘' | '￥' | '$'
+        '（' | '《'
+            | '「'
+            | '『'
+            | '〈'
+            | '〔'
+            | '【'
+            | '('
+            | '['
+            | '{'
+            | '<'
+            | '“'
+            | '‘'
+            | '￥'
+            | '$'
+            | '—'
+    )
+}
+
+/// ASCII / path punctuation after which a line break is preferred over a
+/// mid-word split: `tool-registry.ts:34` prefers `tool-` + `registry…`,
+/// `a/b` prefers `a/` + `b`, `snake_case` prefers `snake_` + `case`.
+/// Only consulted after the open/close guards above, so `)` / `.` never
+/// start a line when a cleaner break exists; the overlong fallback still
+/// force-splits when nothing fits.
+fn is_break_after_punct(ch: char) -> bool {
+    matches!(
+        ch,
+        '-' | '/'
+            | '_'
+            | '.'
+            | ':'
+            | ';'
+            | ','
+            | '?'
+            | '!'
+            | '='
+            | '+'
+            | '*'
+            | '|'
+            | '&'
+            | '@'
+            | '#'
+            | '%'
+            | '~'
+            | '\\'
+            | '—'
+            | '…'
+            | '→'
+            | '·'
     )
 }
 
@@ -431,13 +499,26 @@ fn breakable_before(text: &str, at: usize) -> bool {
     let next = text[at..].chars().next();
     match (prev, next) {
         (Some(p), Some(n)) => {
+            // Break after whitespace (space stays at end of previous line).
             if p.is_whitespace() {
                 return true;
+            }
+            // Never start a line with whitespace itself.
+            if n.is_whitespace() {
+                return false;
             }
             if is_closing_punct(n) || is_opening_punct(p) {
                 return false;
             }
-            is_cjk(p) || is_cjk(n)
+            if is_cjk(p) || is_cjk(n) {
+                return true;
+            }
+            // Prefer breaking after path/code punctuation over mid-word
+            // splits: `tool-` + `registry`, `a/` + `b`, `snake_` + `case`.
+            if is_break_after_punct(p) {
+                return true;
+            }
+            false
         }
         _ => false,
     }
@@ -477,11 +558,22 @@ fn wrap_ranges(line: &ShapedLine, text: &str, width: Pixels) -> Vec<(usize, usiz
                 hi = mid - 1;
             }
         }
-        // Snap back to a break opportunity; force-split when hopeless
-        // (overlong token) to guarantee progress.
-        let mut bi = best.max(si + 1);
+        // Snap back to a break opportunity. When the fitted range holds
+        // no preferred break (overlong ASCII token like
+        // `(tool-registry.ts:34)` or `toolRegistry.resolveForStep()`),
+        // force-split at the largest fitting boundary (`best`) — never
+        // collapse to a single grapheme, which rendered as the vertical
+        // one-char-per-line column. Only when nothing fits at all
+        // (`best == si`) do we emit one grapheme to guarantee progress.
+        let fitted = best.max(si + 1);
+        let mut bi = fitted;
         while bi > si + 1 && !breakable_before(text, bounds[bi]) {
             bi -= 1;
+        }
+        // No preferred break inside the fitted range: fall back to the
+        // full-width split instead of a single char.
+        if bi == si + 1 && !breakable_before(text, bounds[bi]) {
+            bi = fitted;
         }
         let end = bounds[bi];
         out.push((start, end));
@@ -631,9 +723,10 @@ impl Element for SelectableText {
             .get(self.block.as_ref())
             .cloned();
         let width_close = |a: Pixels, b: Pixels| a > b - px(1.) && a < b + px(1.);
-        let fragments = if let Some(entry) = cached.as_ref().filter(|entry| {
-            entry.text_hash == hash && width_close(entry.width, bounds.size.width)
-        }) {
+        let fragments = if let Some(entry) = cached
+            .as_ref()
+            .filter(|entry| entry.text_hash == hash && width_close(entry.width, bounds.size.width))
+        {
             entry.fragments.clone()
         } else {
             let fragments = self.layout_fragments(window, wrap_width);
@@ -701,11 +794,7 @@ impl Element for SelectableText {
         let range_opt = {
             let view = self.view.read(cx);
             view.timeline_text_selection.as_ref().and_then(|sel| {
-                selection_range_for_block(
-                    sel,
-                    self.block.as_ref(),
-                    &view.timeline_text_layouts,
-                )
+                selection_range_for_block(sel, self.block.as_ref(), &view.timeline_text_layouts)
             })
         };
         let selection = range_opt.filter(|r| !r.is_empty());
@@ -816,13 +905,12 @@ impl WorkspaceView {
         // markers) or over another block. Fall back to the nearest block by
         // visual distance so crossing paragraphs/list items/tables keeps
         // extending the selection instead of stalling at the origin block.
-        let focus_block =
-            match find_block_at(&self.timeline_text_layouts, pos).or_else(|| {
-                find_nearest_block(&self.timeline_text_layouts, pos)
-            }) {
-                Some(block) => block,
-                None => return,
-            };
+        let focus_block = match find_block_at(&self.timeline_text_layouts, pos)
+            .or_else(|| find_nearest_block(&self.timeline_text_layouts, pos))
+        {
+            Some(block) => block,
+            None => return,
+        };
         let layout = match self.timeline_text_layouts.get(&focus_block) {
             Some(layout) => layout.clone(),
             None => return,
@@ -1075,7 +1163,11 @@ pub fn collect_selection_text(
         let Some(layout) = layouts.get(&selection.anchor_block) else {
             return String::new();
         };
-        let range = normalize_range(&layout.text, selection.anchor_offset, selection.focus_offset);
+        let range = normalize_range(
+            &layout.text,
+            selection.anchor_offset,
+            selection.focus_offset,
+        );
         if range.is_empty() {
             return String::new();
         }
@@ -1114,9 +1206,7 @@ pub fn collect_selection_text(
     // Visual order of every laid-out block.
     let mut ordered: Vec<(&String, &TextBlockLayout)> = layouts.iter().collect();
     ordered.sort_by(|a, b| cmp_pos(layout_pos(a.1), layout_pos(b.1)));
-    let start_idx = ordered
-        .iter()
-        .position(|(k, _)| *k == start_block);
+    let start_idx = ordered.iter().position(|(k, _)| *k == start_block);
     let end_idx = ordered.iter().position(|(k, _)| *k == end_block);
     let (Some(start_idx), Some(end_idx)) = (start_idx, end_idx) else {
         return String::new();
@@ -1160,7 +1250,9 @@ pub fn collect_selection_text(
         // Separator: same visual row → tab (table cells), else newline.
         if !parts.is_empty() {
             let same_row = match (prev_y, prev_h) {
-                (Some(py), Some(ph)) => (y - py).abs() < (ph.max(block_height(layout)) * 0.5).max(1.0),
+                (Some(py), Some(ph)) => {
+                    (y - py).abs() < (ph.max(block_height(layout)) * 0.5).max(1.0)
+                }
                 _ => false,
             };
             out.push_str(if same_row { "\t" } else { "\n" });
@@ -1244,7 +1336,8 @@ mod tests {
     // NOTE: never `use super::*` here — the parent's `use gpui::*` would pull
     // gpui's `test` module into scope and break `#[test]` resolution.
     use super::{
-        collect_selection_text, normalize_range, selection_range_for_block, snap_to_grapheme,
+        breakable_before, collect_selection_text, is_break_after_punct, is_cjk, is_closing_punct,
+        is_opening_punct, normalize_range, selection_range_for_block, snap_to_grapheme,
         word_bounds_at, TextBlockLayout, TimelineTextSelection,
     };
 
@@ -1384,5 +1477,47 @@ mod tests {
             collect_selection_text(&sel, &layouts),
             "第二行内容".get(3..6).unwrap()
         );
+    }
+
+    #[test]
+    fn breakable_prefers_punct_over_mid_word() {
+        // `tool-registry.ts:34` must break after `-` / `.` / `:` instead of
+        // mid-word — screenshot case `(tool-registry.ts:34).` went vertical
+        // because no break was found and the fallback emitted 1 char/line.
+        let text = "(tool-registry.ts:34).";
+        // After `-`: yes.
+        let dash = text.find('-').unwrap() + 1;
+        assert!(breakable_before(text, dash));
+        assert!(is_break_after_punct('-'));
+        // Before `)` / `.`: no (closing must not start a line).
+        let close = text.find(')').unwrap();
+        assert!(!breakable_before(text, close));
+        assert!(is_closing_punct(')'));
+        assert!(is_closing_punct('.'));
+        assert!(is_opening_punct('('));
+        // `snake_case` / `a/b` break after `_` / `/`.
+        assert!(breakable_before("a_b", 2));
+        assert!(breakable_before("a/b", 2));
+    }
+
+    #[test]
+    fn breakable_covers_cjk_punct_and_symbols() {
+        // “” ‘’ … — → ❌ must participate in CJK breaking, not stick as
+        // unbreakable ASCII islands.
+        for ch in ['“', '”', '‘', '’', '…', '—', '→', '❌', '、', '。'] {
+            assert!(is_cjk(ch), "expected CJK breakable: {ch}");
+        }
+        // Closing must not start a line; opening must not end one.
+        assert!(is_closing_punct('”'));
+        assert!(is_closing_punct('’'));
+        assert!(is_closing_punct('…'));
+        assert!(is_closing_punct('—'));
+        assert!(is_closing_punct('→'));
+        assert!(is_opening_punct('“'));
+        assert!(is_opening_punct('‘'));
+        // `过滤 → LLM`: break before `L` (after space), not before the space.
+        let text = "过滤 → LLM";
+        let l = text.find('L').unwrap();
+        assert!(breakable_before(text, l));
     }
 }

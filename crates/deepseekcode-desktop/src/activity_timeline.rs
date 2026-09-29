@@ -213,7 +213,7 @@ fn truncate_preview(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         text.to_string()
     } else {
-        format!("{}…?", text.chars().take(max).collect::<String>())
+        format!("{}…", text.chars().take(max).collect::<String>())
     }
 }
 

@@ -12,12 +12,22 @@ impl DetailInspector {
         let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
         match detail {
             None => div()
+                .id("detail-inspector-empty")
                 .p_3()
                 .text_sm()
                 .text_color(theme.text_muted)
                 .child("Select an activity row to inspect details."),
             Some(d) => {
-                let mut body = div().flex().flex_col().gap_2().p_3().overflow_hidden();
+                // 详情面板允许纵向滚动：长 Output/JSON 不再被 `overflow_hidden`
+                // 静默截断（曾表现为输出缺字）。
+                // NOTE: GPUI 的 scroll 方法挂在 `Stateful<Div>` 上，必须先 `.id()`。
+                let mut body = div()
+                    .id("detail-inspector-body")
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .overflow_y_scroll();
                 if let Some(title) = &d.title {
                     body = body.child(
                         div()
@@ -67,11 +77,12 @@ impl DetailInspector {
                             .child(section_label("Web preview", &theme))
                             .child(
                                 div()
+                                    .id("detail-web-preview")
                                     .p_2()
                                     .rounded_md()
                                     .bg(theme.bg_base)
                                     .max_h(px(200.))
-                                    .overflow_hidden()
+                                    .overflow_y_scroll()
                                     .child(render_markdown(
                                         preview,
                                         &theme,
@@ -122,6 +133,12 @@ fn section_label(label: &str, theme: &crate::theme::ThemeTokens) -> impl IntoEle
 }
 
 fn section(label: &str, text: &str, theme: &crate::theme::ThemeTokens) -> impl IntoElement {
+    use crate::ui::multiline_text::render_multiline;
+    let mono = crate::theme::font_mono(theme);
+    let fg = theme.text_primary;
+    // NOTE: scroll 需要 `.id()`（GPUI `Stateful<Div>`），用 label 区分
+    // Input/Output/Todos 区块（同时仅展示一个详情面板，不会碰撞）。
+    let scroll_id = ElementId::Name(format!("detail-section-{label}").into());
     div()
         .flex()
         .flex_col()
@@ -129,12 +146,15 @@ fn section(label: &str, text: &str, theme: &crate::theme::ThemeTokens) -> impl I
         .child(section_label(label, theme))
         .child(
             div()
+                .id(scroll_id)
                 .p_2()
                 .rounded_md()
                 .bg(theme.bg_base)
-                .text_xs()
-                .font_family(crate::theme::font_mono(theme))
-                .text_color(theme.text_primary)
-                .child(text.to_string()),
+                .max_h(px(320.))
+                .overflow_y_scroll()
+                .overflow_x_scroll()
+                .child(render_multiline(text, move |d| {
+                    d.text_xs().font_family(mono.clone()).text_color(fg)
+                })),
         )
 }

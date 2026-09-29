@@ -407,7 +407,10 @@ impl ParseContext {
                 if let Some(capture) = self.image_stack.last_mut() {
                     capture.alt.push(' ');
                 } else {
-                    self.push_text(" ");
+                    // 聊天输出惯例：单个换行即分行。Markdown 语义是空格，
+                    // 但 LLM 中文输出常用单 `\n` 分段；若按空格合并，
+                    // 长段落挤成一大段，既难读又放大换行压力。
+                    self.push_text("\n");
                 }
             }
             Event::HardBreak => {
@@ -906,7 +909,9 @@ impl<'a> BlockRenderer<'a> {
             };
             let mut cell_el = div()
                 .flex_1()
-                .min_w(px(0.))
+                // 窄列保底 80px：多列表格触发外层横向滚动，而不是把每列
+                // 挤到几 px 后触发强制断行（曾表现为竖排单字）。
+                .min_w(px(80.))
                 .px_2()
                 .py_1()
                 .cursor(CursorStyle::IBeam);
@@ -1300,5 +1305,30 @@ mod tests {
         assert_eq!(runs[0].link.as_deref(), Some("https://x.test"));
         assert!(runs[1].background.is_some());
         assert!(!runs[1].underline);
+    }
+
+    #[test]
+    fn soft_break_keeps_line_break_for_chat_output() {
+        // 中文 LLM 常用单 `\n` 分段；按 Markdown 空格合并会挤成一大段。
+        let blocks = parse("第一行\n第二行\n");
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ParsedBlock::Paragraph(runs) => {
+                let text: String = runs.iter().map(|r| r.text.as_str()).collect();
+                assert!(text.contains('\n'), "soft break lost: {text:?}");
+            }
+            other => panic!("expected paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn soft_break_lines_split_for_render() {
+        let runs = vec![InlineRun {
+            styles: vec![InlineStyle::Normal],
+            text: "a\nb".into(),
+            url: None,
+        }];
+        let lines = split_runs_on_newlines(runs);
+        assert_eq!(lines.len(), 2);
     }
 }
