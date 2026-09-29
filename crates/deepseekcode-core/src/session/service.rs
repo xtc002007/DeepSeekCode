@@ -83,7 +83,10 @@ impl SessionService {
     }
 
     pub async fn refresh_mcp_tools(&self) {
-        self.execution.refresh_mcp_tools_for_all_runners().await;
+        let config = self.config.clone();
+        self.execution
+            .refresh_mcp_tools_for_all_runners(&config)
+            .await;
     }
 
     pub async fn reload_materialization(&self) {
@@ -135,6 +138,7 @@ impl SessionService {
 
         tracing::info!(
             target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             session_id = %session.id,
             directory = %directory,
             "session created"
@@ -144,6 +148,17 @@ impl SessionService {
     }
 
     pub async fn prompt(&self, req: PromptRequest) -> Result<MessageId> {
+        tracing::info!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %req.session_id,
+            delivery = ?req.delivery,
+            prompt = %deepseekcode_telemetry::summarize_prompt(
+                &req.prompt,
+                self.config.logging.audit.include_prompts
+            ),
+            "session prompt received"
+        );
         self.ensure_session_in_location(req.session_id).await?;
         let message_id = req.id.unwrap_or_default();
         let delivery_str = match req.delivery {
@@ -276,6 +291,7 @@ impl SessionService {
 
         tracing::info!(
             target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             session_id = %req.session_id,
             message_id = %message_id,
             prompt = %deepseekcode_telemetry::summarize_prompt(
@@ -289,6 +305,12 @@ impl SessionService {
     }
 
     pub async fn interrupt(&self, session_id: SessionId) -> Result<()> {
+        tracing::info!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            "session interrupt requested"
+        );
         // Spec: idle or missing session is a no-op (no event, no error).
         // Missing session or session in another project -> no-op.
         let session = match self.ensure_session_in_location(session_id).await {
@@ -315,6 +337,12 @@ impl SessionService {
         self.events
             .append(EventKind::SessionInterrupted, Some(session_id), json!({}))
             .await?;
+        tracing::info!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            "session interrupt completed"
+        );
         Ok(())
     }
 
@@ -828,7 +856,23 @@ impl SessionService {
     }
 
     async fn wake(&self, session_id: SessionId) -> Result<()> {
-        self.execution.wake(session_id).await
+        tracing::info!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            "session wake requested"
+        );
+        let r = self.execution.wake(session_id).await;
+        if let Err(e) = &r {
+            tracing::error!(
+                target: deepseekcode_telemetry::SESSION,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %session_id,
+                error = %e,
+                "session wake failed"
+            );
+        }
+        r
     }
 }
 

@@ -7,7 +7,7 @@ use axum::{
     http::HeaderMap,
     response::{
         sse::{Event, KeepAlive, Sse},
-        IntoResponse, Json,
+        IntoResponse, Json, Response,
     },
     routing::{delete, get, post, put},
     Router,
@@ -126,9 +126,37 @@ fn parse_permission_id(
     })
 }
 
-fn service_error_response(
+/// Error context stashed on the failure `Response` so the `request_id`
+/// middleware emits the single canonical log for the request (status +
+/// latency + code + error + session). Handlers never log failures
+/// themselves: one request → one failure log, joined by `request_id`.
+#[derive(Debug, Clone)]
+pub(crate) struct ApiErrorDetail {
+    pub code: &'static str,
+    /// Full server-side error for logs (may include storage internals that
+    /// never leave the host). The client body stays sanitized separately.
+    pub error: String,
+    /// `"-"` when the handler has no session context.
+    pub session_id: String,
+}
+
+fn service_error_response(e: deepseekcode_types::DeepSeekCodeError) -> Response {
+    service_error_inner(e, None)
+}
+
+/// Session-aware variant: key session handlers pass the path `id` so failures
+/// carry `session_id` context. Success paths log separately at the call site.
+fn service_error_with_session(
     e: deepseekcode_types::DeepSeekCodeError,
-) -> (StatusCode, Json<serde_json::Value>) {
+    session_id: &str,
+) -> Response {
+    service_error_inner(e, Some(session_id))
+}
+
+fn service_error_inner(
+    e: deepseekcode_types::DeepSeekCodeError,
+    session_id: Option<&str>,
+) -> Response {
     use deepseekcode_types::DeepSeekCodeError as E;
     let status = match &e {
         E::NotFound(_) => StatusCode::NOT_FOUND,
@@ -184,10 +212,27 @@ fn service_error_response(
         E::Storage(_) => "storage_error",
         _ => "internal",
     };
-    (
+    // No `tracing!` here by design: the failure context travels on the
+    // response extension and the `request_id` middleware emits the single
+    // canonical log (with latency + method + path it alone knows).
+    // `session_id` is "-" for non-session routes.
+    let full = e.to_string();
+    let error = if full.len() > 2000 {
+        full[..2000].to_string()
+    } else {
+        full
+    };
+    let mut resp = (
         status,
         Json(serde_json::json!({ "error": message, "code": code })),
     )
+        .into_response();
+    resp.extensions_mut().insert(ApiErrorDetail {
+        code,
+        error,
+        session_id: session_id.unwrap_or("-").to_string(),
+    });
+    resp
 }
 
 macro_rules! parse_session_path {
@@ -611,7 +656,15 @@ pub(crate) async fn create_session(
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
     match location.session_service.create(req).await {
-        Ok(session) => (StatusCode::OK, Json(serde_json::json!(session))).into_response(),
+        Ok(session) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %session.id,
+                "session created"
+            );
+            (StatusCode::OK, Json(serde_json::json!(session))).into_response()
+        }
         Err(e) => service_error_response(e).into_response(),
     }
 }
@@ -644,12 +697,21 @@ pub(crate) async fn prompt(
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
     match location.session_service.prompt(req).await {
-        Ok(message_id) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "message_id": message_id.to_string() })),
-        )
-            .into_response(),
-        Err(e) => service_error_response(e).into_response(),
+        Ok(message_id) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %id,
+                message_id = %message_id,
+                "prompt admitted"
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "message_id": message_id.to_string() })),
+            )
+                .into_response()
+        }
+        Err(e) => service_error_with_session(e, &id).into_response(),
     }
 }
 
@@ -670,8 +732,16 @@ pub(crate) async fn interrupt(
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
     match location.session_service.interrupt(session_id).await {
-        Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => service_error_response(e).into_response(),
+        Ok(()) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %id,
+                "session interrupted"
+            );
+            StatusCode::OK.into_response()
+        }
+        Err(e) => service_error_with_session(e, &id).into_response(),
     }
 }
 
@@ -720,8 +790,16 @@ pub(crate) async fn move_session(
         .move_session(session_id, req.directory)
         .await
     {
-        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => service_error_response(e).into_response(),
+        Ok(()) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %id,
+                "session moved"
+            );
+            Json(serde_json::json!({ "ok": true })).into_response()
+        }
+        Err(e) => service_error_with_session(e, &id).into_response(),
     }
 }
 
@@ -1124,8 +1202,17 @@ pub(crate) async fn compact_session(
     // carries the real baseline/messages/tools lineage (never a hollow
     // context that would poison the next auto pass).
     match location.session_service.compact_manual(session_id).await {
-        Ok(installed) => Json(serde_json::json!({ "ok": installed })).into_response(),
-        Err(e) => service_error_response(e).into_response(),
+        Ok(installed) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %id,
+                installed = installed,
+                "session compacted"
+            );
+            Json(serde_json::json!({ "ok": installed })).into_response()
+        }
+        Err(e) => service_error_with_session(e, &id).into_response(),
     }
 }
 
@@ -1978,6 +2065,7 @@ pub(crate) async fn fs_write(
         Ok(()) => {
             tracing::info!(
                 target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
                 path = %body.path,
                 session_id = %session_id,
                 "fs_write via api"
@@ -2303,7 +2391,7 @@ pub(crate) async fn get_session(
         .await
     {
         Ok(session) => Json(session).into_response(),
-        Err(e) => service_error_response(e).into_response(),
+        Err(e) => service_error_with_session(e, &id).into_response(),
     }
 }
 
@@ -2330,8 +2418,16 @@ pub(crate) async fn update_session(
         .update_session(session_id, req.title)
         .await
     {
-        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => service_error_response(e).into_response(),
+        Ok(()) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %id,
+                "session updated"
+            );
+            Json(serde_json::json!({ "ok": true })).into_response()
+        }
+        Err(e) => service_error_with_session(e, &id).into_response(),
     }
 }
 
@@ -2352,8 +2448,16 @@ pub(crate) async fn delete_session(
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
     match location.session_service.delete(session_id).await {
-        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => service_error_response(e).into_response(),
+        Ok(()) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %id,
+                "session deleted"
+            );
+            Json(serde_json::json!({ "ok": true })).into_response()
+        }
+        Err(e) => service_error_with_session(e, &id).into_response(),
     }
 }
 
@@ -2399,8 +2503,16 @@ pub(crate) async fn update_session_model(
         .update_model(session_id, agent, req.model_id, req.provider_id)
         .await
     {
-        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => service_error_response(e).into_response(),
+        Ok(()) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %id,
+                "session model updated"
+            );
+            Json(serde_json::json!({ "ok": true })).into_response()
+        }
+        Err(e) => service_error_with_session(e, &id).into_response(),
     }
 }
 
@@ -2428,8 +2540,17 @@ pub(crate) async fn fork_session(
         .fork(session_id, until_message_id)
         .await
     {
-        Ok(new_session) => Json(serde_json::json!(new_session)).into_response(),
-        Err(e) => service_error_response(e).into_response(),
+        Ok(new_session) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %id,
+                new_session_id = %new_session.id,
+                "session forked"
+            );
+            Json(serde_json::json!(new_session)).into_response()
+        }
+        Err(e) => service_error_with_session(e, &id).into_response(),
     }
 }
 
@@ -2452,7 +2573,7 @@ pub(crate) async fn revert_get_staged(
     match location.session_service.revert_get_staged(session_id).await {
         Ok(Some(revert)) => Json(serde_json::json!(revert)).into_response(),
         Ok(None) => Json(serde_json::Value::Null).into_response(),
-        Err(e) => service_error_response(e).into_response(),
+        Err(e) => service_error_with_session(e, &id).into_response(),
     }
 }
 
@@ -2479,8 +2600,17 @@ pub(crate) async fn revert_stage(
         .revert_stage(session_id, req.message_id)
         .await
     {
-        Ok(revert) => Json(serde_json::json!(revert)).into_response(),
-        Err(e) => service_error_response(e).into_response(),
+        Ok(revert) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %id,
+                message_id = %req.message_id,
+                "revert staged"
+            );
+            Json(serde_json::json!(revert)).into_response()
+        }
+        Err(e) => service_error_with_session(e, &id).into_response(),
     }
 }
 
@@ -2501,8 +2631,16 @@ pub(crate) async fn revert_clear(
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
     match location.session_service.revert_clear(session_id).await {
-        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => service_error_response(e).into_response(),
+        Ok(()) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %id,
+                "revert cleared"
+            );
+            Json(serde_json::json!({ "ok": true })).into_response()
+        }
+        Err(e) => service_error_with_session(e, &id).into_response(),
     }
 }
 
@@ -2523,8 +2661,16 @@ pub(crate) async fn revert_commit(
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
     match location.session_service.revert_commit(session_id).await {
-        Ok(revert) => Json(serde_json::json!(revert)).into_response(),
-        Err(e) => service_error_response(e).into_response(),
+        Ok(revert) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %id,
+                "revert committed"
+            );
+            Json(serde_json::json!(revert)).into_response()
+        }
+        Err(e) => service_error_with_session(e, &id).into_response(),
     }
 }
 
@@ -2563,15 +2709,24 @@ pub(crate) async fn export_session(
         .export_session(session_id, query.sanitize)
         .await
     {
-        Ok(export) => Json(export).into_response(),
+        Ok(export) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %id,
+                "session exported"
+            );
+            Json(export).into_response()
+        }
         Err(e) => {
             tracing::error!(
                 target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
                 error = %e,
                 session_id = %id,
                 "export session failed"
             );
-            service_error_response(e).into_response()
+            service_error_with_session(e, &id).into_response()
         }
     }
 }

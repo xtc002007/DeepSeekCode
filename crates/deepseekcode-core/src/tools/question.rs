@@ -41,6 +41,14 @@ impl Tool for QuestionTool {
         input: Value,
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "question",
+            question_len = input["question"].as_str().map(|s| s.len()).unwrap_or(0),
+            "question started"
+        );
         let question = input["question"].as_str().unwrap_or("").to_string();
         let allow_custom = input
             .get("allow_custom")

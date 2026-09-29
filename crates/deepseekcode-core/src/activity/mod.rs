@@ -18,12 +18,29 @@ pub async fn emit_activity_updated(
     session_id: SessionId,
     since_seq: i64,
 ) -> Result<()> {
-    events
+    tracing::debug!(
+        target: deepseekcode_telemetry::SESSION,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        session_id = %session_id,
+        since_seq = since_seq,
+        "emit_activity_updated started"
+    );
+    let r = events
         .append(
             EventKind::ActivityUpdated,
             Some(session_id),
             json!({ "since_seq": since_seq }),
         )
-        .await?;
+        .await;
+    if let Err(e) = &r {
+        tracing::error!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            error = %e,
+            "emit_activity_updated failed"
+        );
+    }
+    r?;
     Ok(())
 }

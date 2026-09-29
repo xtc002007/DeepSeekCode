@@ -41,6 +41,7 @@ impl EventStore {
         .map_err(|e| {
             tracing::error!(
                 target: deepseekcode_telemetry::STORAGE,
+                run_id = %deepseekcode_telemetry::current_run_id(),
                 error = %e,
                 kind = ?kind,
                 "event append failed"
@@ -59,6 +60,7 @@ impl EventStore {
         if self.tx.send(envelope.clone()).is_err() {
             tracing::debug!(
                 target: deepseekcode_telemetry::STORAGE,
+                run_id = %deepseekcode_telemetry::current_run_id(),
                 seq,
                 "event broadcast had no active receivers"
             );

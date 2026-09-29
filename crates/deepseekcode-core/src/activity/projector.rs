@@ -49,6 +49,13 @@ impl ActivityProjector {
     }
 
     pub fn project(events: &[EventEnvelope], messages: &[Message]) -> ActivityTree {
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            events = events.len(),
+            messages = messages.len(),
+            "activity project started"
+        );
         Self::project_with_children(events, messages, &HashMap::new())
     }
 
@@ -57,6 +64,14 @@ impl ActivityProjector {
         messages: &[Message],
         children: &HashMap<String, ChildSessionProjection>,
     ) -> ActivityTree {
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            events = events.len(),
+            messages = messages.len(),
+            children = children.len(),
+            "activity project_with_children started"
+        );
         let user_messages: HashMap<String, Message> = messages
             .iter()
             .filter(|m| m.role == MessageRole::User)

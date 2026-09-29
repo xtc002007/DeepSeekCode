@@ -18,6 +18,13 @@ fn session_child_pids() -> &'static Mutex<HashMap<SessionId, Vec<u32>>> {
 
 /// Track a spawned subprocess PID so it can be killed when the session is interrupted.
 pub fn register_session_child_pid(session_id: SessionId, pid: u32) {
+    tracing::debug!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        session_id = %session_id,
+        pid = pid,
+        "session child pid registered"
+    );
     session_child_pids()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -28,6 +35,13 @@ pub fn register_session_child_pid(session_id: SessionId, pid: u32) {
 
 /// Remove a finished subprocess PID from the session registry.
 pub fn unregister_session_child_pid(session_id: SessionId, pid: u32) {
+    tracing::debug!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        session_id = %session_id,
+        pid = pid,
+        "session child pid unregistered"
+    );
     let mut guard = session_child_pids()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -79,20 +93,40 @@ impl Drop for SessionChildPidGuard {
 
 /// Kill all tracked subprocesses for a session.
 pub async fn kill_session_children(session_id: SessionId) {
+    tracing::info!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        session_id = %session_id,
+        "kill_session_children started"
+    );
     let pids = session_child_pids()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .remove(&session_id)
         .unwrap_or_default();
     if pids.is_empty() {
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            "kill_session_children: no children"
+        );
         return;
     }
+    let count = pids.len();
     let _ = tokio::task::spawn_blocking(move || {
         for pid in pids {
             kill_pid(pid);
         }
     })
     .await;
+    tracing::info!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        session_id = %session_id,
+        count = count,
+        "kill_session_children completed"
+    );
 }
 
 fn kill_pid(pid: u32) {

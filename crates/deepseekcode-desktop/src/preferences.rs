@@ -161,8 +161,10 @@ pub fn save_preferences(prefs: &AppPreferences) {
     if keyring_enabled() {
         store_server_password(prefs.server_password.as_deref());
     } else if let Some(pass) = &prefs.server_password {
+        // Never log the password value itself: only the fact + run_id.
         tracing::warn!(
             target: deepseekcode_telemetry::DESKTOP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             "DEEPSEEKCODE_DISABLE_KEYRING set; storing server password in preferences.json"
         );
         file.server_password = Some(pass.clone());
@@ -204,6 +206,7 @@ fn load_server_password() -> Option<String> {
         Err(e) => {
             tracing::warn!(
                 target: deepseekcode_telemetry::DESKTOP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
                 error = %e,
                 "failed to read server password from keyring"
             );
@@ -233,6 +236,7 @@ fn store_server_password(password: Option<&str>) {
             if let Err(e) = entry.set_password(value) {
                 tracing::warn!(
                     target: deepseekcode_telemetry::DESKTOP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                     error = %e,
                     "failed to store server password in keyring"
                 );

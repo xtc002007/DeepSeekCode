@@ -19,6 +19,12 @@ impl ContextEpochStore {
     }
 
     pub async fn get(&self, session_id: SessionId) -> Result<Option<ContextEpoch>> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            "context epoch get started"
+        );
         let row = sqlx::query_as::<_, EpochRow>(
             r#"SELECT baseline, snapshot, baseline_seq FROM context_epochs WHERE session_id = ?"#,
         )
@@ -41,6 +47,14 @@ impl ContextEpochStore {
         generation: &Generation,
         baseline_seq: i64,
     ) -> Result<()> {
+        tracing::info!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            baseline_seq = baseline_seq,
+            baseline_len = generation.baseline.len(),
+            "context epoch initialize started"
+        );
         sqlx::query(
             r#"INSERT OR REPLACE INTO context_epochs (session_id, baseline, snapshot, baseline_seq, created_at) VALUES (?, ?, ?, ?, ?)"#,
         )
@@ -56,6 +70,13 @@ impl ContextEpochStore {
     }
 
     pub async fn update_snapshot(&self, session_id: SessionId, snapshot: &Snapshot) -> Result<()> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            keys = snapshot.len(),
+            "context epoch update_snapshot started"
+        );
         sqlx::query(r#"UPDATE context_epochs SET snapshot = ? WHERE session_id = ?"#)
             .bind(serde_json::to_string(snapshot)?)
             .bind(session_id.to_string())
@@ -71,6 +92,13 @@ impl ContextEpochStore {
         generation: &Generation,
         baseline_seq: i64,
     ) -> Result<()> {
+        tracing::info!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            baseline_seq = baseline_seq,
+            "context epoch replace_baseline started"
+        );
         self.initialize(session_id, generation, baseline_seq).await
     }
 
@@ -86,6 +114,12 @@ impl ContextEpochStore {
     }
 
     pub async fn clear(&self, session_id: SessionId) -> Result<()> {
+        tracing::info!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            "context epoch clear started"
+        );
         sqlx::query(r#"DELETE FROM context_epochs WHERE session_id = ?"#)
             .bind(session_id.to_string())
             .execute(&self.pool)

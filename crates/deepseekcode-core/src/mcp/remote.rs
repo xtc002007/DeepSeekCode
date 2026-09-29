@@ -27,6 +27,12 @@ impl RemoteMcpClient {
     }
 
     pub async fn initialize(&self) -> Result<()> {
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            url = %self.url,
+            "remote mcp initialize started"
+        );
         let params = json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {},
@@ -44,11 +50,32 @@ impl RemoteMcpClient {
             .json(&notification)
             .send()
             .await
-            .map_err(|e| DeepSeekCodeError::Other(format!("mcp initialized notify failed: {e}")))?;
+            .map_err(|e| {
+                tracing::error!(
+                    target: deepseekcode_telemetry::TOOL,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    url = %self.url,
+                    error = %e,
+                    "remote mcp initialize failed: notify"
+                );
+                DeepSeekCodeError::Other(format!("mcp initialized notify failed: {e}"))
+            })?;
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            url = %self.url,
+            "remote mcp initialize completed"
+        );
         Ok(())
     }
 
     pub async fn list_tools(&self) -> Result<Vec<McpToolInfo>> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            url = %self.url,
+            "remote mcp list_tools started"
+        );
         let result = self
             .request("tools/list", Value::Object(Default::default()))
             .await?;
@@ -81,6 +108,13 @@ impl RemoteMcpClient {
     }
 
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value> {
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            url = %self.url,
+            tool = %name,
+            "remote mcp call_tool started"
+        );
         let params = json!({
             "name": name,
             "arguments": arguments,

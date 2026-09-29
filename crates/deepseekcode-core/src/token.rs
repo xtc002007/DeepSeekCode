@@ -55,6 +55,14 @@ fn calibration_store() -> &'static Mutex<HashMap<String, PromptCalibration>> {
 /// billed `prompt_tokens` and the exact chars sent — never an estimate.
 /// Keyed by model id: different tokenizers must not contaminate each other.
 pub fn set_calibration_from_usage(model: &str, request_chars: u64, prompt_tokens: u32) {
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        model = %model,
+        request_chars = request_chars,
+        prompt_tokens = prompt_tokens,
+        "token calibration recorded"
+    );
     if request_chars == 0 || prompt_tokens == 0 {
         return;
     }
@@ -113,6 +121,13 @@ pub fn estimate_llm_request(
     tools_json: &Value,
     model: Option<&str>,
 ) -> u32 {
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        model = ?model,
+        messages = messages.len(),
+        "estimate_llm_request started"
+    );
     if let Some(m) = model {
         let ratio = calibration_store()
             .lock()

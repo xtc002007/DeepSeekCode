@@ -36,6 +36,7 @@ impl CredentialsStore {
             if let Err(e) = try_keyring_store(provider_id, api_key) {
                 tracing::warn!(
                     target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                     provider_id = provider_id,
                     error = %e,
                     "keyring mirror failed; encrypted sqlite copy retained"
@@ -71,6 +72,7 @@ impl CredentialsStore {
                 Err(e) => {
                     tracing::warn!(
                         target: deepseekcode_telemetry::APP,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                         provider_id = provider_id,
                         error = %e,
                         "keyring read failed for legacy credential row"
@@ -88,6 +90,7 @@ impl CredentialsStore {
         if let Err(e) = try_keyring_delete(provider_id) {
             tracing::warn!(
                 target: deepseekcode_telemetry::APP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
                 provider_id = provider_id,
                 error = %e,
                 "keyring delete failed; sqlite row still removed"
@@ -119,6 +122,7 @@ impl CredentialsStore {
                 } else {
                     tracing::warn!(
                         target: deepseekcode_telemetry::APP,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                         provider_id = %provider_id,
                         "credential undecryptable; hiding from connected list"
                     );

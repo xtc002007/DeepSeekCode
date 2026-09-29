@@ -173,5 +173,12 @@ pub use deepseekcode_schema::api::{
 pub struct ApiDoc;
 
 pub fn spec() -> utoipa::openapi::OpenApi {
-    ApiDoc::openapi()
+    let spec = ApiDoc::openapi();
+    tracing::info!(
+        target: deepseekcode_telemetry::SERVER,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        paths = spec.paths.paths.len(),
+        "openapi spec generated"
+    );
+    spec
 }

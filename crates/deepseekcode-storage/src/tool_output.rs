@@ -49,12 +49,54 @@ impl ManagedToolOutput {
         output: &Value,
         limits: &ToolOutputLimits,
     ) -> Result<Value> {
+        let start = std::time::Instant::now();
+        tracing::debug!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = "tool_output.store",
+            session_id = %session_id,
+            tool = %tool_name,
+            "storage op start"
+        );
         let contextual = contextual_text(output);
         if line_count(&contextual) <= limits.max_lines && contextual.len() <= limits.max_bytes {
+            tracing::debug!(
+                target: deepseekcode_telemetry::STORAGE,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = "tool_output.store",
+                session_id = %session_id,
+                tool = %tool_name,
+                duration_ms = start.elapsed().as_millis() as u64,
+                bytes = contextual.len(),
+                "storage op ok (no truncation)"
+            );
             return Ok(output.clone());
         }
 
-        std::fs::create_dir_all(&self.base_dir).map_err(DeepSeekCodeError::Io)?;
+        tracing::warn!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = "tool_output.store",
+            session_id = %session_id,
+            tool = %tool_name,
+            bytes = contextual.len(),
+            lines = line_count(&contextual),
+            max_bytes = limits.max_bytes,
+            max_lines = limits.max_lines,
+            "tool output exceeds limits; truncating to file"
+        );
+        std::fs::create_dir_all(&self.base_dir).map_err(|e| {
+            tracing::error!(
+                target: deepseekcode_telemetry::STORAGE,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = "tool_output.store",
+                session_id = %session_id,
+                tool = %tool_name,
+                error = %e,
+                "tool output directory create failed"
+            );
+            DeepSeekCodeError::Io(e)
+        })?;
 
         fn sanitize_component(s: &str) -> String {
             s.chars()
@@ -82,8 +124,30 @@ impl ManagedToolOutput {
                 "invalid tool output path".into(),
             ));
         }
-        let serialized = serde_json::to_string_pretty(output).map_err(DeepSeekCodeError::Serde)?;
-        std::fs::write(&path, &serialized).map_err(DeepSeekCodeError::Io)?;
+        let serialized = serde_json::to_string_pretty(output).map_err(|e| {
+            tracing::error!(
+                target: deepseekcode_telemetry::STORAGE,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = "tool_output.store",
+                session_id = %session_id,
+                tool = %tool_name,
+                error = %e,
+                "tool output serialize failed"
+            );
+            DeepSeekCodeError::Serde(e)
+        })?;
+        std::fs::write(&path, &serialized).map_err(|e| {
+            tracing::error!(
+                target: deepseekcode_telemetry::STORAGE,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = "tool_output.store",
+                session_id = %session_id,
+                tool = %tool_name,
+                error = %e,
+                "tool output file write failed"
+            );
+            DeepSeekCodeError::Io(e)
+        })?;
 
         let marker = format!(
             "... output truncated; full content saved to {} ...",
@@ -91,6 +155,16 @@ impl ManagedToolOutput {
         );
         let preview = bounded_preview(&contextual, &marker, limits.max_lines, limits.max_bytes);
 
+        tracing::info!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = "tool_output.store",
+            session_id = %session_id,
+            tool = %tool_name,
+            duration_ms = start.elapsed().as_millis() as u64,
+            bytes = serialized.len(),
+            "storage op ok (truncated)"
+        );
         Ok(project_bounded_output(output, &preview, &path))
     }
 }

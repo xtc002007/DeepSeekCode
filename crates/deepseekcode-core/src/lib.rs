@@ -1,3 +1,9 @@
+//! Core domain engine. This crate root only declares modules + re-exports;
+//! product `tracing!` sites live in submodules (e.g. `session/service.rs`,
+//! `git/project.rs`, `mcp/pool.rs`, `policy/service.rs`,
+//! `system_context/registry.rs`), never at this `mod` surface.
+//! `git/mod.rs`, `mcp/mod.rs`, `policy/mod.rs`, `session/mod.rs`,
+//! `system_context/mod.rs` document their submodule log ownership inline.
 pub mod activity;
 pub mod agent;
 pub mod cache_status;

@@ -10,15 +10,36 @@ Describe this project so the AI assistant has context.\n\n\
 
 /// Create `AGENTS.md` when missing. Returns `true` if a new file was written.
 pub fn ensure_agents_md(project_dir: &str) -> bool {
+    tracing::debug!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        project_dir = %project_dir,
+        "ensure_agents_md started"
+    );
     let root = Path::new(project_dir);
     let agents = root.join("AGENTS.md");
     if agents.exists() {
         return false;
     }
     if !root.exists() && std::fs::create_dir_all(root).is_err() {
+        tracing::warn!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            project_dir = %project_dir,
+            "ensure_agents_md failed: cannot create root"
+        );
         return false;
     }
-    std::fs::write(&agents, AGENTS_MD_TEMPLATE).is_ok()
+    let created = std::fs::write(&agents, AGENTS_MD_TEMPLATE).is_ok();
+    if created {
+        tracing::info!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            project_dir = %project_dir,
+            "ensure_agents_md created AGENTS.md"
+        );
+    }
+    created
 }
 
 /// Whether `path` resolves inside `project_dir` (including the root itself).
@@ -257,8 +278,22 @@ pub fn validate_project_path(project_dir: &str, path: PathBuf) -> Result<PathBuf
     if path_within_project(project_dir, &path) {
         // If parent exists as a symlink to outside, canonical check above
         // already fails. Return the lexically-joined path for IO.
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            project_dir = %project_dir,
+            path = %path.display(),
+            "validate_project_path permitted"
+        );
         Ok(path)
     } else {
+        tracing::warn!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            project_dir = %project_dir,
+            path = %path.display(),
+            "validate_project_path blocked: outside project"
+        );
         Err(ToolFailure {
             message: format!(
                 "path outside project directory: `{}` is not under the project root `{}`. \
@@ -273,6 +308,13 @@ pub fn validate_project_path(project_dir: &str, path: PathBuf) -> Result<PathBuf
 
 /// Reject shell commands that try to delete the DeepSeekCode project root directory.
 pub fn command_threatens_project_root(command: &str, project_dir: &str) -> Option<String> {
+    tracing::debug!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        project_dir = %project_dir,
+        command_len = command.len(),
+        "command_threatens_project_root checked"
+    );
     let root = best_effort_abs(project_dir);
     let root_cmp = normalize_compare_path(&root);
     let mut cwd = root.clone();
@@ -291,6 +333,13 @@ pub fn command_threatens_project_root(command: &str, project_dir: &str) -> Optio
         for target in parse_destructive_targets(seg) {
             let full = resolve_relative_path(&cwd, &target);
             if normalize_compare_path(&full) == root_cmp {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    project_dir = %project_dir,
+                    target = %target,
+                    "command_threatens_project_root blocked"
+                );
                 return Some(format!(
                     "Refusing to run a command that may delete the project root `{}`. \
                      Work inside the project directory instead of removing it.",
@@ -308,6 +357,13 @@ pub fn command_threatens_project_root(command: &str, project_dir: &str) -> Optio
 /// `..\secret`, PowerShell `Get-Content ../x` / `Set-Content`, and relative
 /// redirects (`> ../out`). Quote-aware.
 pub fn command_escapes_project_directory(command: &str, project_dir: &str) -> Option<String> {
+    tracing::debug!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        project_dir = %project_dir,
+        command_len = command.len(),
+        "command_escapes_project_directory checked"
+    );
     let root = canonical_root(project_dir);
     let mut cwd = root.clone();
 
@@ -512,6 +568,13 @@ fn extract_powershell_path_args(segment: &str) -> Vec<String> {
 
 /// Extract filesystem paths that a shell command may create or modify.
 pub fn shell_command_target_paths(command: &str, project_dir: &str) -> Vec<PathBuf> {
+    tracing::debug!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        project_dir = %project_dir,
+        command_len = command.len(),
+        "shell_command_target_paths started"
+    );
     let root = best_effort_abs(project_dir);
     let mut cwd = root.clone();
     let mut paths = Vec::new();

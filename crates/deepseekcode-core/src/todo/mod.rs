@@ -13,10 +13,40 @@ pub trait TodoStore: Send + Sync {
 #[async_trait]
 impl TodoStore for deepseekcode_storage::TodoStore {
     async fn update(&self, session_id: SessionId, todos: &[TodoItem]) -> Result<Vec<TodoItem>> {
-        deepseekcode_storage::TodoStore::update(self, session_id, todos).await
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            todos = todos.len(),
+            "todo update started"
+        );
+        let r = deepseekcode_storage::TodoStore::update(self, session_id, todos).await;
+        match &r {
+            Ok(saved) => tracing::info!(
+                target: deepseekcode_telemetry::TOOL,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %session_id,
+                todos = saved.len(),
+                "todo update completed"
+            ),
+            Err(e) => tracing::error!(
+                target: deepseekcode_telemetry::TOOL,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %session_id,
+                error = %e,
+                "todo update failed"
+            ),
+        }
+        r
     }
 
     async fn get(&self, session_id: SessionId) -> Result<Vec<TodoItem>> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            "todo get started"
+        );
         deepseekcode_storage::TodoStore::get(self, session_id).await
     }
 }

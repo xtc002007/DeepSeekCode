@@ -92,11 +92,49 @@ pub fn is_deepseek_host_url(url: &str) -> bool {
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
-    host == "deepseek.com" || host.ends_with(".deepseek.com")
+    let matched = host == "deepseek.com" || host.ends_with(".deepseek.com");
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        endpoint_host = %crate::redact_endpoint_for_log(url),
+        matched,
+        "llm deepseek host check"
+    );
+    if !matched && host.contains("deepseek") {
+        tracing::warn!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            endpoint_host = %crate::redact_endpoint_for_log(url),
+            "llm deepseek-like host rejected by suffix match (possible spoof)"
+        );
+    }
+    tracing::info!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        matched,
+        "llm deepseek host resolved"
+    );
+    if url.trim().is_empty() {
+        tracing::error!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            "llm deepseek host check with empty url"
+        );
+    }
+    matched
 }
 
 pub fn is_deepseek_request(provider: &str, base_url: Option<&str>) -> bool {
-    provider.trim().eq_ignore_ascii_case("deepseek") || base_url.is_some_and(is_deepseek_host_url)
+    let out = provider.trim().eq_ignore_ascii_case("deepseek")
+        || base_url.is_some_and(is_deepseek_host_url);
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider = %deepseekcode_telemetry::redact(provider),
+        is_deepseek = out,
+        "llm deepseek request gate"
+    );
+    out
 }
 
 impl LlmRequest {
@@ -104,17 +142,51 @@ impl LlmRequest {
     /// base URL, and absurd token caps are rejected early (P0-5).
     /// `Some(0)` is accepted as the legacy "omit" spelling.
     pub fn validate(&self) -> Result<(), deepseekcode_types::DeepSeekCodeError> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            provider = %self.provider,
+            model = %self.model,
+            message_count = self.messages.len(),
+            tool_count = self.tools.len(),
+            system_summary = %deepseekcode_telemetry::summarize_prompt(&self.system, false),
+            "llm request validate start"
+        );
         if self.provider.trim().is_empty() {
+            tracing::error!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = %self.provider,
+                model = %self.model,
+                error = "llm provider must not be empty",
+                "llm request validation failed: empty provider"
+            );
             return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
                 "llm provider must not be empty".into(),
             ));
         }
         if self.model.trim().is_empty() {
+            tracing::error!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = %self.provider,
+                model = %self.model,
+                error = "llm model must not be empty",
+                "llm request validation failed: empty model"
+            );
             return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
                 "llm model must not be empty".into(),
             ));
         }
         if self.model.len() > 256 {
+            tracing::warn!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = %self.provider,
+                model_len = self.model.len(),
+                error = "llm model name too long",
+                "llm request validation failed: model truncated/overlong"
+            );
             return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
                 "llm model name too long".into(),
             ));
@@ -122,12 +194,30 @@ impl LlmRequest {
         if let Some(base) = self.base_url.as_deref() {
             let t = base.trim();
             if t.is_empty() || t.len() > 512 || t.contains([' ', '\0', '\n', '\r']) {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    provider = %self.provider,
+                    model = %self.model,
+                    base_host = %crate::redact_endpoint_for_log(base),
+                    error = "invalid llm base_url",
+                    "llm request validation failed: malformed base_url"
+                );
                 return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
                     "invalid llm base_url".into(),
                 ));
             }
             let lower = t.to_ascii_lowercase();
             if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    provider = %self.provider,
+                    model = %self.model,
+                    base_host = %crate::redact_endpoint_for_log(base),
+                    error = "llm base_url must start with http(s)://",
+                    "llm request validation failed: base_url scheme"
+                );
                 return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
                     "llm base_url must start with http(s)://".into(),
                 ));
@@ -136,16 +226,44 @@ impl LlmRequest {
         // `Some(0)` is the legacy "no cap" spelling: accepted and normalized
         // to omit downstream (never sent). Only absurd values are rejected.
         if self.max_output_tokens.is_some_and(|n| n > 1_000_000) {
+            tracing::warn!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = %self.provider,
+                model = %self.model,
+                max_output_tokens = ?self.max_output_tokens,
+                error = "max_output_tokens unreasonably large",
+                "llm request validation failed: output cap overflow"
+            );
             return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
                 "max_output_tokens unreasonably large".into(),
             ));
         }
+        tracing::info!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            provider = %self.provider,
+            model = %self.model,
+            message_count = self.messages.len(),
+            tool_count = self.tools.len(),
+            "llm request validated"
+        );
         Ok(())
     }
 
     /// Normalized output cap: `None` and `Some(0)` both mean "omit".
     pub fn effective_max_output_tokens(&self) -> Option<u32> {
-        self.max_output_tokens.filter(|&n| n > 0)
+        let eff = self.max_output_tokens.filter(|&n| n > 0);
+        tracing::debug!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            provider = %self.provider,
+            model = %self.model,
+            max_output_tokens = ?self.max_output_tokens,
+            effective = ?eff,
+            "llm effective max_output_tokens resolved"
+        );
+        eff
     }
 }
 
@@ -153,11 +271,24 @@ impl LlmRequest {
 /// request lineage, and compaction lineage. `disabled` default keeps
 /// agent/tool loops cheap and prefix-stable.
 pub fn normalize_thinking(model: &str, effort: Option<&str>, is_deepseek: bool) -> &'static str {
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        model = %deepseekcode_telemetry::redact(model),
+        is_deepseek,
+        "llm normalize_thinking start"
+    );
     if !is_deepseek {
+        tracing::info!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            model = %deepseekcode_telemetry::redact(model),
+            "llm thinking n/a for non-deepseek"
+        );
         return "n/a";
     }
     let effort = effort.unwrap_or("").trim().to_ascii_lowercase();
-    if matches!(
+    let out = if matches!(
         effort.as_str(),
         "enabled" | "high" | "max" | "xhigh" | "thinking" | "on"
     ) || (effort.is_empty() && model.contains("thinking"))
@@ -165,7 +296,31 @@ pub fn normalize_thinking(model: &str, effort: Option<&str>, is_deepseek: bool) 
         "enabled"
     } else {
         "disabled"
+    };
+    tracing::info!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        thinking = out,
+        "llm thinking normalized"
+    );
+    if out == "enabled" && effort.is_empty() {
+        tracing::warn!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            model = %deepseekcode_telemetry::redact(model),
+            "llm thinking inferred enabled from model name"
+        );
     }
+    // Defensive: empty model with enabled thinking is suspicious.
+    if model.trim().is_empty() {
+        tracing::error!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            thinking = out,
+            "llm normalize_thinking called with empty model"
+        );
+    }
+    out
 }
 
 impl LlmRequest {
@@ -201,7 +356,40 @@ pub fn lineage_key_for(
     normalized_thinking: &str,
     tools_hash: &str,
 ) -> String {
-    format!("{provider}|{model}|{normalized_thinking}|{tools_hash}")
+    let key = format!("{provider}|{model}|{normalized_thinking}|{tools_hash}");
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider,
+        model = %deepseekcode_telemetry::redact(model),
+        normalized_thinking,
+        tools_hash,
+        "llm lineage key built"
+    );
+    tracing::info!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider,
+        model = %deepseekcode_telemetry::redact(model),
+        "llm lineage emitted"
+    );
+    if tools_hash.trim().is_empty() {
+        tracing::warn!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            provider,
+            "llm lineage built with empty tools_hash"
+        );
+    }
+    if key.len() > 2048 {
+        tracing::error!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            key_len = key.len(),
+            "llm lineage key overlong, truncated in log only"
+        );
+    }
+    key
 }
 
 /// Stable hash of a provider-visible `tools_json` value for lineage.
@@ -209,8 +397,39 @@ pub fn lineage_key_for(
 /// canonical byte form for both request and compaction paths.
 pub fn tools_hash_for_json(tools_json: &serde_json::Value) -> String {
     use sha2::{Digest, Sha256};
-    let serialized = serde_json::to_string(tools_json).unwrap_or_else(|_| "[]".to_string());
-    format!("{:x}", Sha256::digest(serialized.as_bytes()))
+    let serialized = match serde_json::to_string(tools_json) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                error = %e,
+                "llm tools_json serialize failed; defaulting to empty array"
+            );
+            tracing::error!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                error = %e,
+                "llm tools hash fallback triggered"
+            );
+            "[]".to_string()
+        }
+    };
+    let hash = format!("{:x}", Sha256::digest(serialized.as_bytes()));
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        tools_json_len = serialized.len(),
+        tools_hash = %hash,
+        "llm tools hash computed"
+    );
+    tracing::info!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        tools_hash = %hash,
+        "llm tools hashed"
+    );
+    hash
 }
 
 #[derive(Debug, Clone, Default)]

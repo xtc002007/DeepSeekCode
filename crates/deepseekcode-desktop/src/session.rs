@@ -1,4 +1,8 @@
 //! Session viewport: scroll helpers for the activity timeline.
+//!
+//! Pure scroll math only — no engine/SDK calls, so no `tracing!` sites.
+//! Session lifecycle logging (DESKTOP + `run_id` + `session_id`) lives in
+//! `workspace.rs`; timeline diagnostics in `activity_timeline.rs`.
 
 use gpui::*;
 

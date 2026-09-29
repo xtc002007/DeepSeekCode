@@ -94,6 +94,13 @@ impl EventProjector {
         session_id: SessionId,
         since_seq: i64,
     ) -> Result<Vec<TimelineEntry>> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            since_seq = since_seq,
+            "project_events started"
+        );
         // Session-filtered tail avoids pulling the global log into memory
         // (P0-4 OOM guard for multi-session DBs).
         let events = store
@@ -112,6 +119,12 @@ impl EventProjector {
         events: &EventStore,
         session_id: SessionId,
     ) -> Result<Vec<Message>> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            "project_messages started"
+        );
         let mut messages = sessions.list_messages(session_id).await?;
         let session_events = Self::session_events(events, session_id).await?;
         if session_events.is_empty() {
@@ -140,6 +153,13 @@ impl EventProjector {
         session_id: SessionId,
         baseline_seq: i64,
     ) -> Result<Vec<Message>> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            baseline_seq = baseline_seq,
+            "project_messages_for_runner started"
+        );
         let compaction_seq = sessions.latest_compaction_seq(session_id).await?;
         let messages = Self::project_messages(sessions, events, session_id).await?;
         Ok(messages

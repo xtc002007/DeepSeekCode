@@ -42,6 +42,14 @@ impl Tool for WebsearchTool {
         input: Value,
         _ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            tool = "websearch",
+            query_len = input["query"].as_str().map(|s| s.len()).unwrap_or(0),
+            provider = %self.provider,
+            "websearch started"
+        );
         let query = input["query"].as_str().unwrap_or("");
         if query.is_empty() {
             return Err(ToolFailure {

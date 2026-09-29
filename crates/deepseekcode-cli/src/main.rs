@@ -457,10 +457,48 @@ async fn main() -> anyhow::Result<()> {
     // Parse args first for the directory hint, then init logging.
     let pre = Cli::parse();
     let log_dir = directory_hint(&pre);
-    let logging = load_logging_config_for(&log_dir);
-    // Re-parse (cheap) for the match below; `pre` is reused for `--url`.
+    let (logging, config_error) = load_logging_config_for(&log_dir);
+    // Top-level boundary: every command failure is logged with run_id +
+    // command + error so CLI invocations are never silent in app.log.
+    let command_label = cli_command_label(&pre.command);
     let cli = pre;
-    return run(cli, logging).await;
+    match run(cli, logging, config_error).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            tracing::error!(
+                target: deepseekcode_telemetry::CLI,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                command = %command_label,
+                error = %e,
+                "cli command failed"
+            );
+            Err(e)
+        }
+    }
+}
+
+fn cli_command_label(command: &Commands) -> &'static str {
+    match command {
+        Commands::Run { .. } => "run",
+        Commands::Serve { .. } => "serve",
+        Commands::Upgrade { .. } => "upgrade",
+        Commands::SessionList { .. } => "session-list",
+        Commands::Diagnostics { .. } => "diagnostics",
+        Commands::Agent { .. } => "agent",
+        Commands::Model { .. } => "model",
+        Commands::Provider { .. } => "provider",
+        Commands::Prompt { .. } => "prompt",
+        Commands::Session { .. } => "session",
+        Commands::Mcp { .. } => "mcp",
+        Commands::Fs { .. } => "fs",
+        Commands::Skills { .. } => "skills",
+        Commands::Plugins { .. } => "plugins",
+        Commands::Worktree { .. } => "worktree",
+        Commands::Project { .. } => "project",
+        Commands::Config { .. } => "config",
+        Commands::Health { .. } => "health",
+        Commands::Policy { .. } => "policy",
+    }
 }
 
 fn directory_hint(cli: &Cli) -> String {
@@ -496,13 +534,23 @@ fn directory_hint(cli: &Cli) -> String {
     }
 }
 
-async fn run(cli: Cli, logging: LoggingConfig) -> anyhow::Result<()> {
+async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> anyhow::Result<()> {
     let run_ctx = init("cli", &logging);
     tracing::info!(
-        target: deepseekcode_telemetry::APP,
+        target: deepseekcode_telemetry::CLI,
         run_id = %run_ctx.run_id,
         "deepseekcode-cli starting"
     );
+    // Stage two of config-error visibility: stage one eprintln'd before the
+    // subscriber existed; now also persist to app.log for bundle debugging.
+    if let Some(err) = config_error.as_deref() {
+        tracing::warn!(
+            target: deepseekcode_telemetry::CLI,
+            run_id = %run_ctx.run_id,
+            error = %err,
+            "config load failed; using default logging"
+        );
+    }
 
     // P1-11: global `--url`/`--password` (or env) route every command to a
     // remote server instead of starting an embedded engine.
@@ -706,7 +754,18 @@ async fn run(cli: Cli, logging: LoggingConfig) -> anyhow::Result<()> {
                 .filter(|p| !p.trim().is_empty())
                 .or_else(|| std::env::var("DEEPSEEKCODE_SERVER_PASSWORD").ok());
             let db_url = format!("sqlite://{db_path}");
-            deepseekcode_server::serve(directory, db_url, addr, password).await?;
+            // Never log `password`/secret: log only addr + run_id.
+            if let Err(e) = deepseekcode_server::serve(directory, db_url, addr, password).await {
+                tracing::error!(
+                    target: deepseekcode_telemetry::CLI,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    command = "serve",
+                    addr = %addr,
+                    error = %e,
+                    "serve startup failed"
+                );
+                return Err(e.into());
+            }
         }
         Commands::Upgrade { check_only } => {
             // P1-11: real check against the release channel manifest
@@ -770,10 +829,29 @@ async fn run(cli: Cli, logging: LoggingConfig) -> anyhow::Result<()> {
         }
         Commands::Diagnostics { command } => match command {
             DiagnosticsCommands::Export { output, run_id } => {
-                let path =
-                    deepseekcode_telemetry::export_diagnostic_bundle(run_id.as_deref(), &output)?;
-                println!("Exported diagnostics to {}", path.display());
-                println!("run_id: {}", run_ctx.run_id);
+                match deepseekcode_telemetry::export_diagnostic_bundle(run_id.as_deref(), &output) {
+                    Ok(path) => {
+                        tracing::info!(
+                            target: deepseekcode_telemetry::CLI,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
+                            command = "diagnostics export",
+                            path = %path.display(),
+                            "diagnostics export succeeded"
+                        );
+                        println!("Exported diagnostics to {}", path.display());
+                        println!("run_id: {}", run_ctx.run_id);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            target: deepseekcode_telemetry::CLI,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
+                            command = "diagnostics export",
+                            error = %e,
+                            "diagnostics export failed"
+                        );
+                        return Err(e.into());
+                    }
+                }
             }
         },
         Commands::Agent { command } => match command {
@@ -1328,11 +1406,18 @@ async fn resolve_session(
     Ok(latest.id)
 }
 
-fn load_logging_config_for(directory: &str) -> LoggingConfig {
+fn load_logging_config_for(directory: &str) -> (LoggingConfig, Option<String>) {
     // P1-11: respect `--directory` (previously hardcoded `.`, ignoring the flag).
-    deepseekcode_config::load_effective_config(camino::Utf8Path::new(directory))
-        .map(|c| c.logging)
-        .unwrap_or_default()
+    match deepseekcode_config::load_effective_config(camino::Utf8Path::new(directory)) {
+        Ok(c) => (c.logging, None),
+        Err(e) => {
+            // Stage one: telemetry not yet initialized, stderr only.
+            // Stage two (in `run` after `init`) persists the same to app.log.
+            let msg = format!("config load failed for '{directory}' ({e}); using default logging");
+            eprintln!("deepseekcode: {msg}");
+            (Default::default(), Some(msg))
+        }
+    }
 }
 
 #[cfg(test)]

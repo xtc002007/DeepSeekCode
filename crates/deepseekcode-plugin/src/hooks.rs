@@ -112,7 +112,19 @@ impl HookRegistry {
         output: &mut ToolExecuteBeforeOutput,
     ) -> Result<()> {
         for hook in &self.hooks {
-            hook.tool_execute_before(input, output).await?;
+            if let Err(e) = hook.tool_execute_before(input, output).await {
+                tracing::error!(
+                    target: deepseekcode_telemetry::TOOL,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    hook = %hook.id(),
+                    tool = %input.tool,
+                    session_id = %input.session_id,
+                    call_id = %input.call_id,
+                    error = %e,
+                    "hook tool_execute_before failed"
+                );
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -123,7 +135,19 @@ impl HookRegistry {
         output: &mut ToolExecuteAfterOutput,
     ) -> Result<()> {
         for hook in &self.hooks {
-            hook.tool_execute_after(input, output).await?;
+            if let Err(e) = hook.tool_execute_after(input, output).await {
+                tracing::error!(
+                    target: deepseekcode_telemetry::TOOL,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    hook = %hook.id(),
+                    tool = %input.tool,
+                    session_id = %input.session_id,
+                    call_id = %input.call_id,
+                    error = %e,
+                    "hook tool_execute_after failed"
+                );
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -134,7 +158,17 @@ impl HookRegistry {
         output: &mut ChatSystemTransformOutput,
     ) -> Result<()> {
         for hook in &self.hooks {
-            hook.chat_system_transform(input, output).await?;
+            if let Err(e) = hook.chat_system_transform(input, output).await {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    hook = %hook.id(),
+                    model = %input.model,
+                    error = %e,
+                    "hook chat_system_transform failed"
+                );
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -145,7 +179,17 @@ impl HookRegistry {
         output: &mut SessionCompactingOutput,
     ) -> Result<()> {
         for hook in &self.hooks {
-            hook.session_compacting(input, output).await?;
+            if let Err(e) = hook.session_compacting(input, output).await {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    hook = %hook.id(),
+                    session_id = %input.session_id,
+                    error = %e,
+                    "hook session_compacting failed"
+                );
+                return Err(e);
+            }
         }
         Ok(())
     }

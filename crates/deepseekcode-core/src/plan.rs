@@ -12,6 +12,13 @@ pub fn session_plans_from_events(
     events: &[EventEnvelope],
     dismissed: &HashSet<String>,
 ) -> Vec<SessionPlanSummary> {
+    tracing::debug!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        events = events.len(),
+        dismissed = dismissed.len(),
+        "session_plans_from_events started"
+    );
     use std::collections::HashMap;
     let mut latest: HashMap<String, SessionPlanSummary> = HashMap::new();
     for event in events {
@@ -52,11 +59,23 @@ pub fn session_plans_from_events(
             .cmp(&b.completed_at)
             .then(a.plan_id.cmp(&b.plan_id))
     });
+    tracing::info!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        plans = plans.len(),
+        "session_plans_from_events completed"
+    );
     plans
 }
 
 /// Latest non-dismissed plan id, if any (by `completed_at` order).
 pub fn latest_actionable_plan_id(plans: &[SessionPlanSummary]) -> Option<String> {
+    tracing::debug!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        plans = plans.len(),
+        "latest_actionable_plan_id queried"
+    );
     plans
         .iter()
         .filter(|p| !p.implement_prompt_dismissed)

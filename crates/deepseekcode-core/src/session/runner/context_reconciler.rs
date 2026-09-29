@@ -17,7 +17,9 @@ impl SessionRunner {
             crate::system_context::ReconcileResult::Updated { text, snapshot } => {
                 tracing::debug!(
                     target: deepseekcode_telemetry::SESSION,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                     session_id = %self.session_id,
+                    text_len = text.len(),
                     "context updated"
                 );
                 let system_id = MessageId::new();
@@ -49,6 +51,7 @@ impl SessionRunner {
             crate::system_context::ReconcileResult::ReplacementReady { generation } => {
                 tracing::debug!(
                     target: deepseekcode_telemetry::SESSION,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                     session_id = %self.session_id,
                     baseline_len = generation.baseline.len(),
                     "context baseline replaced"
@@ -63,6 +66,7 @@ impl SessionRunner {
             crate::system_context::ReconcileResult::ReplacementBlocked => {
                 tracing::warn!(
                     target: deepseekcode_telemetry::SESSION,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                     session_id = %self.session_id,
                     "context replacement blocked"
                 );
@@ -79,6 +83,12 @@ impl SessionRunner {
     }
 
     pub(super) async fn reconcile_context(&self) -> Result<()> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %self.session_id,
+            "reconcile_context started"
+        );
         let epoch = self
             .context_epochs
             .get(self.session_id)
@@ -94,6 +104,12 @@ impl SessionRunner {
     }
 
     pub(super) async fn prepare_context_epoch(&self) -> Result<(String, i64)> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %self.session_id,
+            "prepare_context_epoch started"
+        );
         let epoch = self
             .context_epochs
             .get(self.session_id)

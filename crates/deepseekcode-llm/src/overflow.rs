@@ -3,6 +3,12 @@
 /// positives on `quota exceeds`, `rate limit exceeded`, etc. Require a
 /// context/token/length companion instead.
 pub fn is_context_overflow(message: &str) -> bool {
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        msg_summary = %deepseekcode_telemetry::summarize_prompt(message, false),
+        "llm overflow check start"
+    );
     let lower = message.to_lowercase();
     // Fast reject: rate/quota/auth errors are never overflow, even when they
     // mention context-adjacent words.
@@ -17,6 +23,12 @@ pub fn is_context_overflow(message: &str) -> bool {
         if !(lower.contains("context") && lower.contains("exceed")) {
             // `rate limit exceeded` without context => not overflow.
             if lower.contains("rate") || lower.contains("quota") {
+                tracing::info!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    msg_summary = %deepseekcode_telemetry::summarize_prompt(message, false),
+                    "llm overflow check: rate/quota fast-reject, not overflow"
+                );
                 return false;
             }
         }
@@ -47,6 +59,12 @@ pub fn is_context_overflow(message: &str) -> bool {
         "max tokens exceeded",
     ];
     if SUBSTRINGS.iter().any(|needle| lower.contains(needle)) {
+        tracing::warn!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            msg_summary = %deepseekcode_telemetry::summarize_prompt(message, false),
+            "llm context overflow detected via known substring"
+        );
         return true;
     }
     // Gated bare-exceeds: only when paired with context/token/length terms.
@@ -58,16 +76,58 @@ pub fn is_context_overflow(message: &str) -> bool {
             || lower.contains("length")
             || lower.contains("input length");
         if companion {
+            tracing::warn!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                msg_summary = %deepseekcode_telemetry::summarize_prompt(message, false),
+                "llm context overflow detected via gated exceeds+companion"
+            );
             return true;
         }
+        tracing::debug!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            msg_summary = %deepseekcode_telemetry::summarize_prompt(message, false),
+            "llm overflow check: bare exceeds without companion, not overflow"
+        );
         return false;
     }
     // Bare 413 without context words is not enough (could be file upload).
-    (lower.contains("413") || lower.contains("payload too large"))
+    let overflow = (lower.contains("413") || lower.contains("payload too large"))
         && (lower.contains("context")
             || lower.contains("token")
             || lower.contains("prompt")
-            || lower.contains("message"))
+            || lower.contains("message"));
+    if overflow {
+        tracing::warn!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            msg_summary = %deepseekcode_telemetry::summarize_prompt(message, false),
+            "llm context overflow detected via 413/payload shape"
+        );
+    } else {
+        tracing::debug!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            msg_summary = %deepseekcode_telemetry::summarize_prompt(message, false),
+            "llm overflow check: no overflow"
+        );
+    }
+    if message.len() > 2000 {
+        tracing::error!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            msg_len = message.len(),
+            "llm overflow check input overlong, summarized for log"
+        );
+    }
+    tracing::info!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        overflow,
+        "llm overflow check completed"
+    );
+    overflow
 }
 
 #[cfg(test)]

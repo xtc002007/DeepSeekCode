@@ -3,6 +3,12 @@ use std::path::Path;
 
 /// Resolve the shell executable to use for subprocesses.
 pub fn resolve_shell(configured: Option<&str>) -> String {
+    tracing::debug!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        configured = ?configured,
+        "resolve_shell requested"
+    );
     if let Some(shell) = configured.filter(|s| !s.trim().is_empty()) {
         return shell.to_string();
     }
@@ -111,6 +117,13 @@ fn probe_shell(shell: &str, mode: &str) -> Option<HashMap<String, String>> {
 
 /// Capture environment variables for shell subprocesses, optionally probing login shell.
 pub fn capture_shell_env(configured_shell: Option<&str>) -> HashMap<String, String> {
+    let start = std::time::Instant::now();
+    tracing::debug!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        shell = ?configured_shell,
+        "capture_shell_env started"
+    );
     let parent: HashMap<String, String> = std::env::vars()
         .filter(|(k, v)| !k.is_empty() && !v.is_empty())
         .collect();
@@ -121,7 +134,17 @@ pub fn capture_shell_env(configured_shell: Option<&str>) -> HashMap<String, Stri
     } else {
         probe_shell(&shell, "-il").or_else(|| probe_shell(&shell, "-l"))
     };
-    merge_shell_env(probed.as_ref(), &parent)
+    let merged = merge_shell_env(probed.as_ref(), &parent);
+    tracing::info!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        shell = %shell,
+        vars = merged.len(),
+        probed = probed.is_some(),
+        duration_ms = start.elapsed().as_millis() as u64,
+        "capture_shell_env completed"
+    );
+    merged
 }
 
 /// Merge probed shell env under explicit parent overrides.

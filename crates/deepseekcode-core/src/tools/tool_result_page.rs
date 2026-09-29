@@ -45,6 +45,14 @@ impl super::registry::Tool for ToolResultPageTool {
         input: Value,
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "tool_result_page",
+            path = %input.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+            "tool_result_page started"
+        );
         let path = input
             .get("path")
             .and_then(|v| v.as_str())

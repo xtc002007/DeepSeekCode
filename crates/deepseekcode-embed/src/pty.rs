@@ -42,6 +42,7 @@ impl PtyManager {
     }
 
     pub fn create(&self, cwd: &str, rows: u16, cols: u16) -> Result<Arc<PtySession>> {
+        let start = std::time::Instant::now();
         let cwd = normalize_pty_cwd(cwd);
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -81,10 +82,12 @@ impl PtyManager {
         let id = PtyId::new();
         tracing::info!(
             target: deepseekcode_telemetry::SERVER,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             pty_id = %id,
-            cwd = cwd,
+            cwd = %cwd,
             rows = rows,
             cols = cols,
+            latency_ms = start.elapsed().as_millis() as u64,
             "pty created"
         );
         let (input_tx, _) = broadcast::channel(256);
@@ -115,6 +118,7 @@ impl PtyManager {
                     Ok(0) => {
                         tracing::info!(
                             target: deepseekcode_telemetry::SERVER,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
                             pty_id = %pty_id_log,
                             "pty disconnected"
                         );
@@ -126,6 +130,7 @@ impl PtyManager {
                     Err(e) => {
                         tracing::warn!(
                             target: deepseekcode_telemetry::SERVER,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
                             pty_id = %pty_id_log,
                             error = %e,
                             "pty read error"
@@ -220,6 +225,7 @@ impl PtyManager {
     /// `directory` must match the directory the PTY was created under, so one
     /// project cannot destroy another project's terminals.
     pub fn destroy(&self, id: &str, directory: &str) -> Result<()> {
+        let start = std::time::Instant::now();
         let session = {
             let mut sessions = self.sessions.lock().unwrap();
             let session = sessions
@@ -238,6 +244,7 @@ impl PtyManager {
             if let Err(e) = child.kill() {
                 tracing::warn!(
                     target: deepseekcode_telemetry::SERVER,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                     pty_id = %id,
                     error = %e,
                     "pty child kill failed"
@@ -250,14 +257,22 @@ impl PtyManager {
             .lock()
             .unwrap()
             .retain(|_, record| record.pty_id != id);
+        tracing::info!(
+            target: deepseekcode_telemetry::SERVER,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            pty_id = %id,
+            latency_ms = start.elapsed().as_millis() as u64,
+            "pty destroyed"
+        );
         Ok(())
     }
 
     pub fn resize(&self, id: &str, rows: u16, cols: u16) -> Result<()> {
+        let start = std::time::Instant::now();
         let session = self
             .get(id)
             .ok_or_else(|| DeepSeekCodeError::NotFound(format!("pty {id}")))?;
-        session
+        if let Err(e) = session
             .master
             .lock()
             .unwrap()
@@ -267,7 +282,29 @@ impl PtyManager {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| DeepSeekCodeError::Other(e.to_string()))?;
+            .map_err(|e| DeepSeekCodeError::Other(e.to_string()))
+        {
+            tracing::error!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                pty_id = %id,
+                rows = rows,
+                cols = cols,
+                latency_ms = start.elapsed().as_millis() as u64,
+                error = %e,
+                "pty resize failed"
+            );
+            return Err(e);
+        }
+        tracing::debug!(
+            target: deepseekcode_telemetry::SERVER,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            pty_id = %id,
+            rows = rows,
+            cols = cols,
+            latency_ms = start.elapsed().as_millis() as u64,
+            "pty resized"
+        );
         Ok(())
     }
 }

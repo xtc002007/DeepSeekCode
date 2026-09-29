@@ -29,11 +29,39 @@ fn resolve_base_url(base_url: Option<&str>) -> String {
 /// - Only applies to `*.deepseek.com` hosts; third-party bases pass through
 ///   (trimmed of trailing `/`).
 pub fn normalize_deepseek_base_url(url: &str) -> String {
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        endpoint_host = %crate::redact_endpoint_for_log(url),
+        "llm deepseek normalize base start"
+    );
     let mut trimmed = url.trim().trim_end_matches('/').to_string();
+    if trimmed.len() > 512 {
+        tracing::warn!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            base_len = trimmed.len(),
+            "llm deepseek base_url overlong; truncation risk"
+        );
+    }
+    if url.trim().is_empty() {
+        tracing::error!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            "llm deepseek normalize with empty url"
+        );
+    }
     if !is_deepseek_host(&trimmed) {
+        tracing::info!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            endpoint_host = %crate::redact_endpoint_for_log(&trimmed),
+            "llm deepseek third-party base passthrough"
+        );
         return trimmed;
     }
     // Peel accidental full endpoint suffixes repeatedly.
+    let orig = trimmed.clone();
     loop {
         if let Some(s) = trimmed.strip_suffix("/chat/completions") {
             trimmed = s.trim_end_matches('/').to_string();
@@ -48,6 +76,21 @@ pub fn normalize_deepseek_base_url(url: &str) -> String {
             continue;
         }
         break;
+    }
+    if orig != trimmed {
+        tracing::info!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            endpoint_host = %crate::redact_endpoint_for_log(&trimmed),
+            "llm deepseek base normalized (stale suffix stripped)"
+        );
+    } else {
+        tracing::debug!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            endpoint_host = %crate::redact_endpoint_for_log(&trimmed),
+            "llm deepseek base already normalized"
+        );
     }
     trimmed
 }
@@ -98,8 +141,23 @@ fn deepseek_extras(request: &LlmRequest, stream: bool, override_base: Option<&st
     // `thinking` is DeepSeek-official-only: third-party gateways reject it
     // with 400 (doubling latency via bare retry). Gate both `thinking` and
     // `stream_options` to official endpoints.
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider = "deepseek",
+        model = %request.model,
+        stream,
+        "llm deepseek extras build start"
+    );
     let official = is_official_deepseek_endpoint(request.base_url.as_deref(), override_base);
     if !official {
+        tracing::info!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            provider = "deepseek",
+            model = %request.model,
+            "llm deepseek third-party gateway; omitting thinking/stream_options"
+        );
         if stream {
             return json!({});
         }
@@ -126,9 +184,47 @@ pub async fn generate(
     api_key: Option<String>,
     base_url: Option<&str>,
 ) -> Result<crate::request::LlmResponse> {
-    let api_key = api_key.filter(|k| !k.trim().is_empty()).ok_or_else(|| {
-        DeepSeekCodeError::Llm("DeepSeek API key not set (DEEPSEEK_API_KEY)".into())
-    })?;
+    let start = std::time::Instant::now();
+    let resolved_early = resolve_base_url(base_url);
+    let endpoint_early = openai::chat_endpoint(Some(resolved_early.as_str()));
+    let endpoint_host_early = crate::redact_endpoint_for_log(&endpoint_early);
+    tracing::info!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider = "deepseek",
+        model = %request.model,
+        endpoint_host = %endpoint_host_early,
+        message_count = request.messages.len(),
+        tool_count = request.tools.len(),
+        system_summary = %deepseekcode_telemetry::summarize_prompt(&request.system, false),
+        "llm deepseek generate start"
+    );
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider = "deepseek",
+        model = %request.model,
+        endpoint_host = %endpoint_host_early,
+        "llm deepseek generate debug"
+    );
+    crate::providers::log_provider_route("deepseek", &request.model, &endpoint_host_early);
+    let api_key = match api_key.filter(|k| !k.trim().is_empty()) {
+        Some(k) => k,
+        None => {
+            tracing::error!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "deepseek",
+                model = %request.model,
+                endpoint_host = %endpoint_host_early,
+                error = "DeepSeek API key not set",
+                "llm auth failed"
+            );
+            return Err(DeepSeekCodeError::Llm(
+                "DeepSeek API key not set (DEEPSEEK_API_KEY)".into(),
+            ));
+        }
+    };
     let body = openai::build_chat_body(
         request,
         false,
@@ -137,42 +233,93 @@ pub async fn generate(
 
     let resolved = resolve_base_url(base_url);
     let endpoint = openai::chat_endpoint(Some(resolved.as_str()));
-    let response =
-        match crate::http_client::post_json_with_fallback(http, &endpoint, &api_key, &body, true)
-            .await
-        {
-            Ok(resp) => resp,
-            Err(combined) => {
-                // Last resort for VPN TUN fake-DNS: SNI-preserving pinned-IP
-                // transport (DoH real IP, SNI stays the API hostname).
-                if crate::sni_pinned::is_pinnable_host(&endpoint) {
-                    match crate::sni_pinned::post_pinned(http, &endpoint, &api_key, &body).await {
-                        Ok((status, bytes)) => {
-                            return handle_pinned_generate_response(
-                                http, request, &api_key, &resolved, status, &bytes,
-                            )
-                            .await
-                        }
-                        Err(pinned_err) => {
-                            return Err(DeepSeekCodeError::Llm(map_transport_error(
-                                &format!("{combined} || pinned: {pinned_err}"),
-                                &endpoint,
-                            )));
-                        }
+    let endpoint_host = crate::redact_endpoint_for_log(&endpoint);
+    let response = match crate::http_client::post_json_with_fallback(
+        http, &endpoint, &api_key, &body, true,
+    )
+    .await
+    {
+        Ok(resp) => resp,
+        Err(combined) => {
+            tracing::warn!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "deepseek",
+                model = %request.model,
+                endpoint_host = %endpoint_host,
+                duration_ms = start.elapsed().as_millis() as u64,
+                error_summary = %deepseekcode_telemetry::summarize_prompt(&combined, false),
+                "llm deepseek primary transport failed; trying pinned fallback"
+            );
+            // Last resort for VPN TUN fake-DNS: SNI-preserving pinned-IP
+            // transport (DoH real IP, SNI stays the API hostname).
+            if crate::sni_pinned::is_pinnable_host(&endpoint) {
+                match crate::sni_pinned::post_pinned(http, &endpoint, &api_key, &body).await {
+                    Ok((status, bytes)) => {
+                        tracing::info!(
+                            target: deepseekcode_telemetry::LLM,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
+                            provider = "deepseek",
+                            model = %request.model,
+                            endpoint_host = %endpoint_host,
+                            status,
+                            "llm deepseek pinned fallback succeeded"
+                        );
+                        return handle_pinned_generate_response(
+                            http, request, &api_key, &resolved, status, &bytes,
+                        )
+                        .await;
+                    }
+                    Err(pinned_err) => {
+                        tracing::error!(
+                            target: deepseekcode_telemetry::LLM,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
+                            provider = "deepseek",
+                            model = %request.model,
+                            endpoint_host = %endpoint_host,
+                            duration_ms = start.elapsed().as_millis() as u64,
+                            error_summary = %deepseekcode_telemetry::summarize_prompt(&pinned_err, false),
+                            "llm deepseek pinned fallback failed"
+                        );
+                        return Err(DeepSeekCodeError::Llm(map_transport_error(
+                            &format!("{combined} || pinned: {pinned_err}"),
+                            &endpoint,
+                        )));
                     }
                 }
-                return Err(DeepSeekCodeError::Llm(map_transport_error(
-                    &combined, &endpoint,
-                )));
             }
-        };
+            tracing::error!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "deepseek",
+                model = %request.model,
+                endpoint_host = %endpoint_host,
+                duration_ms = start.elapsed().as_millis() as u64,
+                "llm deepseek generate transport failed"
+            );
+            crate::providers::log_provider_error("deepseek", &request.model, &combined);
+            return Err(DeepSeekCodeError::Llm(map_transport_error(
+                &combined, &endpoint,
+            )));
+        }
+    };
 
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
+        let sanitized = crate::axis::framing::sanitize_llm_error(&text);
         // Issue-4 fallback for generate: gateways that reject DeepSeek-only
         // fields retry once with a bare OpenAI body.
         if status.as_u16() == 400 && mentions_deepseek_only_field(&text) {
+            tracing::info!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "deepseek",
+                model = %request.model,
+                endpoint_host = %endpoint_host,
+                status = %status,
+                "llm deepseek 400 deepseek-only-field; retrying bare body"
+            );
             let plain = openai::build_chat_body(request, false, None);
             let retry = crate::http_client::post_json_with_fallback(
                 http,
@@ -184,27 +331,132 @@ pub async fn generate(
             .await
             .map_err(|combined| {
                 let ep = openai::chat_endpoint(Some(resolved.as_str()));
+                tracing::error!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    provider = "deepseek",
+                    model = %request.model,
+                    endpoint_host = %crate::redact_endpoint_for_log(&ep),
+                    duration_ms = start.elapsed().as_millis() as u64,
+                    error_summary = %deepseekcode_telemetry::summarize_prompt(&combined, false),
+                    "llm deepseek bare retry transport failed"
+                );
                 DeepSeekCodeError::Llm(map_transport_error(&combined, &ep))
             })?;
             if !retry.status().is_success() {
+                let retry_status = retry.status();
                 let t = retry.text().await.unwrap_or_default();
+                let s = crate::axis::framing::sanitize_llm_error(&t);
+                tracing::warn!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    provider = "deepseek",
+                    model = %request.model,
+                    status = %retry_status,
+                    error_summary = %deepseekcode_telemetry::summarize_prompt(&s, false),
+                    "llm deepseek bare retry non-success"
+                );
+                tracing::error!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    provider = "deepseek",
+                    model = %request.model,
+                    status = %retry_status,
+                    "llm deepseek generate failed after retry"
+                );
                 return Err(DeepSeekCodeError::Llm(t));
             }
-            let value: Value = retry
-                .json()
-                .await
-                .map_err(|e| DeepSeekCodeError::Llm(e.to_string()))?;
+            let value: Value = retry.json().await.map_err(|e| {
+                tracing::error!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    provider = "deepseek",
+                    model = %request.model,
+                    error = %e,
+                    "llm deepseek retry JSON parse failed"
+                );
+                DeepSeekCodeError::Llm(e.to_string())
+            })?;
             return openai::parse_message_response(&value);
+        }
+        tracing::warn!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            provider = "deepseek",
+            model = %request.model,
+            endpoint_host = %endpoint_host,
+            status = %status,
+            duration_ms = start.elapsed().as_millis() as u64,
+            error_summary = %deepseekcode_telemetry::summarize_prompt(&sanitized, false),
+            "llm deepseek generate non-success status"
+        );
+        tracing::error!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            provider = "deepseek",
+            model = %request.model,
+            status = %status,
+            error_summary = %deepseekcode_telemetry::summarize_prompt(&sanitized, false),
+            "llm deepseek generate failed"
+        );
+        if crate::overflow::is_context_overflow(&sanitized) {
+            tracing::warn!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "deepseek",
+                model = %request.model,
+                "llm deepseek generate context overflow"
+            );
         }
         return Err(DeepSeekCodeError::Llm(text));
     }
 
-    let value: Value = response
-        .json()
-        .await
-        .map_err(|e| DeepSeekCodeError::Llm(e.to_string()))?;
+    let status = response.status();
+    let value: Value = match response.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "deepseek",
+                model = %request.model,
+                endpoint_host = %endpoint_host,
+                duration_ms = start.elapsed().as_millis() as u64,
+                error = %e,
+                "llm deepseek generate JSON parse failed"
+            );
+            return Err(DeepSeekCodeError::Llm(e.to_string()));
+        }
+    };
 
-    openai::parse_message_response(&value)
+    match openai::parse_message_response(&value) {
+        Ok(resp) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "deepseek",
+                model = %request.model,
+                endpoint_host = %endpoint_host,
+                duration_ms = start.elapsed().as_millis() as u64,
+                status = %status,
+                output_tokens = ?resp.usage.as_ref().and_then(|u| u.output_tokens),
+                tool_call_count = resp.tool_calls.len(),
+                "llm deepseek generate succeeded"
+            );
+            Ok(resp)
+        }
+        Err(e) => {
+            tracing::error!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "deepseek",
+                model = %request.model,
+                error = %e,
+                "llm deepseek generate response parse failed"
+            );
+            Err(e)
+        }
+    }
 }
 
 /// Handle a pinned-transport non-streaming result with the same semantics as
@@ -334,9 +586,47 @@ pub async fn stream(
     api_key: Option<String>,
     base_url: Option<&str>,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent>> + Send>>> {
-    let api_key = api_key.filter(|k| !k.trim().is_empty()).ok_or_else(|| {
-        DeepSeekCodeError::Llm("DeepSeek API key not set (DEEPSEEK_API_KEY)".into())
-    })?;
+    let start = std::time::Instant::now();
+    let resolved_early = resolve_base_url(base_url);
+    let endpoint_early = openai::chat_endpoint(Some(resolved_early.as_str()));
+    let endpoint_host_early = crate::redact_endpoint_for_log(&endpoint_early);
+    tracing::info!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider = "deepseek",
+        model = %request.model,
+        endpoint_host = %endpoint_host_early,
+        message_count = request.messages.len(),
+        tool_count = request.tools.len(),
+        system_summary = %deepseekcode_telemetry::summarize_prompt(&request.system, false),
+        "llm deepseek stream start"
+    );
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider = "deepseek",
+        model = %request.model,
+        endpoint_host = %endpoint_host_early,
+        "llm deepseek stream debug"
+    );
+    crate::providers::log_provider_route("deepseek", &request.model, &endpoint_host_early);
+    let api_key = match api_key.filter(|k| !k.trim().is_empty()) {
+        Some(k) => k,
+        None => {
+            tracing::error!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "deepseek",
+                model = %request.model,
+                endpoint_host = %endpoint_host_early,
+                error = "DeepSeek API key not set",
+                "llm auth failed"
+            );
+            return Err(DeepSeekCodeError::Llm(
+                "DeepSeek API key not set (DEEPSEEK_API_KEY)".into(),
+            ));
+        }
+    };
     // Issue-4 fallback: if a gateway rejects `stream_options` (or `thinking`)
     // with 400, retry once without extras so custom proxies keep working.
     // The retry intentionally drops prefix-cache observability, not correctness.
@@ -348,16 +638,38 @@ pub async fn stream(
 
     let resolved = resolve_base_url(base_url);
     let endpoint = openai::chat_endpoint(Some(resolved.as_str()));
+    let endpoint_host = crate::redact_endpoint_for_log(&endpoint);
     let response =
         match crate::http_client::post_json_with_fallback(http, &endpoint, &api_key, &body, false)
             .await
         {
             Ok(resp) => resp,
             Err(combined) => {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    provider = "deepseek",
+                    model = %request.model,
+                    endpoint_host = %endpoint_host,
+                    duration_ms = start.elapsed().as_millis() as u64,
+                    error_summary = %deepseekcode_telemetry::summarize_prompt(&combined, false),
+                    "llm deepseek stream primary transport failed; trying pinned"
+                );
                 // Last resort: pinned-IP transport for VPN fake-DNS.
                 if crate::sni_pinned::is_pinnable_host(&endpoint) {
                     match crate::sni_pinned::stream_pinned(http, &endpoint, &api_key, &body).await {
-                        Ok(events) => return Ok(events),
+                        Ok(events) => {
+                            tracing::info!(
+                                target: deepseekcode_telemetry::LLM,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
+                                provider = "deepseek",
+                                model = %request.model,
+                                endpoint_host = %endpoint_host,
+                                duration_ms = start.elapsed().as_millis() as u64,
+                                "llm deepseek pinned stream opened"
+                            );
+                            return Ok(events);
+                        }
                         Err(pinned_err) => {
                             if let Some(retry_events) = try_pinned_stream_400_retry(
                                 http,
@@ -368,8 +680,24 @@ pub async fn stream(
                             )
                             .await?
                             {
+                                tracing::info!(
+                                    target: deepseekcode_telemetry::LLM,
+                                    run_id = %deepseekcode_telemetry::current_run_id(),
+                                    provider = "deepseek",
+                                    model = %request.model,
+                                    "llm deepseek pinned 400 retry succeeded"
+                                );
                                 return Ok(retry_events);
                             }
+                            tracing::error!(
+                                target: deepseekcode_telemetry::LLM,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
+                                provider = "deepseek",
+                                model = %request.model,
+                                endpoint_host = %endpoint_host,
+                                duration_ms = start.elapsed().as_millis() as u64,
+                                "llm deepseek stream pinned fallback failed"
+                            );
                             return Err(DeepSeekCodeError::Llm(map_transport_error(
                                 &format!("{combined} || pinned: {pinned_err}"),
                                 &endpoint,
@@ -377,6 +705,16 @@ pub async fn stream(
                         }
                     }
                 }
+                tracing::error!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    provider = "deepseek",
+                    model = %request.model,
+                    endpoint_host = %endpoint_host,
+                    duration_ms = start.elapsed().as_millis() as u64,
+                    "llm deepseek stream transport failed"
+                );
+                crate::providers::log_provider_error("deepseek", &request.model, &combined);
                 return Err(DeepSeekCodeError::Llm(map_transport_error(
                     &combined, &endpoint,
                 )));
@@ -386,7 +724,35 @@ pub async fn stream(
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
+        let sanitized = crate::axis::framing::sanitize_llm_error(&text);
+        tracing::warn!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            provider = "deepseek",
+            model = %request.model,
+            endpoint_host = %endpoint_host,
+            status = %status,
+            duration_ms = start.elapsed().as_millis() as u64,
+            error_summary = %deepseekcode_telemetry::summarize_prompt(&sanitized, false),
+            "llm deepseek stream non-success status"
+        );
+        if crate::overflow::is_context_overflow(&sanitized) {
+            tracing::warn!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "deepseek",
+                model = %request.model,
+                "llm deepseek stream context overflow"
+            );
+        }
         if status.as_u16() == 400 && mentions_deepseek_only_field(&text) {
+            tracing::info!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "deepseek",
+                model = %request.model,
+                "llm deepseek stream 400 deepseek-only-field; retrying bare body"
+            );
             let plain = openai::build_chat_body(request, true, None);
             let retry = crate::http_client::post_json_with_fallback(
                 http,
@@ -398,12 +764,38 @@ pub async fn stream(
             .await
             .map_err(|combined| {
                 let ep = openai::chat_endpoint(Some(resolved.as_str()));
+                tracing::error!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    provider = "deepseek",
+                    model = %request.model,
+                    error_summary = %deepseekcode_telemetry::summarize_prompt(&combined, false),
+                    "llm deepseek stream bare retry transport failed"
+                );
                 DeepSeekCodeError::Llm(map_transport_error(&combined, &ep))
             })?;
             if !retry.status().is_success() {
+                let retry_status = retry.status();
                 let t = retry.text().await.unwrap_or_default();
+                let s = crate::axis::framing::sanitize_llm_error(&t);
+                tracing::error!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    provider = "deepseek",
+                    model = %request.model,
+                    status = %retry_status,
+                    error_summary = %deepseekcode_telemetry::summarize_prompt(&s, false),
+                    "llm deepseek stream failed after bare retry"
+                );
                 return Err(DeepSeekCodeError::Llm(t));
             }
+            tracing::info!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "deepseek",
+                model = %request.model,
+                "llm deepseek stream bare retry succeeded"
+            );
             let byte_stream = retry.bytes_stream();
             let mapped = byte_stream
                 .map(|chunk| chunk.map_err(|e| DeepSeekCodeError::Llm(e.to_string())))
@@ -431,8 +823,34 @@ pub async fn stream(
                 .flat_map(futures::stream::iter);
             return Ok(Box::pin(mapped));
         }
+        tracing::error!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            provider = "deepseek",
+            model = %request.model,
+            status = %status,
+            error_summary = %deepseekcode_telemetry::summarize_prompt(&sanitized, false),
+            "llm deepseek stream failed"
+        );
         return Err(DeepSeekCodeError::Llm(text));
     }
+    tracing::info!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider = "deepseek",
+        model = %request.model,
+        endpoint_host = %endpoint_host,
+        duration_ms = start.elapsed().as_millis() as u64,
+        status = %response.status(),
+        "llm deepseek stream opened"
+    );
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider = "deepseek",
+        model = %request.model,
+        "llm deepseek stream body mapped"
+    );
 
     let byte_stream = response.bytes_stream();
     let mapped = byte_stream

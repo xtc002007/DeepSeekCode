@@ -20,6 +20,13 @@ pub struct LocalMcpClient {
 
 impl LocalMcpClient {
     pub fn spawn(command: &str, args: &[String]) -> Result<Self> {
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            command = %command,
+            args = args.len(),
+            "local mcp spawn started"
+        );
         let mut cmd = Command::new(command);
         crate::process::hide_console(&mut cmd);
         let mut child = cmd
@@ -30,7 +37,16 @@ impl LocalMcpClient {
             // handle is drained on Drop to avoid pipe-buffer deadlock.
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| DeepSeekCodeError::Other(format!("mcp spawn failed: {e}")))?;
+            .map_err(|e| {
+                tracing::error!(
+                    target: deepseekcode_telemetry::TOOL,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    command = %command,
+                    error = %e,
+                    "local mcp spawn failed"
+                );
+                DeepSeekCodeError::Other(format!("mcp spawn failed: {e}"))
+            })?;
 
         let stdin = child
             .stdin
@@ -65,6 +81,7 @@ impl LocalMcpClient {
                 if !tail.is_empty() {
                     tracing::debug!(
                         target: deepseekcode_telemetry::APP,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                         stderr = %String::from_utf8_lossy(&tail),
                         "mcp server stderr closed"
                     );
@@ -81,6 +98,11 @@ impl LocalMcpClient {
     }
 
     pub fn initialize(&mut self) -> Result<()> {
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            "local mcp initialize started"
+        );
         let params = serde_json::json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {},
@@ -98,6 +120,11 @@ impl LocalMcpClient {
     }
 
     pub fn list_tools(&mut self) -> Result<Vec<McpToolInfo>> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            "local mcp list_tools started"
+        );
         let result = self.request("tools/list", Value::Object(Default::default()))?;
         let tools = result
             .get("tools")
@@ -128,6 +155,12 @@ impl LocalMcpClient {
     }
 
     pub fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value> {
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            tool = %name,
+            "local mcp call_tool started"
+        );
         let params = serde_json::json!({
             "name": name,
             "arguments": arguments,

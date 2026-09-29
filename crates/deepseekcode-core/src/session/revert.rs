@@ -55,6 +55,13 @@ impl RevertManager {
         session_id: SessionId,
         message_id: MessageId,
     ) -> Result<StagedRevert> {
+        tracing::info!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            message_id = %message_id,
+            "revert stage started"
+        );
         if self.get_staged(session_id).await?.is_some() {
             return Err(DeepSeekCodeError::Other(
                 "revert already staged; call clear or commit first".into(),
@@ -120,6 +127,12 @@ impl RevertManager {
     }
 
     pub async fn clear(&self, session_id: SessionId) -> Result<()> {
+        tracing::info!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            "revert clear started"
+        );
         let Some(state) = self.get_staged(session_id).await? else {
             return Ok(());
         };
@@ -156,6 +169,12 @@ impl RevertManager {
     }
 
     pub async fn commit(&self, session_id: SessionId) -> Result<StagedRevert> {
+        tracing::info!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            "revert commit started"
+        );
         let Some(state) = self.get_staged(session_id).await? else {
             return Err(DeepSeekCodeError::Other(
                 "no staged revert to commit".into(),

@@ -29,6 +29,11 @@ impl ProviderCatalog {
     }
 
     pub async fn load_from_store(&self) -> Result<()> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            "provider load_from_store started"
+        );
         if let Some(store) = &self.store {
             for provider_id in store.list_connected().await? {
                 if let Some(key) = store.get(&provider_id).await? {
@@ -43,6 +48,12 @@ impl ProviderCatalog {
         &self,
         providers: &HashMap<String, deepseekcode_config::ProviderConfig>,
     ) {
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            providers = providers.len(),
+            "provider load_from_config started"
+        );
         for (id, cfg) in providers {
             if let Some(key) = &cfg.api_key {
                 // Plaintext file key: warn once per provider per process; the
@@ -60,6 +71,7 @@ impl ProviderCatalog {
                 if fresh {
                     tracing::warn!(
                         target: deepseekcode_telemetry::APP,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                         provider_id = id.as_str(),
                         "provider API key is stored in plaintext in deepseekcode.jsonc; prefer `provider connect` (encrypted store) or env vars"
                     );
@@ -110,6 +122,13 @@ impl ProviderCatalog {
         api_key: String,
         base_url: Option<String>,
     ) -> Result<()> {
+        tracing::info!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            provider_id = %provider_id,
+            has_base_url = base_url.is_some(),
+            "provider connect started"
+        );
         self.credentials
             .write()
             .await
@@ -132,6 +151,7 @@ impl ProviderCatalog {
         }
         tracing::info!(
             target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             provider_id = provider_id,
             "provider connected"
         );
@@ -139,12 +159,19 @@ impl ProviderCatalog {
     }
 
     pub async fn disconnect(&self, provider_id: &str) -> Result<()> {
+        tracing::info!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            provider_id = %provider_id,
+            "provider disconnect started"
+        );
         self.credentials.write().await.remove(provider_id);
         if let Some(store) = &self.store {
             store.delete(provider_id).await?;
         }
         tracing::info!(
             target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             provider_id = provider_id,
             "provider disconnected"
         );
@@ -159,6 +186,12 @@ impl ProviderCatalog {
     }
 
     pub async fn resolve_api_key(&self, provider_id: &str) -> Option<String> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            provider_id = %provider_id,
+            "provider resolve_api_key queried"
+        );
         if let Some(key) = self.get_api_key(provider_id).await {
             return Some(key);
         }

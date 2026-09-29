@@ -1,4 +1,9 @@
 //! Pure logic helpers for desktop (unit-testable without GPUI).
+//!
+//! No engine/SDK I/O lives here, so this module emits no `tracing!` sites.
+//! Product logging for session/prompt/engine failures (DESKTOP target with
+//! `run_id` + `session_id`) lives in `workspace.rs` + `session_activity.rs`;
+//! timeline render diagnostics live in `activity_timeline.rs`.
 
 use deepseekcode_schema::activity::{
     ActivityGroupKind, ActivityKind, ActivityMeta, ActivityNode, ActivityTargetKind, ActivityTree,

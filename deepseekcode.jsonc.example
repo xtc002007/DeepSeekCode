@@ -62,13 +62,24 @@
     }
   },
 
+  // Product-grade logging: run-<ulid>/ holds app.log (+.1 when rotated),
+  // session.log (SESSION+TOOL+LLM per turn) + audit.log + panic.log + meta.json.
+  // Every event has run_id; HTTP adds request_id (joins middleware +
+  // service_error logs); session/tool add session_id + duration_ms.
+  // max_file_mb is enforced per-write (close-before-rename, keeps name+.1).
   "logging": {
     "level": "info",
     "console": true,
     "file": true,
+    // "dir": null, // override log root (else OS data_dir/deepseekcode/logs)
+    // "max_file_mb": 50, // per-file cap, 1..1024
+    // "max_run_dirs": 10, // prune oldest runs
     "audit": {
       "enabled": true,
+      // Redacted 500-char output preview when true; size-only when false.
+      // Hot-reloads on config reload (no restart needed).
       "include_tool_output": false,
+      // Full prompt when true; len+hash+80-char redacted prefix when false.
       "include_prompts": false
     }
   },

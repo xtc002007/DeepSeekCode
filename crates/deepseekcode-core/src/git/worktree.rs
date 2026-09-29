@@ -27,6 +27,12 @@ pub fn is_git_repository(path: &Path) -> bool {
 }
 
 pub fn worktree_info(path: &Path) -> Option<WorktreeInfo> {
+    tracing::debug!(
+        target: deepseekcode_telemetry::STORAGE,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        path = %path.display(),
+        "worktree_info queried"
+    );
     let root = discover_git_root(path)?;
     let mut cmd = Command::new("git");
     crate::process::hide_console(&mut cmd);
@@ -71,7 +77,24 @@ impl GitWorktreeManager {
     }
 
     pub fn list(&self) -> Result<Vec<WorktreeEntry>, deepseekcode_types::DeepSeekCodeError> {
-        let output = self.git(&["worktree", "list", "--porcelain"])?;
+        tracing::debug!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            repo = %self.repo_root.display(),
+            "git worktree list started"
+        );
+        let output = self
+            .git(&["worktree", "list", "--porcelain"])
+            .map_err(|e| {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::STORAGE,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    repo = %self.repo_root.display(),
+                    error = %e,
+                    "git worktree list failed"
+                );
+                e
+            })?;
         Ok(parse_worktree_porcelain(&output))
     }
 
@@ -79,7 +102,20 @@ impl GitWorktreeManager {
         &self,
         branch: Option<&str>,
     ) -> Result<WorktreeEntry, deepseekcode_types::DeepSeekCodeError> {
+        tracing::info!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            repo = %self.repo_root.display(),
+            branch = ?branch,
+            "git worktree create started"
+        );
         if !self.is_git_repo() {
+            tracing::warn!(
+                target: deepseekcode_telemetry::STORAGE,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                repo = %self.repo_root.display(),
+                "git worktree create failed: not a git repository"
+            );
             return Err(deepseekcode_types::DeepSeekCodeError::Other(
                 "not a git repository".into(),
             ));
@@ -117,12 +153,45 @@ impl GitWorktreeManager {
     }
 
     pub fn remove(&self, worktree_path: &str) -> Result<(), deepseekcode_types::DeepSeekCodeError> {
-        self.git(&["worktree", "remove", "--force", worktree_path])?;
+        tracing::info!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            repo = %self.repo_root.display(),
+            path = %worktree_path,
+            "git worktree remove started"
+        );
+        self.git(&["worktree", "remove", "--force", worktree_path])
+            .map_err(|e| {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::STORAGE,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    repo = %self.repo_root.display(),
+                    path = %worktree_path,
+                    error = %e,
+                    "git worktree remove failed"
+                );
+                e
+            })?;
         Ok(())
     }
 
     pub fn prune(&self) -> Result<(), deepseekcode_types::DeepSeekCodeError> {
-        self.git(&["worktree", "prune"])?;
+        tracing::info!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            repo = %self.repo_root.display(),
+            "git worktree prune started"
+        );
+        self.git(&["worktree", "prune"]).map_err(|e| {
+            tracing::warn!(
+                target: deepseekcode_telemetry::STORAGE,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                repo = %self.repo_root.display(),
+                error = %e,
+                "git worktree prune failed"
+            );
+            e
+        })?;
         Ok(())
     }
 

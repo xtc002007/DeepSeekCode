@@ -154,11 +154,40 @@ impl SessionExecution {
     /// turns and validates on read (P0-2). Returns whether a checkpoint was
     /// installed. History is appended, never rewritten.
     pub async fn compact_manual(self: &Arc<Self>, session_id: SessionId) -> Result<bool> {
+        tracing::info!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            "execution compact_manual started"
+        );
         let runner = self.runner_for(session_id).await;
-        runner.compact_manual_turn().await
+        let out = runner.compact_manual_turn().await;
+        match &out {
+            Ok(installed) => tracing::info!(
+                target: deepseekcode_telemetry::SESSION,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %session_id,
+                installed = *installed,
+                "execution compact_manual completed"
+            ),
+            Err(e) => tracing::error!(
+                target: deepseekcode_telemetry::SESSION,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %session_id,
+                error = %e,
+                "execution compact_manual failed"
+            ),
+        }
+        out
     }
 
     pub async fn wake(self: &Arc<Self>, session_id: SessionId) -> Result<()> {
+        tracing::info!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            "execution wake started"
+        );
         // A fresh user prompt starts a new run cycle: drop any leftover
         // interrupt request from a previous cancelled cycle.
         self.clear_interrupt_request(session_id).await;
@@ -168,6 +197,7 @@ impl SessionExecution {
                 self.drain_needs_rerun.write().await.insert(session_id);
                 tracing::debug!(
                     target: deepseekcode_telemetry::SESSION,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                     session_id = %session_id,
                     "session already draining; marked for rerun"
                 );
@@ -180,6 +210,12 @@ impl SessionExecution {
         if let Some(old) = self.drain_handles.lock().await.insert(session_id, handle) {
             old.abort();
         }
+        tracing::info!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            "execution wake completed"
+        );
         Ok(())
     }
 
@@ -188,85 +224,101 @@ impl SessionExecution {
         let active = self.drain_active.clone();
         let needs_rerun = self.drain_needs_rerun.clone();
         let events = self.events.clone();
-        tokio::spawn(async move {
-            loop {
-                // An interrupt may land between drain iterations; honor it
-                // instead of starting another run with a recreated runner.
-                if execution.is_interrupt_requested(session_id).await {
-                    break;
-                }
-                let result = execution.run(session_id).await;
-                let interrupted = matches!(
-                    result,
-                    Err(deepseekcode_types::DeepSeekCodeError::SessionInterrupted)
-                );
-                // ContextUnavailable (mandatory context missing) blocks the turn
-                // but is NOT an interrupt: keep prompt pending/retryable, no event.
-                let blocked = matches!(
-                    result,
-                    Err(deepseekcode_types::DeepSeekCodeError::ContextUnavailable(_))
-                );
-                if let Err(e) = result {
-                    if interrupted {
-                        tracing::debug!(
-                            target: deepseekcode_telemetry::SESSION,
-                            session_id = %session_id,
-                            "session drain interrupted"
-                        );
-                    } else if blocked {
-                        tracing::info!(
-                            target: deepseekcode_telemetry::SESSION,
-                            session_id = %session_id,
-                            error = %e,
-                            "session drain blocked on mandatory context; prompt stays pending"
-                        );
-                    } else {
-                        tracing::error!(
-                            target: deepseekcode_telemetry::SESSION,
-                            session_id = %session_id,
-                            error = %e,
-                            "session drain error"
-                        );
-                        // Non-interrupt errors must not masquerade as
-                        // SessionInterrupted; surface as a plain error event
-                        // payload on SessionIdle path or just break.
-                    }
-                    break;
-                }
-                let should_rerun = needs_rerun.write().await.remove(&session_id)
-                    || execution
-                        .sessions
-                        .has_unpromoted_pending(session_id)
-                        .await
-                        .unwrap_or(false);
-                if !should_rerun {
-                    // Don't announce idle for a cycle the user just cancelled.
+        // P3-2: task-locals do not cross `spawn`; capture the originating
+        // HTTP `request_id` so drain logs join 1:1 (session_id remains the
+        // primary key for multi-prompt drains).
+        let request_id = deepseekcode_telemetry::current_request_id();
+        tokio::spawn(deepseekcode_telemetry::scope_request_id(
+            request_id,
+            async move {
+                loop {
+                    // An interrupt may land between drain iterations; honor it
+                    // instead of starting another run with a recreated runner.
                     if execution.is_interrupt_requested(session_id).await {
                         break;
                     }
-                    let _ = events
-                        .append(EventKind::SessionIdle, Some(session_id), json!({}))
-                        .await;
-                    if let Ok(seq) = events.latest_seq(session_id).await {
-                        let _ = events
-                            .append(
-                                EventKind::ActivityUpdated,
-                                Some(session_id),
-                                json!({ "since_seq": seq }),
-                            )
-                            .await;
+                    let result = execution.run(session_id).await;
+                    let interrupted = matches!(
+                        result,
+                        Err(deepseekcode_types::DeepSeekCodeError::SessionInterrupted)
+                    );
+                    // ContextUnavailable (mandatory context missing) blocks the turn
+                    // but is NOT an interrupt: keep prompt pending/retryable, no event.
+                    let blocked = matches!(
+                        result,
+                        Err(deepseekcode_types::DeepSeekCodeError::ContextUnavailable(_))
+                    );
+                    if let Err(e) = result {
+                        if interrupted {
+                            tracing::debug!(
+                                target: deepseekcode_telemetry::SESSION,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
+                                session_id = %session_id,
+                                "session drain interrupted"
+                            );
+                        } else if blocked {
+                            tracing::info!(
+                                target: deepseekcode_telemetry::SESSION,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
+                                session_id = %session_id,
+                                error = %e,
+                                "session drain blocked on mandatory context; prompt stays pending"
+                            );
+                        } else {
+                            tracing::error!(
+                                target: deepseekcode_telemetry::SESSION,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
+                                session_id = %session_id,
+                                error = %e,
+                                "session drain error"
+                            );
+                            // Non-interrupt errors must not masquerade as
+                            // SessionInterrupted; surface as a plain error event
+                            // payload on SessionIdle path or just break.
+                        }
+                        break;
                     }
-                    break;
+                    let should_rerun = needs_rerun.write().await.remove(&session_id)
+                        || execution
+                            .sessions
+                            .has_unpromoted_pending(session_id)
+                            .await
+                            .unwrap_or(false);
+                    if !should_rerun {
+                        // Don't announce idle for a cycle the user just cancelled.
+                        if execution.is_interrupt_requested(session_id).await {
+                            break;
+                        }
+                        let _ = events
+                            .append(EventKind::SessionIdle, Some(session_id), json!({}))
+                            .await;
+                        if let Ok(seq) = events.latest_seq(session_id).await {
+                            let _ = events
+                                .append(
+                                    EventKind::ActivityUpdated,
+                                    Some(session_id),
+                                    json!({ "since_seq": seq }),
+                                )
+                                .await;
+                        }
+                        break;
+                    }
                 }
-            }
-            active.write().await.remove(&session_id);
-            // Drain finished: remove our own handle entry if it is still ours
-            // so `drain_handles` does not grow unbounded (P0-4). `drop_runner`
-            // / `wait_children` remove+await the live entry when present.
-        })
+                active.write().await.remove(&session_id);
+                // Drain finished: remove our own handle entry if it is still ours
+                // so `drain_handles` does not grow unbounded (P0-4). `drop_runner`
+                // / `wait_children` remove+await the live entry when present.
+            },
+        ))
     }
 
     pub async fn run(self: &Arc<Self>, session_id: SessionId) -> Result<()> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            "execution run started"
+        );
         // A cancelled cycle must not (re)enter a provider turn. Both checks
         // close the race where `interrupt()` lands while this function is
         // between its entry check and runner creation.
@@ -324,6 +376,14 @@ impl SessionExecution {
         agent: &str,
         prompt: &str,
     ) -> Result<SessionId> {
+        tracing::info!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            parent_id = %parent_id,
+            agent = %agent,
+            prompt = %deepseekcode_telemetry::summarize_prompt(prompt, false),
+            "execution spawn_child_task started"
+        );
         let sessions = SessionStore::new(self.db.pool().clone());
         let parent = sessions.get(parent_id).await?;
         let child_id = SessionId::new();
@@ -446,6 +506,12 @@ impl SessionExecution {
     }
 
     pub async fn interrupt(&self, session_id: SessionId) -> Result<()> {
+        tracing::info!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            "execution interrupt started"
+        );
         let mut stack = vec![session_id];
         while let Some(sid) = stack.pop() {
             let children: Vec<SessionId> = self
@@ -479,10 +545,10 @@ impl SessionExecution {
         }
     }
 
-    pub async fn refresh_mcp_tools_for_all_runners(&self) {
+    pub async fn refresh_mcp_tools_for_all_runners(&self, config: &DeepSeekCodeConfig) {
         let runners = self.runners.lock().await;
         for runner in runners.values() {
-            runner.refresh_mcp_tools().await;
+            runner.refresh_mcp_tools(config).await;
         }
     }
 

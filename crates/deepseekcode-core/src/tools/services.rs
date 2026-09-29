@@ -289,6 +289,13 @@ pub async fn emit_todo_updated(
     session_id: SessionId,
     todos: &[deepseekcode_schema::todo::TodoItem],
 ) -> Result<()> {
+    tracing::debug!(
+        target: deepseekcode_telemetry::TOOL,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        session_id = %session_id,
+        todos = todos.len(),
+        "emit_todo_updated started"
+    );
     if let Some(events) = &services.events {
         events
             .append(
@@ -305,6 +312,12 @@ pub async fn wait_for_question_answer(
     services: &ToolServices,
     timeout: std::time::Duration,
 ) -> Result<String> {
+    tracing::debug!(
+        target: deepseekcode_telemetry::TOOL,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        timeout_ms = timeout.as_millis() as u64,
+        "wait_for_question_answer started"
+    );
     let Some(tx_mutex) = services.question_tx.as_ref() else {
         return Err(deepseekcode_types::DeepSeekCodeError::ToolFailure(
             "question channel not configured".into(),

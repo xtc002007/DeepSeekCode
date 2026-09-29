@@ -4,6 +4,12 @@ use deepseekcode_schema::agent::AgentKind;
 use deepseekcode_schema::policy::{PolicyAction, PolicyRule, PolicyRuleset};
 
 pub fn agent_default_ruleset(agent: &AgentKind) -> PolicyRuleset {
+    tracing::debug!(
+        target: deepseekcode_telemetry::AUDIT,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        agent = ?agent,
+        "agent_default_ruleset built"
+    );
     let mut rules = base_defaults();
     match agent {
         AgentKind::Build => {

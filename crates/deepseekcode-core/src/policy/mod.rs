@@ -1,3 +1,7 @@
+//! Policy engine surface. Per-decision product logging lives in
+//! `evaluate.rs` (AUDIT target, scope/decision) and `service.rs` (AUDIT
+//! permit/block/prompt); this module only re-exports so it emits no separate
+//! `tracing!` sites.
 pub mod defaults;
 pub mod evaluate;
 pub mod patterns;

@@ -11,6 +11,14 @@ impl Database {
     pub async fn open(path: &str) -> Result<Self> {
         // Accept both bare paths and `sqlite://` URLs (embedded vs server
         // callers previously disagreed; normalize here so both work).
+        let start = std::time::Instant::now();
+        tracing::debug!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = "database.open",
+            path = %path,
+            "storage op start"
+        );
         let normalized = normalize_sqlite_url(path);
         let options = SqliteConnectOptions::from_str(&normalized)
             .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?
@@ -34,7 +42,17 @@ impl Database {
                 .idle_timeout(Some(Duration::from_secs(60)))
                 .connect_with(options)
                 .await
-                .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?
+                .map_err(|e| {
+                    tracing::error!(
+                        target: deepseekcode_telemetry::STORAGE,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
+                        operation = "database.open",
+                        path = %path,
+                        error = %e,
+                        "storage op failed"
+                    );
+                    DeepSeekCodeError::Storage(e.to_string())
+                })?
         } else {
             SqlitePoolOptions::new()
                 .max_connections(8)
@@ -43,12 +61,36 @@ impl Database {
                 .idle_timeout(Some(Duration::from_secs(300)))
                 .connect_with(options)
                 .await
-                .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?
+                .map_err(|e| {
+                    tracing::error!(
+                        target: deepseekcode_telemetry::STORAGE,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
+                        operation = "database.open",
+                        path = %path,
+                        error = %e,
+                        "storage op failed"
+                    );
+                    DeepSeekCodeError::Storage(e.to_string())
+                })?
         };
 
-        crate::migrations::run(&pool).await?;
+        crate::migrations::run(&pool).await.map_err(|e| {
+            tracing::error!(
+                target: deepseekcode_telemetry::STORAGE,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = "database.open",
+                path = %path,
+                error = %e,
+                "storage migrations failed"
+            );
+            e
+        })?;
         tracing::info!(
             target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = "database.open",
+            path = %path,
+            duration_ms = start.elapsed().as_millis() as u64,
             "database opened"
         );
         Ok(Self { pool })

@@ -43,6 +43,14 @@ impl Tool for PlanCompleteTool {
         input: Value,
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "plan_complete",
+            title = %input["title"].as_str().unwrap_or(""),
+            "plan_complete started"
+        );
         let title = input["title"]
             .as_str()
             .filter(|s| !s.trim().is_empty())

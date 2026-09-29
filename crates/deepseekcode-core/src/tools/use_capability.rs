@@ -97,6 +97,13 @@ impl super::registry::Tool for UseCapabilityTool {
         input: Value,
         _ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            tool = "use_capability",
+            action = %input.get("action").and_then(|v| v.as_str()).unwrap_or(""),
+            "use_capability started"
+        );
         let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("");
         match action {
             "list" => {

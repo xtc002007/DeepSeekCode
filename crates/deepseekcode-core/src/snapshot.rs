@@ -58,6 +58,13 @@ impl FileSnapshotStore {
         message_id: Option<MessageId>,
         file_path: &Path,
     ) -> Result<FileSnapshot> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            path = %file_path.display(),
+            "snapshot capture started"
+        );
         if !self.enabled {
             return Err(DeepSeekCodeError::Other("snapshots are disabled".into()));
         }
@@ -99,8 +106,25 @@ impl FileSnapshotStore {
         .bind(now.to_rfc3339())
         .execute(&self.pool)
         .await
-        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(
+                target: deepseekcode_telemetry::STORAGE,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %session_id,
+                error = %e,
+                "snapshot capture failed: db insert"
+            );
+            DeepSeekCodeError::Storage(e.to_string())
+        })?;
 
+        tracing::info!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            snapshot_id = %id,
+            path = %relative,
+            "snapshot capture completed"
+        );
         Ok(FileSnapshot {
             id,
             session_id,
@@ -112,6 +136,12 @@ impl FileSnapshotStore {
     }
 
     pub async fn get(&self, snapshot_id: &str) -> Result<Option<FileSnapshot>> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            snapshot_id = %snapshot_id,
+            "snapshot get started"
+        );
         let row = sqlx::query_as::<_, SnapshotRow>(
             r#"SELECT id, session_id, message_id, file_path, snapshot_path, created_at
                FROM file_snapshots WHERE id = ?"#,
@@ -129,6 +159,13 @@ impl FileSnapshotStore {
         session_id: SessionId,
         boundary_seq: i64,
     ) -> Result<Vec<FileSnapshot>> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            boundary_seq = boundary_seq,
+            "snapshots_after_seq started"
+        );
         let rows = sqlx::query_as::<_, SnapshotRow>(
             r#"SELECT fs.id, fs.session_id, fs.message_id, fs.file_path, fs.snapshot_path, fs.created_at
                FROM file_snapshots fs
@@ -154,6 +191,13 @@ impl FileSnapshotStore {
 
     /// Restore `target` from a stored snapshot. Deletes the file when the snapshot is a deletion marker.
     pub fn restore_snapshot(snapshot_path: &Path, target: &Path) -> Result<()> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            snapshot = %snapshot_path.display(),
+            target = %target.display(),
+            "snapshot restore started"
+        );
         // Exact-byte match: a text snapshot merely CONTAINING ".deleted"
         // (even with different whitespace) must restore, not delete. Binary
         // snapshots fall through to the byte-copy path with errors surfaced.

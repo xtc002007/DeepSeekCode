@@ -9,6 +9,7 @@ use reqwest::Client;
 use serde::de::DeserializeOwned;
 use std::pin::Pin;
 use std::str::FromStr;
+use std::time::Instant;
 
 /// `limit` for transport-error gaps: the failure carries no replay bound, so
 /// callers must reconnect from `head` immediately instead of backfilling.
@@ -68,17 +69,36 @@ impl DeepSeekCodeClient {
     }
 
     pub async fn create_session(&self, req: CreateSessionRequest) -> Result<Session> {
-        self.post("/api/v1/session", &req).await
+        // Never log `req` fully: it may carry directory/agent metadata only,
+        // but keep the boundary log to ids + run_id for correlation.
+        let session: Session = self.post("/api/v1/session", &req).await?;
+        tracing::info!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session.id,
+            "sdk session created"
+        );
+        Ok(session)
     }
 
     pub async fn prompt(&self, req: PromptRequest) -> Result<MessageId> {
-        let path = format!("/api/v1/session/{}/prompt", req.session_id);
+        // Never log `req.prompt`全文: log only session/message ids + run_id.
+        let session_id = req.session_id;
+        let path = format!("/api/v1/session/{session_id}/prompt");
         let resp: serde_json::Value = self.post(&path, &req).await?;
         let id = resp["message_id"].as_str().ok_or_else(|| {
             deepseekcode_types::DeepSeekCodeError::Other("missing message_id".into())
         })?;
-        MessageId::from_str(id)
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))
+        let message_id = MessageId::from_str(id)
+            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        tracing::info!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            message_id = %message_id,
+            "sdk prompt admitted"
+        );
+        Ok(message_id)
     }
 
     pub async fn interrupt(&self, session_id: SessionId) -> Result<()> {
@@ -308,6 +328,8 @@ impl DeepSeekCodeClient {
     }
 
     pub async fn remove_worktree(&self, path: &str) -> Result<()> {
+        let start = Instant::now();
+        let operation = "DELETE /api/v1/worktree";
         let query = format!("?path={}", urlencoding_encode(path));
         let mut req = self
             .http
@@ -316,14 +338,41 @@ impl DeepSeekCodeClient {
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+            }
+        };
         if !resp.status().is_success() {
+            let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            tracing::error!(
+                target: deepseekcode_telemetry::APP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = %operation,
+                latency_ms = start.elapsed().as_millis() as u64,
+                status = %status,
+                error = %text,
+                "sdk request failed"
+            );
             return Err(deepseekcode_types::DeepSeekCodeError::Other(text));
         }
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = %operation,
+            latency_ms = start.elapsed().as_millis() as u64,
+            "sdk request succeeded"
+        );
         Ok(())
     }
 
@@ -458,6 +507,8 @@ impl DeepSeekCodeClient {
         model_id: &str,
         provider_id: &str,
     ) -> Result<()> {
+        let start = Instant::now();
+        let operation = format!("POST /api/v1/session/{session_id}/model");
         let path = format!("/api/v1/session/{session_id}/model");
         let body = serde_json::json!({
             "agent": agent,
@@ -472,25 +523,54 @@ impl DeepSeekCodeClient {
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    session_id = %session_id,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+            }
+        };
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(deepseekcode_types::DeepSeekCodeError::Other(
-                if text.is_empty() {
-                    format!("update_model failed: {status}")
-                } else {
-                    text
-                },
-            ));
+            let msg = if text.is_empty() {
+                format!("update_model failed: {status}")
+            } else {
+                text
+            };
+            tracing::error!(
+                target: deepseekcode_telemetry::APP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = %operation,
+                session_id = %session_id,
+                latency_ms = start.elapsed().as_millis() as u64,
+                error = %msg,
+                "sdk request failed"
+            );
+            return Err(deepseekcode_types::DeepSeekCodeError::Other(msg));
         }
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = %operation,
+            session_id = %session_id,
+            latency_ms = start.elapsed().as_millis() as u64,
+            "sdk request succeeded"
+        );
         Ok(())
     }
 
     pub async fn update_session(&self, session_id: SessionId, title: Option<&str>) -> Result<()> {
+        let start = Instant::now();
+        let operation = format!("PATCH /api/v1/session/{session_id}");
         let path = format!("/api/v1/session/{session_id}");
         let body = serde_json::json!({ "title": title });
         let mut req = self
@@ -501,24 +581,53 @@ impl DeepSeekCodeClient {
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    session_id = %session_id,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+            }
+        };
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(deepseekcode_types::DeepSeekCodeError::Other(
-                if text.is_empty() {
-                    "update_session failed".into()
-                } else {
-                    text
-                },
-            ));
+            let msg: String = if text.is_empty() {
+                "update_session failed".into()
+            } else {
+                text
+            };
+            tracing::error!(
+                target: deepseekcode_telemetry::APP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = %operation,
+                session_id = %session_id,
+                latency_ms = start.elapsed().as_millis() as u64,
+                error = %msg,
+                "sdk request failed"
+            );
+            return Err(deepseekcode_types::DeepSeekCodeError::Other(msg));
         }
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = %operation,
+            session_id = %session_id,
+            latency_ms = start.elapsed().as_millis() as u64,
+            "sdk request succeeded"
+        );
         Ok(())
     }
 
     pub async fn delete_session(&self, session_id: SessionId) -> Result<()> {
+        let start = Instant::now();
+        let operation = format!("DELETE /api/v1/session/{session_id}");
         let path = format!("/api/v1/session/{session_id}");
         let mut req = self
             .http
@@ -527,20 +636,47 @@ impl DeepSeekCodeClient {
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    session_id = %session_id,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+            }
+        };
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(deepseekcode_types::DeepSeekCodeError::Other(
-                if text.is_empty() {
-                    "delete_session failed".into()
-                } else {
-                    text
-                },
-            ));
+            let msg: String = if text.is_empty() {
+                "delete_session failed".into()
+            } else {
+                text
+            };
+            tracing::error!(
+                target: deepseekcode_telemetry::APP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = %operation,
+                session_id = %session_id,
+                latency_ms = start.elapsed().as_millis() as u64,
+                error = %msg,
+                "sdk request failed"
+            );
+            return Err(deepseekcode_types::DeepSeekCodeError::Other(msg));
         }
+        tracing::info!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = %operation,
+            session_id = %session_id,
+            latency_ms = start.elapsed().as_millis() as u64,
+            "sdk request succeeded"
+        );
         Ok(())
     }
 
@@ -557,6 +693,8 @@ impl DeepSeekCodeClient {
     }
 
     pub async fn pty_ticket(&self, pty_id: &str) -> Result<(String, u64)> {
+        let start = Instant::now();
+        let operation = format!("GET /api/v1/pty/{pty_id}/ticket");
         let path = format!("/api/v1/pty/{pty_id}/ticket");
         let mut req = self
             .http
@@ -568,11 +706,36 @@ impl DeepSeekCodeClient {
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
-        let resp = self.handle_response::<serde_json::Value>(resp).await?;
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    pty_id = %pty_id,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+            }
+        };
+        let resp = match self.handle_response::<serde_json::Value>(resp).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    pty_id = %pty_id,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                return Err(e);
+            }
+        };
         let ticket = resp["ticket"]
             .as_str()
             .ok_or_else(|| {
@@ -580,6 +743,14 @@ impl DeepSeekCodeClient {
             })?
             .to_string();
         let expires_in = resp["expires_in"].as_u64().unwrap_or(60);
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = %operation,
+            pty_id = %pty_id,
+            latency_ms = start.elapsed().as_millis() as u64,
+            "sdk request succeeded"
+        );
         Ok((ticket, expires_in))
     }
 
@@ -633,6 +804,8 @@ impl DeepSeekCodeClient {
     }
 
     pub async fn fs_write(&self, session_id: SessionId, path: &str, content: &str) -> Result<()> {
+        let start = Instant::now();
+        let operation = "PUT /api/v1/fs/file";
         let body = serde_json::json!({
             "path": path,
             "content": content,
@@ -646,20 +819,47 @@ impl DeepSeekCodeClient {
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    session_id = %session_id,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+            }
+        };
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(deepseekcode_types::DeepSeekCodeError::Other(
-                if text.is_empty() {
-                    "fs_write failed".into()
-                } else {
-                    text
-                },
-            ));
+            let msg: String = if text.is_empty() {
+                "fs_write failed".into()
+            } else {
+                text
+            };
+            tracing::error!(
+                target: deepseekcode_telemetry::APP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = %operation,
+                session_id = %session_id,
+                latency_ms = start.elapsed().as_millis() as u64,
+                error = %msg,
+                "sdk request failed"
+            );
+            return Err(deepseekcode_types::DeepSeekCodeError::Other(msg));
         }
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = %operation,
+            session_id = %session_id,
+            latency_ms = start.elapsed().as_millis() as u64,
+            "sdk request succeeded"
+        );
         Ok(())
     }
 
@@ -689,6 +889,8 @@ impl DeepSeekCodeClient {
     }
 
     pub async fn resize_pty(&self, pty_id: &str, rows: u16, cols: u16) -> Result<()> {
+        let start = Instant::now();
+        let operation = format!("POST /api/v1/pty/{pty_id}/resize");
         let path = format!("/api/v1/pty/{pty_id}/resize");
         let body = serde_json::json!({ "rows": rows, "cols": cols });
         let mut req = self
@@ -699,24 +901,53 @@ impl DeepSeekCodeClient {
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    pty_id = %pty_id,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+            }
+        };
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(deepseekcode_types::DeepSeekCodeError::Other(
-                if text.is_empty() {
-                    "resize_pty failed".into()
-                } else {
-                    text
-                },
-            ));
+            let msg: String = if text.is_empty() {
+                "resize_pty failed".into()
+            } else {
+                text
+            };
+            tracing::error!(
+                target: deepseekcode_telemetry::APP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = %operation,
+                pty_id = %pty_id,
+                latency_ms = start.elapsed().as_millis() as u64,
+                error = %msg,
+                "sdk request failed"
+            );
+            return Err(deepseekcode_types::DeepSeekCodeError::Other(msg));
         }
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = %operation,
+            pty_id = %pty_id,
+            latency_ms = start.elapsed().as_millis() as u64,
+            "sdk request succeeded"
+        );
         Ok(())
     }
 
     pub async fn destroy_pty(&self, pty_id: &str) -> Result<()> {
+        let start = Instant::now();
+        let operation = format!("DELETE /api/v1/pty/{pty_id}");
         let path = format!("/api/v1/pty/{pty_id}");
         let mut req = self
             .http
@@ -725,20 +956,47 @@ impl DeepSeekCodeClient {
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    pty_id = %pty_id,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+            }
+        };
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(deepseekcode_types::DeepSeekCodeError::Other(
-                if text.is_empty() {
-                    "destroy_pty failed".into()
-                } else {
-                    text
-                },
-            ));
+            let msg: String = if text.is_empty() {
+                "destroy_pty failed".into()
+            } else {
+                text
+            };
+            tracing::error!(
+                target: deepseekcode_telemetry::APP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = %operation,
+                pty_id = %pty_id,
+                latency_ms = start.elapsed().as_millis() as u64,
+                error = %msg,
+                "sdk request failed"
+            );
+            return Err(deepseekcode_types::DeepSeekCodeError::Other(msg));
         }
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = %operation,
+            pty_id = %pty_id,
+            latency_ms = start.elapsed().as_millis() as u64,
+            "sdk request succeeded"
+        );
         Ok(())
     }
 
@@ -820,6 +1078,8 @@ impl DeepSeekCodeClient {
                 Err(e) => {
                     tracing::warn!(
                         target: deepseekcode_telemetry::SERVER,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
+                        since_seq = since_seq,
                         error = %e,
                         "sdk event stream transport error; emitting gap for retry"
                     );
@@ -879,38 +1139,111 @@ impl DeepSeekCodeClient {
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let start = Instant::now();
+        let operation = format!("GET {path}");
         let mut req = self.http.get(format!("{}{}", self.base_url, path));
         req = req.header("x-deepseekcode-directory", &self.directory);
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
-        self.handle_response(resp).await
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+            }
+        };
+        match self.handle_response(resp).await {
+            Ok(v) => {
+                tracing::debug!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    "sdk request succeeded"
+                );
+                Ok(v)
+            }
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                Err(e)
+            }
+        }
     }
 
     async fn get_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        let start = Instant::now();
+        let operation = format!("GET {path}");
         let mut req = self.http.get(format!("{}{}", self.base_url, path));
         req = req.header("x-deepseekcode-directory", &self.directory);
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+            }
+        };
         if !resp.status().is_success() {
+            let status = resp.status();
+            tracing::error!(
+                target: deepseekcode_telemetry::APP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = %operation,
+                latency_ms = start.elapsed().as_millis() as u64,
+                status = %status,
+                "sdk request failed"
+            );
             return Err(deepseekcode_types::DeepSeekCodeError::Other(format!(
-                "diagnostics export failed: {}",
-                resp.status()
+                "diagnostics export failed: {status}"
             )));
         }
-        resp.bytes()
-            .await
-            .map(|b| b.to_vec())
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))
+        match resp.bytes().await.map(|b| b.to_vec()) {
+            Ok(v) => {
+                tracing::debug!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    "sdk request succeeded"
+                );
+                Ok(v)
+            }
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))
+            }
+        }
     }
 
     async fn post<T: DeserializeOwned, B: serde::Serialize>(
@@ -918,6 +1251,8 @@ impl DeepSeekCodeClient {
         path: &str,
         body: &B,
     ) -> Result<T> {
+        let start = Instant::now();
+        let operation = format!("POST {path}");
         let mut req = self.http.post(format!("{}{}", self.base_url, path));
         req = req
             .header("x-deepseekcode-directory", &self.directory)
@@ -925,45 +1260,161 @@ impl DeepSeekCodeClient {
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
-        self.handle_response(resp).await
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+            }
+        };
+        match self.handle_response(resp).await {
+            Ok(v) => {
+                tracing::debug!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    "sdk request succeeded"
+                );
+                Ok(v)
+            }
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                Err(e)
+            }
+        }
     }
 
     async fn post_empty(&self, path: &str) -> Result<serde_json::Value> {
+        let start = Instant::now();
+        let operation = format!("POST {path}");
         let mut req = self.http.post(format!("{}{}", self.base_url, path));
         req = req.header("x-deepseekcode-directory", &self.directory);
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+            }
+        };
+        let body = match resp.text().await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+            }
+        };
         if body.trim().is_empty() {
+            tracing::debug!(
+                target: deepseekcode_telemetry::APP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = %operation,
+                latency_ms = start.elapsed().as_millis() as u64,
+                "sdk request succeeded"
+            );
             return Ok(serde_json::Value::Null);
         }
-        serde_json::from_str(&body)
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))
+        match serde_json::from_str(&body) {
+            Ok(v) => {
+                tracing::debug!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    "sdk request succeeded"
+                );
+                Ok(v)
+            }
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))
+            }
+        }
     }
 
     async fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let start = Instant::now();
+        let operation = format!("DELETE {path}");
         let mut req = self.http.delete(format!("{}{}", self.base_url, path));
         req = req.header("x-deepseekcode-directory", &self.directory);
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
-        self.handle_response(resp).await
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+            }
+        };
+        match self.handle_response(resp).await {
+            Ok(v) => {
+                tracing::debug!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    "sdk request succeeded"
+                );
+                Ok(v)
+            }
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                Err(e)
+            }
+        }
     }
 
     async fn put<T: DeserializeOwned, B: serde::Serialize>(
@@ -971,6 +1422,8 @@ impl DeepSeekCodeClient {
         path: &str,
         body: &B,
     ) -> Result<T> {
+        let start = Instant::now();
+        let operation = format!("PUT {path}");
         let mut req = self
             .http
             .put(format!("{}{}", self.base_url, path))
@@ -979,10 +1432,42 @@ impl DeepSeekCodeClient {
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
-        self.handle_response(resp).await
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+            }
+        };
+        match self.handle_response(resp).await {
+            Ok(v) => {
+                tracing::debug!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    "sdk request succeeded"
+                );
+                Ok(v)
+            }
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    operation = %operation,
+                    latency_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "sdk request failed"
+                );
+                Err(e)
+            }
+        }
     }
 }

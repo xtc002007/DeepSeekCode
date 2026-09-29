@@ -502,6 +502,7 @@ impl WorkspaceView {
     pub fn open_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         tracing::info!(
             target: deepseekcode_telemetry::DESKTOP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
             path = %path.display(),
             "open_project"
         );
@@ -527,6 +528,7 @@ impl WorkspaceView {
         if let Some(_message) = Self::ensure_agents_md(path) {
             tracing::info!(
                 target: deepseekcode_telemetry::DESKTOP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                 path = %path.display(),
                 "project context prepared"
             );
@@ -682,7 +684,7 @@ impl WorkspaceView {
                     });
                 }
                 Err(e) => {
-                    tracing::error!(target: deepseekcode_telemetry::DESKTOP, error = %e, "revert action failed");
+                    tracing::error!(target: deepseekcode_telemetry::DESKTOP, run_id = %deepseekcode_telemetry::current_run_id(), error = %e, "revert action failed");
                     let message = e.to_string();
                     let _ = view.update(cx, |this, cx| {
                         this.revert_dock.error = Some(message);
@@ -747,6 +749,7 @@ impl WorkspaceView {
                     if std::fs::write(&path, json).is_ok() {
                         tracing::info!(
                             target: deepseekcode_telemetry::DESKTOP,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
                             path = %path.display(),
                             sanitize = sanitize,
                             "session exported"
@@ -1264,6 +1267,7 @@ impl WorkspaceView {
             });
         tracing::info!(
             target: deepseekcode_telemetry::DESKTOP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
             project = current_dir.as_deref().unwrap_or("(none)"),
             load_sessions_for = paths_to_load.len(),
             "refresh_project_nav started"
@@ -1379,6 +1383,7 @@ impl WorkspaceView {
                 }
                 tracing::info!(
                     target: deepseekcode_telemetry::DESKTOP,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                     project_count = this.project_nav.len(),
                     active_sessions = active_count,
                     elapsed_ms = started.elapsed().as_millis() as u64,
@@ -1464,6 +1469,7 @@ impl WorkspaceView {
             let Some(client) = client else {
                 tracing::warn!(
                     target: deepseekcode_telemetry::DESKTOP,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                     session_id = %session_id,
                     "hydrate skipped: sdk client unavailable"
                 );
@@ -1483,6 +1489,7 @@ impl WorkspaceView {
                 Err(e) => {
                     tracing::warn!(
                         target: deepseekcode_telemetry::DESKTOP,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
                         session_id = %session_id,
                         error = %e,
                         "list_activity failed; falling back to local projection from events"
@@ -1497,6 +1504,7 @@ impl WorkspaceView {
             if activity.roots.is_empty() && !session_events.is_empty() {
                 tracing::warn!(
                     target: deepseekcode_telemetry::DESKTOP,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                     session_id = %session_id,
                     event_count = session_events.len(),
                     "server returned empty activity tree for non-empty history; rebuilding locally"
@@ -1506,6 +1514,7 @@ impl WorkspaceView {
 
             tracing::info!(
                 target: deepseekcode_telemetry::DESKTOP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                 session_id = %session_id,
                 message_count = messages.len(),
                 event_count = session_events.len(),
@@ -1678,6 +1687,7 @@ Describe this project so the AI assistant has context.\n\n\
             Err(e) => {
                 tracing::warn!(
                     target: deepseekcode_telemetry::DESKTOP,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                     path = %agents.display(),
                     error = %e,
                     "failed to create AGENTS.md"
@@ -1705,6 +1715,7 @@ Describe this project so the AI assistant has context.\n\n\
                     Err(e) => {
                         tracing::error!(
                             target: deepseekcode_telemetry::DESKTOP,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
                             error = %e,
                             "failed to start embedded engine"
                         );
@@ -1743,6 +1754,7 @@ Describe this project so the AI assistant has context.\n\n\
                 } else {
                     tracing::warn!(
                         target: deepseekcode_telemetry::DESKTOP,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
                         "remote server unreachable, falling back to embedded engine"
                     );
                     Self::bootstrap_embedded_client(&engine_slot, &client_slot, &path_str).await
@@ -2132,6 +2144,7 @@ Describe this project so the AI assistant has context.\n\n\
                     if content.is_none() {
                         tracing::warn!(
                             target: deepseekcode_telemetry::DESKTOP,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
                             path = %path,
                             "failed to open file"
                         );
@@ -2214,12 +2227,14 @@ Describe this project so the AI assistant has context.\n\n\
             match result {
                 Ok(()) => tracing::warn!(
                     target: deepseekcode_telemetry::DESKTOP,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                     path = %path,
                     backup = %dest.display(),
                     "unsaved editor buffer backed up before workspace reset"
                 ),
                 Err(e) => tracing::error!(
                     target: deepseekcode_telemetry::DESKTOP,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                     path = %path,
                     error = %e,
                     "failed to back up unsaved editor buffer"
@@ -2323,6 +2338,7 @@ Describe this project so the AI assistant has context.\n\n\
             let Some(client) = client else {
                 tracing::warn!(
                     target: deepseekcode_telemetry::DESKTOP,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                     tab_id,
                     reason = "embedded client not ready",
                     "pty connection failed"
@@ -2339,6 +2355,7 @@ Describe this project so the AI assistant has context.\n\n\
                     let reason = format!("create PTY failed: {e}");
                     tracing::warn!(
                         target: deepseekcode_telemetry::DESKTOP,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
                         tab_id,
                         reason = %reason,
                         "pty connection failed"
@@ -2371,6 +2388,7 @@ Describe this project so the AI assistant has context.\n\n\
                     let reason = format!("WebSocket connect failed ({ws_url}): {e}");
                     tracing::warn!(
                         target: deepseekcode_telemetry::DESKTOP,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
                         tab_id,
                         reason = %reason,
                         "pty connection failed"
@@ -2533,6 +2551,7 @@ Describe this project so the AI assistant has context.\n\n\
         let generation_slot = Arc::clone(&self.event_stream_generation);
         tracing::info!(
             target: deepseekcode_telemetry::DESKTOP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
             since_seq = since,
             session_id = ?filter_session,
             generation,
@@ -2560,6 +2579,7 @@ Describe this project so the AI assistant has context.\n\n\
                                 EventStreamItem::Gap { head, .. } => {
                                     tracing::warn!(
                                         target: deepseekcode_telemetry::DESKTOP,
+                                            run_id = %deepseekcode_telemetry::current_run_id(),
                                         since_seq = since_seq,
                                         head = head,
                                         "sse gap detected, backfilling via REST"
@@ -2618,6 +2638,7 @@ Describe this project so the AI assistant has context.\n\n\
                         }
                         tracing::warn!(
                             target: deepseekcode_telemetry::DESKTOP,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
                             since_seq = since_seq,
                             "event stream disconnected, reconnecting"
                         );
@@ -2625,6 +2646,7 @@ Describe this project so the AI assistant has context.\n\n\
                     Err(e) => {
                         tracing::error!(
                             target: deepseekcode_telemetry::DESKTOP,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
                             error = %e,
                             "failed to connect event stream, retrying"
                         );
@@ -2764,6 +2786,7 @@ Describe this project so the AI assistant has context.\n\n\
         if self.session_busy != busy || self.session_status != status {
             tracing::info!(
                 target: deepseekcode_telemetry::DESKTOP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                 busy,
                 prev_busy = self.session_busy,
                 status = %status,
@@ -2810,6 +2833,7 @@ Describe this project so the AI assistant has context.\n\n\
         if self.session_follow_tail != at_bottom {
             tracing::debug!(
                 target: deepseekcode_telemetry::DESKTOP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                 at_bottom,
                 offset_y = ?self.session_scroll.offset().y,
                 max_scroll = ?max_scroll,
@@ -2835,6 +2859,7 @@ Describe this project so the AI assistant has context.\n\n\
             self.activity.defer_event_during_hydration(event.clone());
             tracing::debug!(
                 target: deepseekcode_telemetry::DESKTOP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                 kind = %event.kind.as_str(),
                 seq = event.seq,
                 "apply_event deferred during hydration (queued for replay)"
@@ -2846,6 +2871,7 @@ Describe this project so the AI assistant has context.\n\n\
                 if event.seq <= cutoff {
                     tracing::debug!(
                         target: deepseekcode_telemetry::DESKTOP,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
                         kind = %event.kind.as_str(),
                         seq = event.seq,
                         cutoff,
@@ -2860,6 +2886,7 @@ Describe this project so the AI assistant has context.\n\n\
             self.activity.since_seq = event.seq;
             tracing::info!(
                 target: deepseekcode_telemetry::DESKTOP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                 session_id = ?event.session_id,
                 seq = event.seq,
                 since_seq = event.payload.get("since_seq").and_then(|v| v.as_i64()),
@@ -2887,6 +2914,7 @@ Describe this project so the AI assistant has context.\n\n\
         if log_apply {
             tracing::info!(
                 target: deepseekcode_telemetry::DESKTOP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                 session_id = ?event.session_id,
                 kind = %event.kind.as_str(),
                 seq = event.seq,
@@ -2896,6 +2924,7 @@ Describe this project so the AI assistant has context.\n\n\
         } else {
             tracing::debug!(
                 target: deepseekcode_telemetry::DESKTOP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                 session_id = ?event.session_id,
                 kind = %event.kind.as_str(),
                 seq = event.seq,
@@ -3224,6 +3253,7 @@ Describe this project so the AI assistant has context.\n\n\
             if roots_after == 0 && roots_before > 0 {
                 tracing::warn!(
                     target: deepseekcode_telemetry::DESKTOP,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                     kind = %event.kind.as_str(),
                     seq = event.seq,
                     event_count = self.activity.session_events.len(),
@@ -3323,6 +3353,7 @@ Describe this project so the AI assistant has context.\n\n\
         }
         tracing::info!(
             target: deepseekcode_telemetry::DESKTOP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
             text_len = text.len(),
             session_id = ?self.session_id,
             "submit_prompt invoked"
@@ -3390,6 +3421,7 @@ Describe this project so the AI assistant has context.\n\n\
                 {
                     tracing::error!(
                         target: deepseekcode_telemetry::DESKTOP,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
                         session_id = %session_id,
                         provider_id = %provider_id,
                         model_id = %model_id,
@@ -3419,6 +3451,7 @@ Describe this project so the AI assistant has context.\n\n\
                     Ok(_) => {
                         tracing::info!(
                             target: deepseekcode_telemetry::DESKTOP,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
                             session_id = %session_id,
                             "prompt submitted"
                         );
@@ -3439,6 +3472,7 @@ Describe this project so the AI assistant has context.\n\n\
                     Err(e) => {
                         tracing::error!(
                             target: deepseekcode_telemetry::DESKTOP,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
                             session_id = %session_id,
                             error = %e,
                             "prompt submit failed"
@@ -3470,6 +3504,7 @@ Describe this project so the AI assistant has context.\n\n\
                 if let Err(e) = client.interrupt(session_id).await {
                     tracing::error!(
                         target: deepseekcode_telemetry::DESKTOP,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
                         session_id = %session_id,
                         error = %e,
                         "interrupt failed"
@@ -3818,6 +3853,7 @@ Describe this project so the AI assistant has context.\n\n\
                 if let Err(e) = client.reply_policy(&id, reply).await {
                     tracing::error!(
                         target: deepseekcode_telemetry::DESKTOP,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
                         policy_id = %id,
                         error = %e,
                         "policy reply failed"
@@ -3869,6 +3905,7 @@ Describe this project so the AI assistant has context.\n\n\
                     Err(e) => {
                         tracing::error!(
                             target: deepseekcode_telemetry::DESKTOP,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
                             session_id = %session_id,
                             error = %e,
                             "question answer failed"
@@ -4007,6 +4044,7 @@ Describe this project so the AI assistant has context.\n\n\
                     ok = false;
                     tracing::warn!(
                         target: deepseekcode_telemetry::DESKTOP,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
                         error = %e,
                         "dismiss plan prompt failed; rolling back"
                     );
@@ -4532,6 +4570,7 @@ Describe this project so the AI assistant has context.\n\n\
                     Err(e) => {
                         tracing::error!(
                             target: deepseekcode_telemetry::DESKTOP,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
                             error = %e,
                             "move session failed"
                         );
@@ -4627,6 +4666,7 @@ Describe this project so the AI assistant has context.\n\n\
         let Some(session_id) = self.session_id else {
             tracing::warn!(
                 target: deepseekcode_telemetry::DESKTOP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                 "save file skipped: no active session"
             );
             return;
@@ -4652,6 +4692,7 @@ Describe this project so the AI assistant has context.\n\n\
                     Err(e) => {
                         tracing::error!(
                             target: deepseekcode_telemetry::DESKTOP,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
                             error = %e,
                             "save file failed"
                         );
@@ -5157,6 +5198,7 @@ Describe this project so the AI assistant has context.\n\n\
                     Ok(()) => {
                         tracing::info!(
                             target: deepseekcode_telemetry::DESKTOP,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
                             provider_id = %provider_id,
                             "provider connected from desktop"
                         );
@@ -5278,6 +5320,7 @@ Describe this project so the AI assistant has context.\n\n\
             let window_id = self.window_manager.open(dir.clone());
             tracing::info!(
                 target: deepseekcode_telemetry::DESKTOP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                 window_id = window_id,
                 path = %dir.display(),
                 windows = ?self.window_manager.window_summaries(),
@@ -6406,6 +6449,7 @@ impl WorkspaceView {
         if children.is_empty() {
             tracing::debug!(
                 target: deepseekcode_telemetry::DESKTOP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                 reason,
                 "child projection refresh skipped (no child sessions)"
             );
@@ -6417,6 +6461,7 @@ impl WorkspaceView {
             + 1;
         tracing::info!(
             target: deepseekcode_telemetry::DESKTOP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
             reason,
             child_count = children.len(),
             generation,
@@ -6448,6 +6493,7 @@ impl WorkspaceView {
             if projections.is_empty() {
                 tracing::warn!(
                     target: deepseekcode_telemetry::DESKTOP,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                     reason,
                     "child projection refresh returned no data"
                 );
@@ -6457,6 +6503,7 @@ impl WorkspaceView {
                 if generation_slot.load(Ordering::SeqCst) != generation {
                     tracing::debug!(
                         target: deepseekcode_telemetry::DESKTOP,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
                         reason,
                         generation,
                         "child projection refresh superseded"

@@ -226,6 +226,14 @@ pub fn build_tool_result(
     hook_title: Option<String>,
     hook_metadata: Value,
 ) -> ToolResultEnvelope {
+    tracing::debug!(
+        target: deepseekcode_telemetry::TOOL,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        tool = %tool,
+        duration_ms = duration_ms,
+        output_bytes = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0),
+        "build_tool_result assembled"
+    );
     let title = hook_title.unwrap_or_else(|| preview_title_from_input(tool, input));
     let mut metadata = enrich_metadata(tool, input, &output);
     if let (Some(hook_obj), Some(meta_obj)) = (hook_metadata.as_object(), metadata.as_object_mut())

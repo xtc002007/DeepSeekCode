@@ -33,6 +33,13 @@ impl<'a> PromptPromoter<'a> {
     }
 
     pub async fn promote_at_safe_boundary(&self, baseline_ready: bool) -> Result<bool> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %self.session_id,
+            baseline_ready = baseline_ready,
+            "prompt promote_at_safe_boundary started"
+        );
         if self.in_provider_turn.load(Ordering::SeqCst) {
             return self.promote_steer_if_any().await;
         }
@@ -54,6 +61,12 @@ impl<'a> PromptPromoter<'a> {
     }
 
     pub async fn promote_steer_if_any(&self) -> Result<bool> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %self.session_id,
+            "prompt promote_steer_if_any started"
+        );
         let pending = self.sessions.pending_inputs(self.session_id).await?;
         let next = pending
             .into_iter()
@@ -65,6 +78,14 @@ impl<'a> PromptPromoter<'a> {
     }
 
     async fn promote_input(&self, message_id: MessageId, prompt: &str) -> Result<bool> {
+        tracing::info!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %self.session_id,
+            message_id = %message_id,
+            prompt = %deepseekcode_telemetry::summarize_prompt(prompt, false),
+            "prompt promoted"
+        );
         self.sessions
             .promote_input_atomic(message_id, self.session_id, prompt)
             .await?;

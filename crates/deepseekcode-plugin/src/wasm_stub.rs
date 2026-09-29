@@ -19,10 +19,18 @@ pub struct StubModule {
 
 impl WasmPluginRuntime {
     pub fn validate(path: &Path) -> Result<()> {
-        Err(DeepSeekCodeError::Other(format!(
+        let err = DeepSeekCodeError::Other(format!(
             "wasm plugins are disabled in this build ({} not loaded)",
             path.display()
-        )))
+        ));
+        tracing::error!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            path = %path.display(),
+            error = %err,
+            "wasm call failed: runtime disabled"
+        );
+        Err(err)
     }
 
     pub fn create_engine() -> StubEngine {

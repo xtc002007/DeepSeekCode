@@ -17,12 +17,36 @@ pub fn build_filter_string(config: &LoggingConfig) -> String {
     // P1-13: real targets use `::` (`deepseekcode::app`), not crate
     // underscores. Emit both the top-level prefix and the actual module
     // targets so per-module tuning works.
+    // Product-grade fix: cover EVERY canonical subsystem target. Previously
+    // only app/session/tool/audit were emitted, so llm/storage/server/
+    // desktop/cli/permission fell back to the bare `deepseekcode=` prefix
+    // and could be silently mistuned when users set per-target overrides.
     let mut parts = vec![
         format!("deepseekcode={level}"),
-        format!("deepseekcode::app={level}"),
-        format!("deepseekcode::session={level}"),
-        format!("deepseekcode::tool={level}"),
-        format!("deepseekcode::audit={level}"),
+        format!("{}={level}", crate::targets::APP),
+        format!("{}={level}", crate::targets::SESSION),
+        format!("{}={level}", crate::targets::TOOL),
+        format!("{}={level}", crate::targets::AUDIT),
+        format!("{}={level}", crate::targets::LLM),
+        format!("{}={level}", crate::targets::STORAGE),
+        format!("{}={level}", crate::targets::SERVER),
+        format!("{}={level}", crate::targets::DESKTOP),
+        format!("{}={level}", crate::targets::CLI),
+        format!("{}={level}", crate::targets::PERMISSION),
+        // Crate-prefix fallback: events without an explicit `target:`
+        // (module path like `deepseekcode_core::engine`) must not be
+        // silently dropped if `deepseekcode=` prefix matching ever narrows.
+        format!("deepseekcode_core={level}"),
+        format!("deepseekcode_config={level}"),
+        format!("deepseekcode_llm={level}"),
+        format!("deepseekcode_storage={level}"),
+        format!("deepseekcode_embed={level}"),
+        format!("deepseekcode_sdk={level}"),
+        format!("deepseekcode_plugin={level}"),
+        format!("deepseekcode_telemetry={level}"),
+        format!("deepseekcode_server={level}"),
+        format!("deepseekcode_cli={level}"),
+        format!("deepseekcode_desktop={level}"),
     ];
 
     for (module, module_level) in &config.modules {

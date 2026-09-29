@@ -32,6 +32,18 @@ impl Tool for TaskTool {
         input: Value,
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "task",
+            agent = %input["agent"].as_str().unwrap_or("build"),
+            prompt = %deepseekcode_telemetry::summarize_prompt(
+                input["prompt"].as_str().unwrap_or(""),
+                false
+            ),
+            "task started"
+        );
         let agent = input["agent"].as_str().unwrap_or("build").to_string();
         let prompt = input["prompt"].as_str().unwrap_or("").to_string();
         let title = input["title"]

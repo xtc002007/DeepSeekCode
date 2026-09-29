@@ -44,28 +44,161 @@ pub async fn generate(
     api_key: Option<String>,
     base_url: Option<&str>,
 ) -> Result<crate::request::LlmResponse> {
+    let start = std::time::Instant::now();
     let route = OpenAiRoute::new();
-    let api_key = api_key
-        .filter(|k| !k.trim().is_empty())
-        .ok_or_else(|| DeepSeekCodeError::Llm("OpenAI API key not set".into()))?;
-    let body = route.protocol.build_body(request, false);
     let url = route.endpoint.resolve(base_url);
+    let endpoint_host = crate::redact_endpoint_for_log(&url);
+    tracing::info!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider = "openai",
+        model = %request.model,
+        endpoint_host = %endpoint_host,
+        message_count = request.messages.len(),
+        tool_count = request.tools.len(),
+        system_summary = %deepseekcode_telemetry::summarize_prompt(&request.system, false),
+        "llm openai generate start"
+    );
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider = "openai",
+        model = %request.model,
+        endpoint_host = %endpoint_host,
+        "llm openai generate debug"
+    );
+    crate::providers::log_provider_route("openai", &request.model, &endpoint_host);
+    let api_key = match api_key.filter(|k| !k.trim().is_empty()) {
+        Some(k) => k,
+        None => {
+            tracing::error!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "openai",
+                model = %request.model,
+                endpoint_host = %endpoint_host,
+                error = "OpenAI API key not set",
+                "llm auth failed"
+            );
+            return Err(DeepSeekCodeError::Llm("OpenAI API key not set".into()));
+        }
+    };
+    let body = route.protocol.build_body(request, false);
 
-    let response = crate::http_client::post_json_with_fallback(http, &url, &api_key, &body, true)
-        .await
-        .map_err(|combined| DeepSeekCodeError::Llm(format!("{url}: {combined}")))?;
+    let response = match crate::http_client::post_json_with_fallback(
+        http, &url, &api_key, &body, true,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(combined) => {
+            tracing::error!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "openai",
+                model = %request.model,
+                endpoint_host = %endpoint_host,
+                duration_ms = start.elapsed().as_millis() as u64,
+                error_summary = %deepseekcode_telemetry::summarize_prompt(&combined, false),
+                "llm openai generate transport failed"
+            );
+            crate::providers::log_provider_error("openai", &request.model, &combined);
+            return Err(DeepSeekCodeError::Llm(format!("{url}: {combined}")));
+        }
+    };
 
     if !response.status().is_success() {
+        let status = response.status();
         let text = response.text().await.unwrap_or_default();
+        let sanitized = crate::axis::framing::sanitize_llm_error(&text);
+        tracing::warn!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            provider = "openai",
+            model = %request.model,
+            endpoint_host = %endpoint_host,
+            status = %status,
+            duration_ms = start.elapsed().as_millis() as u64,
+            error_summary = %deepseekcode_telemetry::summarize_prompt(&sanitized, false),
+            "llm openai generate non-success status"
+        );
+        tracing::error!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            provider = "openai",
+            model = %request.model,
+            status = %status,
+            error_summary = %deepseekcode_telemetry::summarize_prompt(&sanitized, false),
+            "llm openai generate failed"
+        );
+        if crate::overflow::is_context_overflow(&sanitized) {
+            tracing::warn!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "openai",
+                model = %request.model,
+                "llm openai generate context overflow"
+            );
+        }
         return Err(DeepSeekCodeError::Llm(text));
     }
 
-    let value: Value = response
-        .json()
-        .await
-        .map_err(|e| DeepSeekCodeError::Llm(e.to_string()))?;
+    let status = response.status();
+    let value: Value = match response.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "openai",
+                model = %request.model,
+                endpoint_host = %endpoint_host,
+                duration_ms = start.elapsed().as_millis() as u64,
+                error = %e,
+                "llm openai generate response JSON parse failed"
+            );
+            tracing::error!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "openai",
+                model = %request.model,
+                error = %e,
+                "llm openai generate parse error"
+            );
+            return Err(DeepSeekCodeError::Llm(e.to_string()));
+        }
+    };
 
-    crate::axis::framing::parse_message_response(&value)
+    match crate::axis::framing::parse_message_response(&value) {
+        Ok(resp) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "openai",
+                model = %request.model,
+                endpoint_host = %endpoint_host,
+                duration_ms = start.elapsed().as_millis() as u64,
+                status = %status,
+                output_tokens = ?resp.usage.as_ref().and_then(|u| u.output_tokens),
+                tool_call_count = resp.tool_calls.len(),
+                "llm openai generate succeeded"
+            );
+            Ok(resp)
+        }
+        Err(e) => {
+            tracing::error!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "openai",
+                model = %request.model,
+                endpoint_host = %endpoint_host,
+                duration_ms = start.elapsed().as_millis() as u64,
+                error = %e,
+                "llm openai generate response parse failed"
+            );
+            Err(e)
+        }
+    }
 }
 
 pub async fn stream(
@@ -74,22 +207,113 @@ pub async fn stream(
     api_key: Option<String>,
     base_url: Option<&str>,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent>> + Send>>> {
+    let start = std::time::Instant::now();
     let route = OpenAiRoute::new();
-    let api_key = api_key
-        .filter(|k| !k.trim().is_empty())
-        .ok_or_else(|| DeepSeekCodeError::Llm("OpenAI API key not set".into()))?;
-    let body = route.protocol.build_body(request, true);
     let url = route.endpoint.resolve(base_url);
+    let endpoint_host = crate::redact_endpoint_for_log(&url);
+    tracing::info!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider = "openai",
+        model = %request.model,
+        endpoint_host = %endpoint_host,
+        message_count = request.messages.len(),
+        tool_count = request.tools.len(),
+        system_summary = %deepseekcode_telemetry::summarize_prompt(&request.system, false),
+        "llm openai stream start"
+    );
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider = "openai",
+        model = %request.model,
+        endpoint_host = %endpoint_host,
+        "llm openai stream debug"
+    );
+    crate::providers::log_provider_route("openai", &request.model, &endpoint_host);
+    let api_key = match api_key.filter(|k| !k.trim().is_empty()) {
+        Some(k) => k,
+        None => {
+            tracing::error!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "openai",
+                model = %request.model,
+                endpoint_host = %endpoint_host,
+                error = "OpenAI API key not set",
+                "llm auth failed"
+            );
+            return Err(DeepSeekCodeError::Llm("OpenAI API key not set".into()));
+        }
+    };
+    let body = route.protocol.build_body(request, true);
     let framing = route.framing;
 
-    let response = crate::http_client::post_json_with_fallback(http, &url, &api_key, &body, false)
-        .await
-        .map_err(|combined| DeepSeekCodeError::Llm(format!("{url}: {combined}")))?;
+    let response =
+        match crate::http_client::post_json_with_fallback(http, &url, &api_key, &body, false).await
+        {
+            Ok(r) => r,
+            Err(combined) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    provider = "openai",
+                    model = %request.model,
+                    endpoint_host = %endpoint_host,
+                    duration_ms = start.elapsed().as_millis() as u64,
+                    error_summary = %deepseekcode_telemetry::summarize_prompt(&combined, false),
+                    "llm openai stream transport failed"
+                );
+                crate::providers::log_provider_error("openai", &request.model, &combined);
+                return Err(DeepSeekCodeError::Llm(format!("{url}: {combined}")));
+            }
+        };
 
     if !response.status().is_success() {
+        let status = response.status();
         let text = response.text().await.unwrap_or_default();
+        let sanitized = crate::axis::framing::sanitize_llm_error(&text);
+        tracing::warn!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            provider = "openai",
+            model = %request.model,
+            endpoint_host = %endpoint_host,
+            status = %status,
+            duration_ms = start.elapsed().as_millis() as u64,
+            error_summary = %deepseekcode_telemetry::summarize_prompt(&sanitized, false),
+            "llm openai stream non-success status"
+        );
+        tracing::error!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            provider = "openai",
+            model = %request.model,
+            status = %status,
+            error_summary = %deepseekcode_telemetry::summarize_prompt(&sanitized, false),
+            "llm openai stream failed"
+        );
+        if crate::overflow::is_context_overflow(&sanitized) {
+            tracing::warn!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = "openai",
+                model = %request.model,
+                "llm openai stream context overflow"
+            );
+        }
         return Err(DeepSeekCodeError::Llm(text));
     }
+    tracing::info!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider = "openai",
+        model = %request.model,
+        endpoint_host = %endpoint_host,
+        duration_ms = start.elapsed().as_millis() as u64,
+        status = %response.status(),
+        "llm openai stream opened"
+    );
 
     let byte_stream = response.bytes_stream();
     let mapped = byte_stream
@@ -107,6 +331,19 @@ pub async fn stream(
                         // across chunks (P0-5 mojibake fix).
                         buffer.extend_from_slice(&bytes);
                         if buffer.len() > 1024 * 1024 {
+                            tracing::warn!(
+                                target: deepseekcode_telemetry::LLM,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
+                                provider = "openai",
+                                buffer_len = buffer.len(),
+                                "llm openai stream buffer overflow; truncating"
+                            );
+                            tracing::error!(
+                                target: deepseekcode_telemetry::LLM,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
+                                provider = "openai",
+                                "llm openai stream truncation triggered"
+                            );
                             buffer.clear();
                             return futures::future::ready(Some(vec![]));
                         }

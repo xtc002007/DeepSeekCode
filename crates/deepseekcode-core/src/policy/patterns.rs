@@ -36,6 +36,12 @@ pub fn tool_scope(tool_name: &str) -> String {
 
 /// Patterns used for ruleset evaluation for a tool call.
 pub fn extract_patterns(tool_name: &str, input: &Value) -> Vec<String> {
+    tracing::debug!(
+        target: deepseekcode_telemetry::AUDIT,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        tool = %tool_name,
+        "extract_patterns requested"
+    );
     extract_patterns_for_workspace(tool_name, input, None)
 }
 
@@ -134,6 +140,13 @@ pub fn remember_patterns_for_workspace(
 
 /// Paths in tool input that fall outside the workspace.
 pub fn outside_workspace_paths(working_dir: &str, input: &Value, tool_name: &str) -> Vec<String> {
+    tracing::debug!(
+        target: deepseekcode_telemetry::AUDIT,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        tool = %tool_name,
+        working_dir = %working_dir,
+        "outside_workspace_paths checked"
+    );
     if tool_scope(tool_name) == "bash" {
         if let Some(cmd) = input["command"].as_str() {
             if crate::project_context::command_escapes_project_directory(cmd, working_dir).is_some()

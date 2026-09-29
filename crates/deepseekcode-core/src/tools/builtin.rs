@@ -62,8 +62,24 @@ impl Tool for ReadTool {
         input: Value,
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "read",
+            path = %input["path"].as_str().unwrap_or(""),
+            "read started"
+        );
         let path = resolve_path(ctx, input["path"].as_str().unwrap_or(""))?;
         if !path.exists() {
+            tracing::error!(
+                target: deepseekcode_telemetry::TOOL,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %ctx.session_id,
+                tool = "read",
+                path = %path.display(),
+                "read failed: path not found"
+            );
             return Err(ToolFailure {
                 message: format!("path not found: {}", path.display()),
                 retryable: false,
@@ -153,6 +169,15 @@ impl Tool for WriteTool {
         input: Value,
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "write",
+            path = %input["path"].as_str().unwrap_or(""),
+            content_bytes = input["content"].as_str().map(|s| s.len()).unwrap_or(0),
+            "write started"
+        );
         let path = resolve_path(ctx, input["path"].as_str().unwrap_or(""))?;
         let content = input["content"].as_str().unwrap_or("").to_string();
         let path_display = path.clone();
@@ -221,6 +246,14 @@ impl Tool for EditTool {
         input: Value,
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "edit",
+            path = %input["path"].as_str().unwrap_or(""),
+            "edit started"
+        );
         let path = resolve_path(ctx, input["path"].as_str().unwrap_or(""))?;
         let old_string = input["old_string"].as_str().unwrap_or("").to_string();
         let new_string = input["new_string"].as_str().unwrap_or("").to_string();
@@ -292,6 +325,14 @@ impl Tool for GrepTool {
         input: Value,
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "grep",
+            pattern_len = input["pattern"].as_str().map(|s| s.len()).unwrap_or(0),
+            "grep started"
+        );
         let pattern = input["pattern"].as_str().unwrap_or("");
         let search_path = input["path"]
             .as_str()
@@ -366,6 +407,14 @@ impl Tool for GlobTool {
         input: Value,
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "glob",
+            pattern = %input["pattern"].as_str().unwrap_or("*"),
+            "glob started"
+        );
         let pattern = input["pattern"].as_str().unwrap_or("*");
         let full_pattern = format!(
             "{}/{}",
@@ -373,14 +422,32 @@ impl Tool for GlobTool {
             pattern
         );
         let files: Vec<String> = glob::glob(&full_pattern)
-            .map_err(|e| ToolFailure {
-                message: e.to_string(),
-                retryable: false,
+            .map_err(|e| {
+                tracing::error!(
+                    target: deepseekcode_telemetry::TOOL,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    session_id = %ctx.session_id,
+                    tool = "glob",
+                    error = %e,
+                    "glob failed"
+                );
+                ToolFailure {
+                    message: e.to_string(),
+                    retryable: false,
+                }
             })?
             .filter_map(|p| p.ok())
             .map(|p| p.display().to_string())
             .take(200)
             .collect();
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "glob",
+            files = files.len(),
+            "glob succeeded"
+        );
         Ok(json!({ "files": files }))
     }
 }
@@ -420,8 +487,23 @@ impl Tool for PowershellTool {
         input: Value,
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "powershell",
+            command_len = input["command"].as_str().map(|s| s.len()).unwrap_or(0),
+            "powershell started"
+        );
         let command = input["command"].as_str().unwrap_or("");
         if command.trim().is_empty() {
+            tracing::error!(
+                target: deepseekcode_telemetry::TOOL,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %ctx.session_id,
+                tool = "powershell",
+                "powershell failed: empty command"
+            );
             return Err(ToolFailure {
                 message: "command must not be empty".into(),
                 retryable: false,
@@ -469,8 +551,23 @@ impl Tool for BashTool {
         input: Value,
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "bash",
+            command_len = input["command"].as_str().map(|s| s.len()).unwrap_or(0),
+            "bash started"
+        );
         let command = input["command"].as_str().unwrap_or("");
         if command.trim().is_empty() {
+            tracing::error!(
+                target: deepseekcode_telemetry::TOOL,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %ctx.session_id,
+                tool = "bash",
+                "bash failed: empty command"
+            );
             return Err(ToolFailure {
                 message: "command must not be empty".into(),
                 retryable: false,
@@ -711,6 +808,14 @@ impl Tool for ApplyPatchTool {
         input: Value,
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "apply_patch",
+            patch_bytes = input["patch"].as_str().map(|s| s.len()).unwrap_or(0),
+            "apply_patch started"
+        );
         ensure_not_cancelled()?;
         let patch = input["patch"].as_str().unwrap_or("").to_string();
         let working_directory = ctx.working_directory.clone();
@@ -764,6 +869,17 @@ impl Tool for ApplyPatchTool {
             }))
         })
         .await
+        .map_err(|e| {
+            tracing::error!(
+                target: deepseekcode_telemetry::TOOL,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %ctx.session_id,
+                tool = "apply_patch",
+                error = %e.message,
+                "apply_patch failed"
+            );
+            e
+        })
     }
 }
 
@@ -804,6 +920,14 @@ impl Tool for TodoWriteTool {
         input: Value,
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "todowrite",
+            todos = input["todos"].as_array().map(|a| a.len()).unwrap_or(0),
+            "todowrite started"
+        );
         use deepseekcode_schema::todo::TodoItem;
         let items: Vec<TodoItem> = input["todos"]
             .as_array()
@@ -857,6 +981,13 @@ impl Tool for TodoReadTool {
         _input: Value,
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "todoread",
+            "todoread started"
+        );
         let store = resolve_todo_store(ctx)?;
         let todos = store
             .get_todos(ctx.session_id)
@@ -893,8 +1024,21 @@ impl Tool for WebfetchTool {
         input: Value,
         _ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            tool = "webfetch",
+            url = %input["url"].as_str().unwrap_or(""),
+            "webfetch started"
+        );
         let url = input["url"].as_str().unwrap_or("");
         if url.is_empty() {
+            tracing::error!(
+                target: deepseekcode_telemetry::TOOL,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                tool = "webfetch",
+                "webfetch failed: empty url"
+            );
             return Err(ToolFailure {
                 message: "url must not be empty".into(),
                 retryable: false,
@@ -980,6 +1124,14 @@ impl Tool for LspTool {
         input: Value,
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "lsp",
+            method = %input["method"].as_str().unwrap_or(""),
+            "lsp started"
+        );
         let command: Vec<String> = input["command"]
             .as_array()
             .map(|arr| {

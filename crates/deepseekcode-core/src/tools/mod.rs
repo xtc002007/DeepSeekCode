@@ -17,6 +17,12 @@ pub use services::{CancelToken, EventToolProgressSink, ToolProgressSink, ToolSer
 /// Parses `+++ b/<path>` / `+++ <path>` headers; used by policy pattern
 /// extraction so `apply_patch` cannot bypass `outside_workspace` guards.
 pub fn parse_patch_paths(patch: &str) -> Vec<String> {
+    tracing::debug!(
+        target: deepseekcode_telemetry::TOOL,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        patch_bytes = patch.len(),
+        "parse_patch_paths started"
+    );
     let mut out = Vec::new();
     for line in patch.lines() {
         let line = line.trim();

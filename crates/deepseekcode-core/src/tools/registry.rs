@@ -57,6 +57,11 @@ pub struct ToolRegistry {
     /// `use_capability` proxy; true opts into direct `mcp_*` tools at the
     /// cost of a prefix miss on every MCP change.
     mcp_direct: bool,
+    /// Product logging: when true, `tool finished` includes a redacted
+    /// output preview (first 500 chars). Default false for privacy; only
+    /// `output_bytes` is logged otherwise. Wired from
+    /// `logging.audit.include_tool_output`.
+    audit_include_tool_output: bool,
 }
 
 impl ToolRegistry {
@@ -87,12 +92,14 @@ impl ToolRegistry {
             .as_ref()
             .and_then(|m| m.direct_tools)
             .unwrap_or(false);
+        let audit_include_tool_output = config.logging.audit.include_tool_output;
         let mut registry = Self {
             tools: HashMap::new(),
             working_directory,
             snapshot_store: None,
             services,
             mcp_direct,
+            audit_include_tool_output,
         };
         registry.register_builtin(config, shell_env);
         registry
@@ -100,6 +107,21 @@ impl ToolRegistry {
 
     pub fn set_services(&mut self, services: ToolServices) {
         self.services = services;
+    }
+
+    /// Hot-reload the audit preview flag without rebuilding the registry.
+    /// Called on `reload_catalog`/`reload_materialization` so a config change
+    /// to `logging.audit.include_tool_output` takes effect immediately.
+    pub fn set_audit_include_tool_output(&mut self, enabled: bool) {
+        if self.audit_include_tool_output != enabled {
+            tracing::info!(
+                target: deepseekcode_telemetry::APP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                enabled = enabled,
+                "tool audit preview flag reloaded"
+            );
+        }
+        self.audit_include_tool_output = enabled;
     }
 
     /// Whether MCP tools are exposed directly (`mcp_*`). When false (default)
@@ -214,6 +236,7 @@ impl ToolRegistry {
             }
             tracing::info!(
                 target: deepseekcode_telemetry::SESSION,
+                run_id = %deepseekcode_telemetry::current_run_id(),
                 "mcp direct tools refreshed; expect one DeepSeek prefix miss"
             );
         }
@@ -248,6 +271,7 @@ impl ToolRegistry {
                 } else {
                     tracing::warn!(
                         target: deepseekcode_telemetry::SESSION,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                         tool = t.name(),
                         "skipping tool with invalid LLM function name"
                     );
@@ -281,6 +305,7 @@ impl ToolRegistry {
                 } else {
                     tracing::warn!(
                         target: deepseekcode_telemetry::SESSION,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                         tool = t.name(),
                         "skipping tool with invalid LLM function name"
                     );
@@ -311,8 +336,25 @@ impl ToolRegistry {
         cancel: Option<Arc<crate::tools::services::CancelToken>>,
     ) -> Result<ToolResultEnvelope> {
         let tool = self.tools.get(name).ok_or_else(|| {
+            tracing::warn!(
+                target: deepseekcode_telemetry::TOOL,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %session_id,
+                tool = name,
+                "tool not found"
+            );
             deepseekcode_types::DeepSeekCodeError::NotFound(format!("tool {name}"))
         })?;
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            tool = name,
+            tool_call_id = %tool_call_id,
+            agent = agent,
+            input_bytes = serde_json::to_string(&input).map(|s| s.len()).unwrap_or(0),
+            "tool started"
+        );
 
         let todo_store = self.services.todo_store.as_ref().map(|store| {
             Arc::new(crate::todo::StorageTodoStoreOps(store.clone()))
@@ -335,6 +377,7 @@ impl ToolRegistry {
                 if matches!(name, "bash" | "powershell") && paths.is_empty() {
                     tracing::info!(
                         target: deepseekcode_telemetry::TOOL,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                         session_id = %session_id,
                         tool = name,
                         "shell command has no capturable file paths; file-level revert unavailable"
@@ -452,24 +495,50 @@ impl ToolRegistry {
                 let size = serde_json::to_string(&envelope.output)
                     .map(|s| s.len())
                     .unwrap_or(0);
-                tracing::debug!(
-                    target: deepseekcode_telemetry::TOOL,
-                    session_id = %session_id,
-                    tool = name,
-                    duration_ms,
-                    output_bytes = size,
-                    title = %envelope.title,
-                    "tool finished"
-                );
+                // `audit.include_tool_output=true` opts into a redacted
+                // preview (first 500 chars) for deep troubleshooting.
+                // Default false: only size/title/duration are logged to avoid
+                // leaking file contents or secrets into `session.log`.
+                if self.audit_include_tool_output {
+                    let raw = serde_json::to_string(&envelope.output).unwrap_or_default();
+                    let preview: String = raw.chars().take(500).collect();
+                    tracing::info!(
+                        target: deepseekcode_telemetry::TOOL,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
+                        session_id = %session_id,
+                        tool = name,
+                        tool_call_id = %tool_call_id,
+                        duration_ms,
+                        output_bytes = size,
+                        title = %envelope.title,
+                        output_preview = %deepseekcode_telemetry::redact(&preview),
+                        "tool finished"
+                    );
+                } else {
+                    tracing::info!(
+                        target: deepseekcode_telemetry::TOOL,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
+                        session_id = %session_id,
+                        tool = name,
+                        tool_call_id = %tool_call_id,
+                        duration_ms,
+                        output_bytes = size,
+                        title = %envelope.title,
+                        "tool finished"
+                    );
+                }
                 Ok(envelope)
             }
             Err(e) => {
                 tracing::warn!(
                     target: deepseekcode_telemetry::TOOL,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                     session_id = %session_id,
                     tool = name,
+                    tool_call_id = %tool_call_id,
                     duration_ms,
                     error = %e.message,
+                    retryable = e.retryable,
                     "tool failed"
                 );
                 Err(deepseekcode_types::DeepSeekCodeError::ToolFailure(

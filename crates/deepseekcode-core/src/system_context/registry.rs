@@ -73,6 +73,12 @@ impl SystemContextRegistry {
     }
 
     pub fn render_baseline(&self) -> Option<Generation> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            project_dir = %self.project_dir,
+            "system render_baseline started"
+        );
         let mut parts = Vec::new();
         let mut snapshot = Snapshot::new();
 
@@ -84,9 +90,22 @@ impl SystemContextRegistry {
         }
 
         if parts.is_empty() {
+            tracing::warn!(
+                target: deepseekcode_telemetry::SESSION,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                project_dir = %self.project_dir,
+                "system render_baseline failed: no parts"
+            );
             return None;
         }
 
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            project_dir = %self.project_dir,
+            parts = parts.len(),
+            "system render_baseline completed"
+        );
         Some(Generation {
             baseline: parts.join("\n\n"),
             snapshot,
@@ -94,6 +113,13 @@ impl SystemContextRegistry {
     }
 
     pub fn reconcile(&self, previous: &Snapshot) -> ReconcileResult {
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            project_dir = %self.project_dir,
+            previous_keys = previous.len(),
+            "system reconcile started"
+        );
         let mut combined_text = Vec::new();
         let mut snapshot = previous.clone();
         let mut changed = false;
@@ -164,6 +190,12 @@ impl SystemContextRegistry {
         sessions: &deepseekcode_storage::SessionStore,
         session_id: SessionId,
     ) -> Result<Option<Generation>> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            "system ensure_epoch started"
+        );
         if store.get(session_id).await?.is_some() {
             return Ok(None);
         }

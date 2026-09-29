@@ -225,15 +225,19 @@ impl SessionRunner {
     }
 
     /// Refresh MCP-bridged tools after connect/disconnect.
-    pub async fn refresh_mcp_tools(&self) {
+    /// Also syncs the audit preview flag so a lone MCP refresh never leaves
+    /// a stale `include_tool_output` behind (P3-1).
+    pub async fn refresh_mcp_tools(&self, config: &DeepSeekCodeConfig) {
         let mut tools = self.tools.write().await;
         tools.refresh_mcp_tools(&self.mcp);
+        tools.set_audit_include_tool_output(config.logging.audit.include_tool_output);
     }
 
     /// Re-materialize skill tool and system context after catalog changes.
     pub async fn reload_materialization(&self, config: &DeepSeekCodeConfig) {
         let mut tools = self.tools.write().await;
         tools.refresh_skill_tool(config);
+        tools.set_audit_include_tool_output(config.logging.audit.include_tool_output);
     }
 
     /// Issue-11: provider-visible MCP names. When `direct_tools=false`
@@ -343,6 +347,7 @@ impl SessionRunner {
             .store(false, Ordering::SeqCst);
         tracing::info!(
             target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             session_id = %self.session_id,
             "session drain started"
         );
@@ -367,6 +372,7 @@ impl SessionRunner {
             {
                 tracing::warn!(
                     target: deepseekcode_telemetry::SESSION,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                     session_id = %self.session_id,
                     "mandatory context unavailable; prompts remain pending"
                 );
@@ -392,6 +398,7 @@ impl SessionRunner {
 
         tracing::info!(
             target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             session_id = %self.session_id,
             "session drain completed"
         );
@@ -484,6 +491,7 @@ impl SessionRunner {
                     }
                     tracing::info!(
                         target: deepseekcode_telemetry::SESSION,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                         session_id = %self.session_id,
                         turn = turns,
                         max_turns = ?max_turns,
@@ -826,6 +834,7 @@ impl SessionRunner {
                         let Some(tool_call_id) = part.tool_call_id.as_ref() else {
                             tracing::warn!(
                                 target: deepseekcode_telemetry::SESSION,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
                                 session_id = %self.session_id,
                                 tool = ?part.tool_name,
                                 "tool result missing tool_call_id"
@@ -878,6 +887,7 @@ impl SessionRunner {
             if !tool_ids.contains(id) {
                 tracing::error!(
                     target: deepseekcode_telemetry::SESSION,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                     session_id = %self.session_id,
                     tool_call_id = %id,
                     assistant_tool_call_ids = ?assistant_ids,
@@ -889,6 +899,7 @@ impl SessionRunner {
         if messages.len() > 30 {
             tracing::debug!(
                 target: deepseekcode_telemetry::SESSION,
+                run_id = %deepseekcode_telemetry::current_run_id(),
                 session_id = %self.session_id,
                 message_count = messages.len(),
                 "llm context size"
@@ -896,6 +907,7 @@ impl SessionRunner {
         }
         tracing::info!(
             target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             session_id = %self.session_id,
             assistant_tool_call_ids = ?assistant_ids,
             tool_result_ids = ?tool_ids,
@@ -1005,6 +1017,7 @@ impl SessionRunner {
                     if !valid && reason != "no-checkpoint" {
                         tracing::warn!(
                             target: deepseekcode_telemetry::SESSION,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
                             session_id = %self.session_id,
                             reason = reason,
                             current_lineage = %lineage,
@@ -1034,6 +1047,7 @@ impl SessionRunner {
                                 } else {
                                     tracing::warn!(
                                         target: deepseekcode_telemetry::SESSION,
+                                        run_id = %deepseekcode_telemetry::current_run_id(),
                                         session_id = %self.session_id,
                                         reason = covered_reason,
                                         current_lineage = %lineage,
@@ -1053,6 +1067,7 @@ impl SessionRunner {
 
         tracing::debug!(
             target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             session_id = %self.session_id,
             provider = %provider,
             model = %model,
@@ -1127,6 +1142,7 @@ impl SessionRunner {
                     }
                     tracing::warn!(
                         target: deepseekcode_telemetry::LLM,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                         session_id = %self.session_id,
                         provider = %request.provider,
                         model = %request.model,
@@ -1152,6 +1168,7 @@ impl SessionRunner {
                 Err(_) => {
                     tracing::error!(
                         target: deepseekcode_telemetry::LLM,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
                         session_id = %self.session_id,
                         provider = %request.provider,
                         model = %request.model,
@@ -1268,6 +1285,7 @@ impl SessionRunner {
             if !assistant_started && allow_overflow_recovery {
                 tracing::warn!(
                     target: deepseekcode_telemetry::SESSION,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                     session_id = %self.session_id,
                     error = %err,
                     "context overflow before assistant output; compacting and retrying"
@@ -1324,11 +1342,11 @@ impl SessionRunner {
             let tool_call_id = provider_tool_call_id(call);
             tracing::info!(
                 target: deepseekcode_telemetry::SESSION,
+                run_id = %deepseekcode_telemetry::current_run_id(),
                 session_id = %self.session_id,
                 tool = %call.name,
                 tool_call_id = %tool_call_id,
                 part_index = idx,
-                arguments = %call.arguments,
                 "persisting tool call"
             );
             self.sessions

@@ -28,11 +28,29 @@ impl Tool for ListTool {
         input: Value,
         ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "list",
+            path = %input["path"].as_str().unwrap_or("."),
+            "list started"
+        );
         let path = resolve_path(ctx, input["path"].as_str().unwrap_or("."))?;
         let mut entries = Vec::new();
-        for entry in std::fs::read_dir(&path).map_err(|e| ToolFailure {
-            message: e.to_string(),
-            retryable: false,
+        for entry in std::fs::read_dir(&path).map_err(|e| {
+            tracing::error!(
+                target: deepseekcode_telemetry::TOOL,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %ctx.session_id,
+                tool = "list",
+                error = %e,
+                "list failed: read_dir"
+            );
+            ToolFailure {
+                message: e.to_string(),
+                retryable: false,
+            }
         })? {
             let entry = entry.map_err(|e| ToolFailure {
                 message: e.to_string(),

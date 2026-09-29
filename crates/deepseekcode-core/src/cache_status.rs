@@ -114,6 +114,13 @@ impl From<&deepseekcode_config::schema::BillingConfig> for RateCard {
 /// fill billed at the input price here; the fields stay separate so a future
 /// discounted write schedule needs no aggregation change.
 pub fn estimated_cost(status: &CacheStatus, card: &RateCard) -> f64 {
+    tracing::debug!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        turns = status.turns,
+        input_tokens = status.input_tokens,
+        "estimated_cost computed"
+    );
     let (hit, mut miss) = (status.cache_hit as f64, status.cache_miss as f64);
     if hit + miss == 0.0 {
         miss = status.input_tokens as f64;
@@ -138,6 +145,12 @@ pub fn estimated_cost(status: &CacheStatus, card: &RateCard) -> f64 {
 /// numeric fields. Returns `""` when `show` is false so `ui.show_turn_usage`
 /// gates display only — accounting always runs.
 pub fn receipt_from_payload(payload: &serde_json::Value, show: bool) -> String {
+    tracing::debug!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        show = show,
+        "receipt_from_payload requested"
+    );
     if !show {
         return String::new();
     }
@@ -226,6 +239,13 @@ pub fn aggregate_with_compaction(
     payloads: &[serde_json::Value],
     compacted: &[serde_json::Value],
 ) -> CacheStatus {
+    tracing::debug!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        payloads = payloads.len(),
+        compacted = compacted.len(),
+        "aggregate_with_compaction started"
+    );
     let mut status = CacheStatus::default();
     for p in payloads {
         if p.get("interrupted")
@@ -332,6 +352,13 @@ pub fn aggregate_with_compaction(
         }
         .receipt_fragment();
     }
+    tracing::info!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        turns = status.turns,
+        hit_rate = status.hit_rate,
+        "aggregate_with_compaction completed"
+    );
     status
 }
 

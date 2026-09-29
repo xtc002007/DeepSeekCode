@@ -69,18 +69,46 @@ impl Tool for McpBridgedTool {
         input: Value,
         _ctx: &ToolContext,
     ) -> std::result::Result<Value, ToolFailure> {
-        ensure_not_cancelled()?;
-        let pool = self.pool.clone();
-        let server = self.server.clone();
-        let tool = self.mcp_tool_name.clone();
-        race_cancel(async move {
-            pool.call_tool(&server, &tool, input)
-                .await
-                .map_err(|e| ToolFailure {
-                    message: e.to_string(),
-                    retryable: true,
-                })
-        })
-        .await
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            tool = self.name(),
+            server = %self.server,
+            "mcp bridged tool started"
+        );
+        let r = async {
+            ensure_not_cancelled()?;
+            let pool = self.pool.clone();
+            let server = self.server.clone();
+            let tool = self.mcp_tool_name.clone();
+            race_cancel(async move {
+                pool.call_tool(&server, &tool, input)
+                    .await
+                    .map_err(|e| ToolFailure {
+                        message: e.to_string(),
+                        retryable: true,
+                    })
+            })
+            .await
+        }
+        .await;
+        match &r {
+            Ok(v) => tracing::debug!(
+                target: deepseekcode_telemetry::TOOL,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                tool = self.name(),
+                output_bytes = serde_json::to_string(v).map(|s| s.len()).unwrap_or(0),
+                "mcp bridged tool succeeded"
+            ),
+            Err(e) => tracing::error!(
+                target: deepseekcode_telemetry::TOOL,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                tool = self.name(),
+                server = %self.server,
+                error = %e.message,
+                "mcp bridged tool failed"
+            ),
+        }
+        r
     }
 }

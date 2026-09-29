@@ -360,7 +360,9 @@ fn default_max_file_mb() -> u64 {
 }
 
 fn default_max_run_dirs() -> usize {
-    20
+    // Bound steady-state disk: 10 runs × 3 logs × 5 files × max_file_mb
+    // (7.5GB absolute worst case at defaults; realistic usage is KBs).
+    10
 }
 
 impl Default for LoggingConfig {

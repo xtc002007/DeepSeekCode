@@ -73,6 +73,12 @@ impl ProjectDirectoryStore {
     }
 
     pub async fn list(&self, project_path: &str) -> Result<Vec<ProjectDirectoryEntry>> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            project_path = %project_path,
+            "project_directories list started"
+        );
         let rows = sqlx::query_as::<_, ProjectDirectoryRow>(
             r#"SELECT id, project_path, directory_path, strategy, created_at
                FROM project_directories
@@ -93,6 +99,13 @@ impl ProjectDirectoryStore {
         directory_path: &str,
         strategy: Option<&str>,
     ) -> Result<ProjectDirectoryEntry> {
+        tracing::info!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            project_path = %project_path,
+            directory_path = %directory_path,
+            "project_directories add started"
+        );
         let id = Ulid::new().to_string();
         let now = Utc::now().to_rfc3339();
         let strategy = strategy.unwrap_or("default");
@@ -127,6 +140,13 @@ impl ProjectDirectoryStore {
     }
 
     pub async fn remove(&self, project_path: &str, directory_path: &str) -> Result<()> {
+        tracing::info!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            project_path = %project_path,
+            directory_path = %directory_path,
+            "project_directories remove started"
+        );
         sqlx::query(
             r#"DELETE FROM project_directories WHERE project_path = ? AND directory_path = ?"#,
         )

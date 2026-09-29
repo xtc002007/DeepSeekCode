@@ -205,6 +205,12 @@ impl CompactionService {
     /// summary on the next auto pass and emitted `prefix_changed` noise.
     /// History is never deleted; a checkpoint is appended.
     pub async fn compact_forced(ctx: &CompactionContext<'_>) -> Result<bool> {
+        tracing::info!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            "compaction compact_forced started"
+        );
         let history = ctx.sessions.list_messages(ctx.session_id).await?;
         // Manual is explicit operator intent: bypass the fold-economics gate
         // (a tiny head the user asked to checkpoint still gets one), but keep
@@ -213,6 +219,12 @@ impl CompactionService {
     }
 
     pub async fn compact_if_needed(ctx: &CompactionContext<'_>) -> Result<bool> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            "compaction compact_if_needed started"
+        );
         let settings = CompactionSettings::from_config(ctx.config);
         if !settings.auto {
             return Ok(false);
@@ -269,6 +281,12 @@ impl CompactionService {
 
     /// Provider context overflow recovery — one compaction retry per turn.
     pub async fn compact_after_overflow(ctx: &CompactionContext<'_>) -> Result<bool> {
+        tracing::warn!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            "compaction compact_after_overflow started"
+        );
         let history = ctx.sessions.list_messages(ctx.session_id).await?;
         // Overflow is must-free: bypass the fold-economics gate (a tiny head
         // with an over-window prompt is exactly what must shrink), but keep
@@ -310,6 +328,7 @@ async fn compact_overflow(
         if blocked {
             tracing::warn!(
                 target: deepseekcode_telemetry::SESSION,
+                run_id = %deepseekcode_telemetry::current_run_id(),
                 session_id = %ctx.session_id,
                 reason = "blocked-same-view",
                 "compaction skipped: identical head already failed this view"
@@ -359,6 +378,7 @@ async fn compact_overflow(
         if !valid {
             tracing::warn!(
                 target: deepseekcode_telemetry::SESSION,
+                run_id = %deepseekcode_telemetry::current_run_id(),
                 session_id = %ctx.session_id,
                 reason = reason,
                 current_lineage = %current,
@@ -373,6 +393,7 @@ async fn compact_overflow(
             if !covered_valid {
                 tracing::warn!(
                     target: deepseekcode_telemetry::SESSION,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                     session_id = %ctx.session_id,
                     reason = covered_reason,
                     current_lineage = %current,
@@ -410,6 +431,7 @@ async fn compact_overflow(
     ) {
         tracing::debug!(
             target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             session_id = %ctx.session_id,
             head_tokens = estimate_str(&selected.head),
             "compaction skipped: fold below economic minimum"
@@ -429,6 +451,7 @@ async fn compact_overflow(
     else {
         tracing::warn!(
             target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             session_id = %ctx.session_id,
             "compaction skipped: summary prompt exceeds model budget even after truncate rescue"
         );
@@ -438,6 +461,7 @@ async fn compact_overflow(
     let message_id = MessageId::new();
     tracing::info!(
         target: deepseekcode_telemetry::SESSION,
+        run_id = %deepseekcode_telemetry::current_run_id(),
         session_id = %ctx.session_id,
         reason = reason,
         "compaction started"
@@ -447,6 +471,7 @@ async fn compact_overflow(
     if summary.trim().is_empty() {
         tracing::warn!(
             target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             session_id = %ctx.session_id,
             "compaction failed: empty summary"
         );
@@ -469,6 +494,7 @@ async fn compact_overflow(
     if !accept_checkpoint(&summary, &selected.head, previous_summary.as_deref()) {
         tracing::warn!(
             target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             session_id = %ctx.session_id,
             reason = "checkpoint-would-not-reduce",
             summary_tokens = estimate_str(&summary),
@@ -565,6 +591,7 @@ async fn compact_overflow(
 
     tracing::info!(
         target: deepseekcode_telemetry::SESSION,
+        run_id = %deepseekcode_telemetry::current_run_id(),
         session_id = %ctx.session_id,
         reason = reason,
         summary_chars = summary.len(),
@@ -682,6 +709,7 @@ async fn summarize(
     if let Some(u) = summary_usage.as_ref() {
         tracing::info!(
             target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             session_id = %ctx.session_id,
             input = ?u.input_tokens,
             output = ?u.output_tokens,

@@ -232,6 +232,12 @@ pub(crate) fn should_retry_without_reasoning(err_text: &str, had_reasoning: bool
 }
 
 pub(crate) fn repair_llm_tool_chain(messages: &mut Vec<LlmMessage>) {
+    tracing::debug!(
+        target: deepseekcode_telemetry::SESSION,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        messages = messages.len(),
+        "repair_llm_tool_chain started"
+    );
     if std::env::var("DEEPSEEKCODE_STRICT_TOOL_CHAIN")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
         .unwrap_or(false)
@@ -267,6 +273,7 @@ fn repair_missing_tool_results(messages: &mut Vec<LlmMessage>) {
             }
             tracing::warn!(
                 target: deepseekcode_telemetry::SESSION,
+                run_id = %deepseekcode_telemetry::current_run_id(),
                 tool_call_id = %call.id,
                 tool = %call.name,
                 assistant_index = i,
@@ -327,6 +334,7 @@ fn repair_missing_assistant_tool_calls(messages: &mut [LlmMessage]) {
         let name = messages[i].name.clone().unwrap_or_else(|| "tool".into());
         tracing::warn!(
             target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             tool_call_id = %tool_id,
             assistant_index = a_idx,
             tool_index = i,

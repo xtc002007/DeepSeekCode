@@ -241,6 +241,15 @@ impl PolicyService {
             crate::policy::patterns::outside_workspace_paths(working_dir, &input, tool_name);
         if !outside.is_empty() {
             if is_path_scoped_tool(tool_name) {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::AUDIT,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    session_id = %session_id,
+                    tool = tool_name,
+                    scope = "outside_workspace",
+                    patterns = ?outside,
+                    "policy blocked: path outside workspace"
+                );
                 return Ok(PolicyOutcome::Blocked {
                     reason: format!(
                         "path outside project workspace (root: {working_dir}): {}. \
@@ -255,6 +264,14 @@ impl PolicyService {
                 .await
             {
                 PolicyDecision::Block => {
+                    tracing::warn!(
+                        target: deepseekcode_telemetry::AUDIT,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
+                        session_id = %session_id,
+                        tool = tool_name,
+                        scope = "outside_workspace",
+                        "policy blocked: outside workspace"
+                    );
                     return Ok(PolicyOutcome::Blocked {
                         reason: format!("access outside workspace blocked: {}", outside.join(", ")),
                     });
@@ -306,6 +323,14 @@ impl PolicyService {
                     .await,
                 PolicyDecision::Block
             ) {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::AUDIT,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    session_id = %session_id,
+                    tool = tool_name,
+                    scope = secondary_scope,
+                    "policy blocked by secondary scope"
+                );
                 return Ok(PolicyOutcome::Blocked {
                     reason: format!(
                         "tool '{tool_name}' blocked by policy ({secondary_scope} scope)"
@@ -314,10 +339,30 @@ impl PolicyService {
             }
         }
         match self.evaluate(session_id, agent, &scope, &patterns).await {
-            PolicyDecision::Permit => Ok(PolicyOutcome::Permitted),
-            PolicyDecision::Block => Ok(PolicyOutcome::Blocked {
-                reason: format!("tool '{tool_name}' blocked by policy"),
-            }),
+            PolicyDecision::Permit => {
+                tracing::info!(
+                    target: deepseekcode_telemetry::AUDIT,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    session_id = %session_id,
+                    tool = tool_name,
+                    scope = %scope,
+                    "policy permitted"
+                );
+                Ok(PolicyOutcome::Permitted)
+            }
+            PolicyDecision::Block => {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::AUDIT,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    session_id = %session_id,
+                    tool = tool_name,
+                    scope = %scope,
+                    "policy blocked"
+                );
+                Ok(PolicyOutcome::Blocked {
+                    reason: format!("tool '{tool_name}' blocked by policy"),
+                })
+            }
             PolicyDecision::Prompt => {
                 // loop_guard is never YOLO-permitted: auto mode must not
                 // silently disable the 3x repetition guard.
@@ -366,6 +411,7 @@ impl PolicyService {
     ) -> Result<()> {
         tracing::info!(
             target: deepseekcode_telemetry::AUDIT,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             session_id = %session_id,
             tool = tool_name,
             scope,
@@ -441,6 +487,7 @@ impl PolicyService {
         let _ = agent;
         tracing::info!(
             target: deepseekcode_telemetry::AUDIT,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             session_id = %session_id,
             tool = tool_name,
             scope,

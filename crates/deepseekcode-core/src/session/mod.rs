@@ -1,3 +1,7 @@
+//! Session domain surface. Per-turn product logging lives in
+//! `service.rs` / `execution.rs` / `runner/*` (SESSION target with run_id +
+//! session_id); this module only re-exports so it emits no separate
+//! `tracing!` sites.
 pub mod execution;
 pub mod projector;
 pub mod revert;

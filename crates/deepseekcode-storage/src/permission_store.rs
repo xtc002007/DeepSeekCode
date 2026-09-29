@@ -23,17 +23,42 @@ impl PermissionStore {
         // Legacy global read (session_id IS NULL, any project). New code must
         // use PolicyStore (project-scoped); this remains for one release
         // cycle compat only.
+        let start = std::time::Instant::now();
+        tracing::debug!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = "permission.load_all",
+            "storage op start"
+        );
         let rows = sqlx::query_as::<_, RuleRow>(
             r#"SELECT pattern, status, created_at FROM permissions WHERE status IN ('allowed', 'always', 'denied') AND session_id IS NULL ORDER BY created_at ASC"#,
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(
+                target: deepseekcode_telemetry::STORAGE,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = "permission.load_all",
+                error = %e,
+                "storage op failed"
+            );
+            DeepSeekCodeError::Storage(e.to_string())
+        })?;
 
-        Ok(rows
+        let out: HashMap<String, PermissionStatus> = rows
             .into_iter()
             .filter_map(|r| parse_status(&r.status).map(|s| (r.pattern, s)))
-            .collect())
+            .collect();
+        tracing::info!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = "permission.load_all",
+            duration_ms = start.elapsed().as_millis() as u64,
+            rows = out.len(),
+            "storage op ok"
+        );
+        Ok(out)
     }
 
     pub async fn save(
@@ -44,11 +69,26 @@ impl PermissionStore {
     ) -> Result<()> {
         // Deduplicate (tool_name,pattern): random-id REPLACE never deduped and
         // piled duplicates. Delete-then-insert keeps one live row.
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        let start = std::time::Instant::now();
+        tracing::debug!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = "permission.save",
+            tool = %tool_name,
+            pattern = %pattern,
+            "storage op start"
+        );
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            tracing::error!(
+                target: deepseekcode_telemetry::STORAGE,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = "permission.save",
+                tool = %tool_name,
+                error = %e,
+                "storage op failed"
+            );
+            DeepSeekCodeError::Storage(e.to_string())
+        })?;
         sqlx::query(
             r#"DELETE FROM permissions WHERE tool_name = ? AND pattern = ? AND session_id IS NULL"#,
         )
@@ -56,24 +96,61 @@ impl PermissionStore {
         .bind(pattern)
         .execute(&mut *tx)
         .await
-        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(
+                target: deepseekcode_telemetry::STORAGE,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = "permission.save",
+                tool = %tool_name,
+                error = %e,
+                "storage op failed"
+            );
+            DeepSeekCodeError::Storage(e.to_string())
+        })?;
         let id = ulid::Ulid::new().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
             r#"INSERT INTO permissions (id, session_id, tool_name, pattern, status, created_at)
                VALUES (?, NULL, ?, ?, ?, ?)"#,
         )
-        .bind(id)
+        .bind(&id)
         .bind(tool_name)
         .bind(pattern)
         .bind(format_status(status))
         .bind(now)
         .execute(&mut *tx)
         .await
-        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-        tx.commit()
-            .await
-            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(
+                target: deepseekcode_telemetry::STORAGE,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = "permission.save",
+                tool = %tool_name,
+                error = %e,
+                "storage op failed"
+            );
+            DeepSeekCodeError::Storage(e.to_string())
+        })?;
+        tx.commit().await.map_err(|e| {
+            tracing::error!(
+                target: deepseekcode_telemetry::STORAGE,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = "permission.save",
+                tool = %tool_name,
+                error = %e,
+                "storage op failed"
+            );
+            DeepSeekCodeError::Storage(e.to_string())
+        })?;
+        tracing::info!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = "permission.save",
+            tool = %tool_name,
+            id = %id,
+            duration_ms = start.elapsed().as_millis() as u64,
+            "storage op ok"
+        );
         Ok(())
     }
 }

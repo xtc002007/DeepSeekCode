@@ -204,9 +204,16 @@ fn load_instruction_url(url: &str, texts: &mut Vec<String>) {
     // Issue-8: 5s timeout + failure preserves old prefix. A hanging or
     // flapping URL must never block `drain` nor rewrite the system prefix
     // every turn (each rewrite = full DeepSeek miss).
+    tracing::debug!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        url = %url,
+        "instruction URL fetch started"
+    );
     let Ok(content) = blocking_http_get(url) else {
         tracing::warn!(
             target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             url = %url,
             "instruction URL fetch failed; keeping cached prefix"
         );

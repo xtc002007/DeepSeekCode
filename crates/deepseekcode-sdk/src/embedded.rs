@@ -49,6 +49,12 @@ impl EmbeddedEngine {
     }
 
     async fn start_inner(project_dir: String) -> Result<Self> {
+        // Product-grade fix: embedded engines are started from Desktop, tests,
+        // and library users that never go through CLI `init("cli")`. Without
+        // this, all `tracing!` below hit the noop subscriber and are lost.
+        let run_ctx =
+            deepseekcode_telemetry::ensure_init("sdk-embedded", Some(project_dir.as_str()));
+        let run_id = run_ctx.run_id.clone();
         let db_path = std::env::var("DEEPSEEKCODE_DB_PATH").unwrap_or_else(|_| {
             deepseekcode_types::data_dir()
                 .map(|p| p.join("deepseekcode").join("deepseekcode.db"))
@@ -62,22 +68,52 @@ impl EmbeddedEngine {
 
         tracing::info!(
             target: deepseekcode_telemetry::APP,
+            run_id = %run_id,
             project_dir = %project_dir,
             db_path = %db_path,
             "starting embedded engine"
         );
 
         let db_url = format!("sqlite://{db_path}");
-        let engine = Arc::new(RwLock::new(
-            DeepSeekCodeEngine::open(project_dir.clone(), &db_url).await?,
-        ));
+        let engine = match DeepSeekCodeEngine::open(project_dir.clone(), &db_url).await {
+            Ok(e) => Arc::new(RwLock::new(e)),
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    run_id = %run_id,
+                    project_dir = %project_dir,
+                    db_path = %db_path,
+                    error = %e,
+                    "embedded engine open failed"
+                );
+                return Err(e);
+            }
+        };
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
-        let addr = listener
-            .local_addr()
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::SERVER,
+                    run_id = %run_id,
+                    error = %e,
+                    "embedded engine bind failed"
+                );
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+            }
+        };
+        let addr = match listener.local_addr() {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::SERVER,
+                    run_id = %run_id,
+                    error = %e,
+                    "embedded engine local_addr failed"
+                );
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+            }
+        };
 
         let password = std::env::var("DEEPSEEKCODE_SERVER_PASSWORD").ok();
         let auth_password = password.clone();
@@ -88,6 +124,12 @@ impl EmbeddedEngine {
         };
         let app = build_router(state);
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        // Long-lived serve task: no originating HTTP request exists at startup,
+        // so `request_id` stays "-"; `run_id` + `%addr` carry the correlation.
+        // `run_id` is captured here (not read inside) because the string is
+        // cheap to move and keeps the log stable even across thread hops.
+        let serve_run_id = run_id.clone();
+        let serve_addr = addr;
         let handle = tokio::spawn(async move {
             let shutdown = async move {
                 let _ = shutdown_rx.wait_for(|v| *v).await;
@@ -98,6 +140,8 @@ impl EmbeddedEngine {
             {
                 tracing::error!(
                     target: deepseekcode_telemetry::SERVER,
+                    run_id = %serve_run_id,
+                    addr = %serve_addr,
                     error = %e,
                     "embedded axum serve exited"
                 );
@@ -128,6 +172,13 @@ impl EmbeddedEngine {
                 }
             }
             if !ok {
+                tracing::error!(
+                    target: deepseekcode_telemetry::SERVER,
+                    run_id = %run_id,
+                    %addr,
+                    error = %last_err,
+                    "embedded engine health check failed"
+                );
                 return Err(deepseekcode_types::DeepSeekCodeError::Other(format!(
                     "embedded engine health check failed: {last_err}"
                 )));
@@ -136,6 +187,7 @@ impl EmbeddedEngine {
 
         tracing::info!(
             target: deepseekcode_telemetry::APP,
+            run_id = %run_id,
             %addr,
             project_dir = %project_dir,
             "embedded engine ready"

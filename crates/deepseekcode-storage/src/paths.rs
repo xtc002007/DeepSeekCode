@@ -2,32 +2,86 @@
 
 /// Resolve a directory path to its canonical form for storage and comparison.
 pub fn normalize_directory_path(path: &str) -> String {
+    let start = std::time::Instant::now();
     let path = path.trim();
+    tracing::debug!(
+        target: deepseekcode_telemetry::STORAGE,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        operation = "paths.normalize",
+        input_len = path.len(),
+        "storage op start"
+    );
     if path.is_empty() {
+        tracing::warn!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = "paths.normalize",
+            "empty directory path; returning empty key"
+        );
         return String::new();
     }
     let pb = std::path::Path::new(path);
-    let canonical = std::fs::canonicalize(pb).unwrap_or_else(|_| pb.to_path_buf());
-    strip_verbatim_prefix(canonical)
+    let canonical = match std::fs::canonicalize(pb) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(
+                target: deepseekcode_telemetry::STORAGE,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                operation = "paths.normalize",
+                error = %e,
+                path = %path,
+                "path canonicalize failed; falling back to raw path"
+            );
+            pb.to_path_buf()
+        }
+    };
+    let out = strip_verbatim_prefix(canonical);
+    tracing::debug!(
+        target: deepseekcode_telemetry::STORAGE,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        operation = "paths.normalize",
+        duration_ms = start.elapsed().as_millis() as u64,
+        "storage op ok"
+    );
+    out
 }
 
 /// Compare two directory paths after canonicalization.
 /// Case-insensitive ONLY on Windows; Linux/macOS stay case-sensitive so
 /// `/Tmp/A` and `/tmp/a` do not collide.
 pub fn directory_paths_equal(a: &str, b: &str) -> bool {
+    let start = std::time::Instant::now();
+    tracing::debug!(
+        target: deepseekcode_telemetry::STORAGE,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        operation = "paths.equal",
+        "storage op start"
+    );
     if a.trim().is_empty() && b.trim().is_empty() {
+        tracing::debug!(
+            target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            operation = "paths.equal",
+            duration_ms = start.elapsed().as_millis() as u64,
+            "storage op ok"
+        );
         return true;
     }
     let na = normalize_directory_path(a);
     let nb = normalize_directory_path(b);
     #[cfg(windows)]
-    {
-        na.eq_ignore_ascii_case(&nb)
-    }
+    let eq = na.eq_ignore_ascii_case(&nb);
     #[cfg(not(windows))]
-    {
-        na == nb
-    }
+    let eq = na == nb;
+    tracing::debug!(
+        target: deepseekcode_telemetry::STORAGE,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        operation = "paths.equal",
+        duration_ms = start.elapsed().as_millis() as u64,
+        equal = eq,
+        "storage op ok"
+    );
+    eq
 }
 
 /// Normalized key for SQL lookups of `working_directory`.
@@ -35,18 +89,29 @@ pub fn directory_paths_equal(a: &str, b: &str) -> bool {
 /// `\\?\` / `\\.\` verbatim prefixes and trailing slashes uniformly so
 /// Rust and SQL (`lower(rtrim(replace(...)))`) agree.
 pub fn normalize_directory_path_for_lookup(path: &str) -> String {
+    let start = std::time::Instant::now();
+    tracing::debug!(
+        target: deepseekcode_telemetry::STORAGE,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        operation = "paths.normalize_for_lookup",
+        "storage op start"
+    );
     let normalized = normalize_directory_path(path)
         .replace('\\', "/")
         .trim_end_matches('/')
         .to_string();
     #[cfg(windows)]
-    {
-        normalized.to_lowercase()
-    }
+    let out = normalized.to_lowercase();
     #[cfg(not(windows))]
-    {
-        normalized
-    }
+    let out = normalized;
+    tracing::debug!(
+        target: deepseekcode_telemetry::STORAGE,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        operation = "paths.normalize_for_lookup",
+        duration_ms = start.elapsed().as_millis() as u64,
+        "storage op ok"
+    );
+    out
 }
 
 fn strip_verbatim_prefix(path: std::path::PathBuf) -> String {

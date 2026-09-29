@@ -317,10 +317,21 @@ fn tls_config() -> rustls::ClientConfig {
     if !native.errors.is_empty() {
         tracing::warn!(
             target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             errors = native.errors.len(),
             "pinnedTLS: some native certs failed to load, webpki + loaded natives used"
         );
     }
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        "llm pinned tls config built"
+    );
+    tracing::info!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        "llm pinned tls ready"
+    );
     rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth()
@@ -452,15 +463,54 @@ pub async fn post_pinned(
                     .to_bytes();
                 tracing::info!(
                     target: deepseekcode_telemetry::LLM,
-                    endpoint = %endpoint,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    endpoint_host = %crate::redact_endpoint_for_log(endpoint),
                     ip = %ip,
                     status = status,
                     "pinned direct succeeded"
                 );
+                tracing::debug!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                    "llm pinned direct debug"
+                );
+                if status < 200 || status >= 300 {
+                    tracing::warn!(
+                        target: deepseekcode_telemetry::LLM,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
+                        status,
+                        "llm pinned direct non-2xx"
+                    );
+                }
+                if status >= 400 {
+                    tracing::error!(
+                        target: deepseekcode_telemetry::LLM,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
+                        status,
+                        "llm pinned direct error status"
+                    );
+                }
                 return Ok((status, bytes));
             }
-            Ok(Err(e)) => last_err = format!("pinned-direct[{ip}]: {e}"),
-            Err(_) => last_err = format!("pinned-direct[{ip}]: per-IP timeout (30s)"),
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    error_summary = %deepseekcode_telemetry::summarize_prompt(&e.to_string(), false),
+                    "llm pinned direct attempt failed"
+                );
+                last_err = format!("pinned-direct[{ip}]: {e}");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    ip = %ip,
+                    "llm pinned direct per-IP timeout"
+                );
+                last_err = format!("pinned-direct[{ip}]: per-IP timeout (30s)");
+            }
         }
     }
 
@@ -501,15 +551,46 @@ pub async fn post_pinned(
                             .to_bytes();
                         tracing::info!(
                             target: deepseekcode_telemetry::LLM,
-                            endpoint = %endpoint,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
+                            endpoint_host = %crate::redact_endpoint_for_log(endpoint),
                             ip = %ip,
                             status = status,
                             "pinned proxy succeeded"
                         );
+                        tracing::debug!(
+                            target: deepseekcode_telemetry::LLM,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
+                            endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                            "llm pinned proxy debug"
+                        );
+                        if status >= 400 {
+                            tracing::error!(
+                                target: deepseekcode_telemetry::LLM,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
+                                status,
+                                "llm pinned proxy error status"
+                            );
+                        }
                         return Ok((status, bytes));
                     }
-                    Ok(Err(e)) => last_err = format!("{last_err} || pinned-proxy[{ip}]: {e}"),
-                    Err(_) => last_err = format!("{last_err} || pinned-proxy[{ip}]: total timeout"),
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            target: deepseekcode_telemetry::LLM,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
+                            error_summary = %deepseekcode_telemetry::summarize_prompt(&e.to_string(), false),
+                            "llm pinned proxy attempt failed"
+                        );
+                        last_err = format!("{last_err} || pinned-proxy[{ip}]: {e}");
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            target: deepseekcode_telemetry::LLM,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
+                            ip = %ip,
+                            "llm pinned proxy per-IP timeout"
+                        );
+                        last_err = format!("{last_err} || pinned-proxy[{ip}]: total timeout");
+                    }
                 }
             }
         }
@@ -607,9 +688,17 @@ pub async fn stream_pinned(
                 }
                 tracing::info!(
                     target: deepseekcode_telemetry::LLM,
-                    endpoint = %endpoint,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    endpoint_host = %crate::redact_endpoint_for_log(endpoint),
                     path = %label,
+                    status = status,
                     "pinned stream opened"
+                );
+                tracing::debug!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    path = %label,
+                    "llm pinned stream debug"
                 );
                 let stream = http_body_util::BodyDataStream::new(resp.into_body())
                     .map(|r| r.map_err(|e| DeepSeekCodeError::Llm(e.to_string())))

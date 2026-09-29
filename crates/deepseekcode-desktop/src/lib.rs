@@ -47,7 +47,7 @@ use deepseekcode_config::LoggingConfig;
 
 pub fn start() {
     deepseekcode_sdk::install_dedicated_engine_runtime();
-    let logging = load_logging_config();
+    let (logging, config_error) = load_logging_config();
     let run_ctx = deepseekcode_telemetry::init("desktop", &logging);
     tracing::info!(
         target: deepseekcode_telemetry::APP,
@@ -55,12 +55,25 @@ pub fn start() {
         logs_dir = %run_ctx.run_dir.display(),
         "deepseekcode-desktop starting"
     );
+    if let Some(err) = config_error.as_deref() {
+        tracing::warn!(
+            target: deepseekcode_telemetry::DESKTOP,
+            run_id = %run_ctx.run_id,
+            error = %err,
+            "config load failed; using default logging"
+        );
+    }
 
     DeepSeekCodeApp::run();
 }
 
-fn load_logging_config() -> LoggingConfig {
-    deepseekcode_config::load_effective_config(camino::Utf8Path::new("."))
-        .map(|c| c.logging)
-        .unwrap_or_default()
+fn load_logging_config() -> (LoggingConfig, Option<String>) {
+    match deepseekcode_config::load_effective_config(camino::Utf8Path::new(".")) {
+        Ok(c) => (c.logging, None),
+        Err(e) => {
+            let msg = format!("config load failed ({e}); using default logging");
+            eprintln!("deepseekcode: {msg}");
+            (Default::default(), Some(msg))
+        }
+    }
 }

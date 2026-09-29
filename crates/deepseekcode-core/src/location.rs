@@ -43,6 +43,11 @@ impl LocationMap {
     }
 
     pub async fn update_config(&self, config: DeepSeekCodeConfig) {
+        tracing::info!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            "location update_config started"
+        );
         // Per-location config: previously a single global config was shared
         // and providers/mcp/shell/plugins/session_service never refreshed.
         // Now reload policy (with DB grants) + providers + materialization.
@@ -71,6 +76,12 @@ impl LocationMap {
     }
 
     pub async fn get_or_create(&self, project_dir: &str) -> Arc<LocationServices> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            project_dir = %project_dir,
+            "location get_or_create started"
+        );
         let project_dir = normalize_directory_path(project_dir);
         let mut locations = self.locations.write().await;
         if let Some(services) = locations.get(&project_dir) {
@@ -100,6 +111,7 @@ impl LocationMap {
         let _ = providers.load_from_store().await.map_err(|e| {
             tracing::warn!(
                 target: deepseekcode_telemetry::APP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
                 error = %e,
                 "failed to load stored provider credentials"
             );
@@ -124,6 +136,7 @@ impl LocationMap {
         {
             tracing::warn!(
                 target: deepseekcode_telemetry::APP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
                 error = %e,
                 "failed to load plugins"
             );
@@ -216,6 +229,11 @@ impl LocationMap {
 
     /// Interrupt all draining sessions across locations (embedded shutdown).
     pub async fn interrupt_all(&self) {
+        tracing::info!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            "location interrupt_all started"
+        );
         let locations: Vec<Arc<LocationServices>> = {
             let guard = self.locations.read().await;
             guard.values().cloned().collect()
@@ -231,12 +249,19 @@ impl LocationMap {
 
     /// Re-materialize skill tools and refresh MCP tools on all cached session runners.
     pub async fn reload_materialization(&self, project_dir: &str) {
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            project_dir = %project_dir,
+            "location reload_materialization started"
+        );
         let project_dir = normalize_directory_path(project_dir);
         let config = self.config.read().await.clone();
         let locations = self.locations.read().await;
         if let Some(services) = locations.get(&project_dir) {
             if let Ok(mut tools) = services.wasm_tools.try_write() {
                 tools.refresh_skill_tool(&config);
+                tools.set_audit_include_tool_output(config.logging.audit.include_tool_output);
             }
             services.session_service.reload_materialization().await;
             services.session_service.refresh_mcp_tools().await;

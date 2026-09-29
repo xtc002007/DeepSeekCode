@@ -1,3 +1,6 @@
+//! MCP connection surface. Product logging for connect/call lives in
+//! `pool.rs` (TOOL target, server + run_id) and `remote.rs`/`local_stdio.rs`;
+//! this module only re-exports so it emits no separate `tracing!` sites.
 mod local_stdio;
 mod pool;
 mod remote;

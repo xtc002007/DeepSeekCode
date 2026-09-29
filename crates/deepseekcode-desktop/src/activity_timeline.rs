@@ -248,6 +248,7 @@ impl ActivityTimelineView {
         if flattened.len() > 80 {
             tracing::debug!(
                 target: deepseekcode_telemetry::DESKTOP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
                 roots = tree.roots.len(),
                 rows = flattened.len(),
                 scroll_y = ?scroll_handle.offset().y,

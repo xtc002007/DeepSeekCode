@@ -34,6 +34,12 @@ impl MemorySet {
     /// `<project>/.deepseekcode/memory/pinned.md` (background, optional).
     /// Missing files → empty (no prefix churn).
     pub fn load(project_dir: &str) -> Self {
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            project_dir = %project_dir,
+            "memory load started"
+        );
         let base = PathBuf::from(project_dir).join(".deepseekcode");
         let standing = std::fs::read_to_string(base.join("MEMORY.md"))
             .map(|s| vec![s])
@@ -41,11 +47,20 @@ impl MemorySet {
         let pinned = std::fs::read_to_string(base.join("memory").join("pinned.md"))
             .map(|s| vec![s])
             .unwrap_or_default();
-        Self {
+        let out = Self {
             standing,
             pinned,
             index: String::new(),
-        }
+        };
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            project_dir = %project_dir,
+            standing = out.standing.len(),
+            pinned = out.pinned.len(),
+            "memory load completed"
+        );
+        out
     }
 
     /// Stable rules for interpreting background memory. Byte-stable forever;
@@ -86,6 +101,13 @@ impl MemorySet {
     /// Compose helper mirroring Reasonix `Compose`: empty set leaves the base
     /// prompt byte-for-byte untouched so the cache prefix stays maximal.
     pub fn compose(base: &str, set: &Self) -> String {
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            base_len = base.len(),
+            standing = set.standing.len(),
+            "memory compose started"
+        );
         if set.is_empty() {
             return base.to_string();
         }

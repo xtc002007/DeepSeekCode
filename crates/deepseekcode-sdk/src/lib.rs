@@ -1,3 +1,7 @@
+//! High-level SDK + embedded engine. This crate root only re-exports;
+//! product `tracing!` sites live in `client.rs` (APP target, `run_id` +
+//! `operation` + `latency_ms`, never full prompt/key) and `embedded.rs`
+//! (engine lifecycle).
 pub mod client;
 pub mod embedded;
 

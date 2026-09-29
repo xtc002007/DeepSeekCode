@@ -28,12 +28,23 @@ pub fn parse_openai_sse_frame(
     frame: &str,
     tool_acc: &mut HashMap<usize, (String, String, String)>,
 ) -> Vec<Result<LlmEvent>> {
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        frame_summary = %deepseekcode_telemetry::summarize_prompt(frame, false),
+        "llm sse frame parse start"
+    );
     let mut events = Vec::new();
     for line in frame.lines() {
         let Some(data) = sse_data_payload(line) else {
             continue;
         };
         if data == "[DONE]" {
+            tracing::info!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                "llm sse [DONE] received"
+            );
             // De-duplicate: only emit Completed if not already emitted for
             // this frame batch (finish_reason also emits one below).
             if !events.iter().any(|e| matches!(e, Ok(LlmEvent::Completed))) {
@@ -41,8 +52,24 @@ pub fn parse_openai_sse_frame(
             }
             continue;
         }
-        let Ok(value) = serde_json::from_str::<Value>(data) else {
-            continue;
+        let value: Value = match serde_json::from_str::<Value>(data) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    error = %e,
+                    data_summary = %deepseekcode_telemetry::summarize_prompt(data, false),
+                    "llm sse frame JSON parse failed; skipping line"
+                );
+                tracing::error!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    error = %e,
+                    "llm protocol error: sse JSON unparseable"
+                );
+                continue;
+            }
         };
         // Error shapes: `{error:{message}}`, `{error:{code,type}}`,
         // `{error:"string"}`, `{message:"..."}` (P0-5: previously only
@@ -66,6 +93,33 @@ pub fn parse_openai_sse_frame(
                 .unwrap_or_else(|| value.to_string());
             // Sanitize: cap length, strip key-like fragments.
             let sanitized = sanitize_llm_error(&msg);
+            tracing::error!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                error_summary = %deepseekcode_telemetry::summarize_prompt(&sanitized, false),
+                "llm sse frame carried provider error"
+            );
+            if crate::overflow::is_context_overflow(&sanitized) {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    error_summary = %deepseekcode_telemetry::summarize_prompt(&sanitized, false),
+                    "llm sse error indicates context overflow"
+                );
+            }
+            if msg.len() > 500 {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    raw_len = msg.len(),
+                    "llm sse error text truncated for log"
+                );
+            }
+            tracing::info!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                "llm sse provider error surfaced"
+            );
             events.push(Err(DeepSeekCodeError::Llm(sanitized)));
             continue;
         }
@@ -124,6 +178,14 @@ pub fn parse_openai_sse_frame(
                 }
             }
         }
+        if entry_too_large(&*tool_acc) {
+            tracing::warn!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                acc_entries = tool_acc.len(),
+                "llm sse tool accumulator overlarge; truncation risk"
+            );
+        }
         // `tool_calls` finish: no duplicate empty-argument deltas (the
         // incremental deltas already carried arguments). Only ensure a
         // single Completed per turn.
@@ -132,10 +194,27 @@ pub fn parse_openai_sse_frame(
             Some("stop") | Some("tool_calls")
         ) && !events.iter().any(|e| matches!(e, Ok(LlmEvent::Completed)))
         {
+            tracing::info!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                finish_reason = %choice["finish_reason"].as_str().unwrap_or(""),
+                event_count = events.len(),
+                "llm sse turn completed"
+            );
             events.push(Ok(LlmEvent::Completed));
         }
     }
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        event_count = events.len(),
+        "llm sse frame parse completed"
+    );
     events
+}
+
+fn entry_too_large(acc: &HashMap<usize, (String, String, String)>) -> bool {
+    acc.values().any(|(_, _, args)| args.len() > 512 * 1024)
 }
 
 pub(crate) fn sse_data_payload(line: &str) -> Option<&str> {
@@ -145,24 +224,58 @@ pub(crate) fn sse_data_payload(line: &str) -> Option<&str> {
 }
 
 pub(crate) fn parse_message_response(value: &Value) -> Result<crate::request::LlmResponse> {
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        body_keys = ?value.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()),
+        "llm parse_message_response start"
+    );
     // Malformed provider payloads previously defaulted silently (`""`, `{}`,
     // `[]`), masking gateway bugs as empty turns. Warn with shape diagnostics;
     // behavior (defaults) is unchanged for back-compat.
     if value.get("choices").and_then(|c| c.as_array()).is_none() {
         tracing::warn!(
             target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             body_keys = ?value.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()),
             "llm response has no choices array; defaulting to empty content"
+        );
+        tracing::error!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            "llm protocol error: missing choices array"
         );
     }
     let choice = &value["choices"][0]["message"];
     if choice.is_null() {
         tracing::warn!(
             target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             "llm response choices[0].message is missing; defaulting to empty content"
+        );
+        tracing::error!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            "llm protocol error: missing message object"
         );
     }
     let content = choice["content"].as_str().unwrap_or("").to_string();
+    if choice.get("content").is_some() && choice["content"].as_str().is_none() {
+        tracing::warn!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            "llm response content not a string; truncated to empty"
+        );
+    }
+    if content.len() > 1_000_000 {
+        tracing::warn!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            content_len = content.len(),
+            content_summary = %deepseekcode_telemetry::summarize_prompt(&content, false),
+            "llm response content overlarge; truncation risk"
+        );
+    }
     // Issue-1: preserve non-streaming reasoning so next-turn replay stays
     // byte-identical. DeepSeek returns `reasoning_content` alongside `content`.
     let reasoning_content = choice
@@ -170,7 +283,7 @@ pub(crate) fn parse_message_response(value: &Value) -> Result<crate::request::Ll
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
-    let tool_calls = choice["tool_calls"]
+    let tool_calls: Vec<LlmToolCall> = choice["tool_calls"]
         .as_array()
         .map(|calls| {
             calls
@@ -182,9 +295,18 @@ pub(crate) fn parse_message_response(value: &Value) -> Result<crate::request::Ll
                         Err(e) => {
                             tracing::warn!(
                                 target: deepseekcode_telemetry::LLM,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
                                 tool = %c["function"]["name"].as_str().unwrap_or(""),
                                 error = %e,
+                                raw_summary = %deepseekcode_telemetry::summarize_prompt(raw_args, false),
                                 "llm tool arguments unparseable; defaulting to empty object"
+                            );
+                            tracing::error!(
+                                target: deepseekcode_telemetry::LLM,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
+                                tool = %c["function"]["name"].as_str().unwrap_or(""),
+                                error = %e,
+                                "llm tool_call parse error in non-stream response"
                             );
                             serde_json::json!({})
                         }
@@ -199,10 +321,19 @@ pub(crate) fn parse_message_response(value: &Value) -> Result<crate::request::Ll
         })
         .unwrap_or_default();
 
+    let usage = parse_usage(value);
+    tracing::info!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        content_len = content.len(),
+        tool_call_count = tool_calls.len(),
+        output_tokens = ?usage.as_ref().and_then(|u| u.output_tokens),
+        "llm parse_message_response succeeded"
+    );
     Ok(crate::request::LlmResponse {
         content,
         tool_calls,
-        usage: parse_usage(value),
+        usage,
         reasoning_content,
     })
 }
@@ -210,7 +341,16 @@ pub(crate) fn parse_message_response(value: &Value) -> Result<crate::request::Ll
 /// Strip key-like fragments and cap length so provider error text can go
 /// to SSE/logs without leaking endpoint/key material (P0-5).
 pub(crate) fn sanitize_llm_error(raw: &str) -> String {
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        raw_len = raw.len(),
+        "llm sanitize error start"
+    );
     let mut s = raw.trim().to_string();
+    let had_secret = ["sk-", "Bearer ", "x-api-key"]
+        .iter()
+        .any(|p| s.contains(p));
     // Mask `sk-...` / `Bearer ...` fragments.
     for prefix in ["sk-", "Bearer ", "x-api-key"] {
         while let Some(pos) = s.find(prefix) {
@@ -224,14 +364,65 @@ pub(crate) fn sanitize_llm_error(raw: &str) -> String {
             }
         }
     }
+    if had_secret {
+        tracing::warn!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            "llm error contained key-like fragment; redacted"
+        );
+    }
     if s.len() > 500 {
+        tracing::warn!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            raw_len = s.len(),
+            "llm error overlong; truncating to 500 for log"
+        );
         s.truncate(500);
+    }
+    tracing::info!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        sanitized_len = s.len(),
+        "llm error sanitized"
+    );
+    if s.trim().is_empty() && !raw.trim().is_empty() {
+        tracing::error!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            "llm sanitize produced empty error"
+        );
     }
     s
 }
 
 fn parse_usage(value: &Value) -> Option<crate::request::TokenUsage> {
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        has_usage = value.get("usage").is_some(),
+        "llm parse_usage start"
+    );
     let usage = value.get("usage")?;
+    // Saturating u64->u32 audit: detect truncation that would blind billing.
+    for key in [
+        "prompt_tokens",
+        "completion_tokens",
+        "input_tokens",
+        "output_tokens",
+    ] {
+        if let Some(v) = usage.get(key).and_then(|x| x.as_u64()) {
+            if u32::try_from(v).is_err() {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    key,
+                    raw_value = v,
+                    "llm usage token count truncated to u32::MAX"
+                );
+            }
+        }
+    }
     // Saturating u64->u32 (P0-5: previously silent `as u32` truncation).
     let sat = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
     // DeepSeek reports `prompt_cache_hit_tokens / prompt_cache_miss_tokens`
@@ -276,7 +467,7 @@ fn parse_usage(value: &Value) -> Option<crate::request::TokenUsage> {
         (Some(i), Some(h)) => Some(i.saturating_sub(h)),
         _ => None,
     });
-    Some(crate::request::TokenUsage {
+    let out = crate::request::TokenUsage {
         input_tokens: input,
         output_tokens: usage
             .get("completion_tokens")
@@ -293,7 +484,29 @@ fn parse_usage(value: &Value) -> Option<crate::request::TokenUsage> {
         cache_hit: hit,
         cache_miss: miss,
         cache_write: write,
-    })
+    };
+    tracing::info!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        input_tokens = ?out.input_tokens,
+        output_tokens = ?out.output_tokens,
+        cache_hit = out.hit_tokens(),
+        cache_miss = out.miss_tokens(),
+        "llm usage parsed"
+    );
+    if out.input_tokens.is_none() && out.output_tokens.is_none() {
+        tracing::warn!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            "llm usage empty; billing blind"
+        );
+        tracing::error!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            "llm usage parse produced no token counts"
+        );
+    }
+    Some(out)
 }
 
 #[cfg(test)]

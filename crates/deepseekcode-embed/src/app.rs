@@ -22,9 +22,23 @@ pub async fn serve(
     addr: SocketAddr,
     password: Option<String>,
 ) -> Result<()> {
-    let engine = Arc::new(RwLock::new(
-        DeepSeekCodeEngine::open(project_dir, &db_path).await?,
-    ));
+    // Standalone `serve` may run without CLI/Desktop init (library use).
+    let run_ctx = deepseekcode_telemetry::ensure_init("server", Some(project_dir.as_str()));
+    let run_id = run_ctx.run_id.clone();
+    let engine = match DeepSeekCodeEngine::open(project_dir.clone(), &db_path).await {
+        Ok(e) => Arc::new(RwLock::new(e)),
+        Err(e) => {
+            tracing::error!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %run_id,
+                project_dir = %project_dir,
+                db_path = %db_path,
+                error = %e,
+                "server engine open failed"
+            );
+            return Err(e);
+        }
+    };
     let state = AppState {
         engine,
         password,
@@ -34,15 +48,40 @@ pub async fn serve(
 
     info!(
         target: deepseekcode_telemetry::SERVER,
+        run_id = %run_id,
         %addr,
+        project_dir = %project_dir,
         "DeepSeekCode server listening"
     );
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %run_id,
+                %addr,
+                error = %e,
+                "server bind failed"
+            );
+            return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+        }
+    };
+    if let Err(e) = axum::serve(listener, app).await {
+        tracing::error!(
+            target: deepseekcode_telemetry::SERVER,
+            run_id = %run_id,
+            %addr,
+            error = %e,
+            "server exited with error"
+        );
+        return Err(deepseekcode_types::DeepSeekCodeError::Other(e.to_string()));
+    }
+    tracing::info!(
+        target: deepseekcode_telemetry::SERVER,
+        run_id = %run_id,
+        %addr,
+        "server shutdown cleanly"
+    );
     Ok(())
 }
 
@@ -74,6 +113,7 @@ pub fn build_router(state: AppState) -> Router {
                     "http",
                     method = %req.method(),
                     path = %req.uri().path(),
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                 )
             }),
         )

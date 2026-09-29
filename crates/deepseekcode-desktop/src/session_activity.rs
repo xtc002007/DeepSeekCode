@@ -92,6 +92,7 @@ impl SessionActivityStore {
         if event_count == 0 {
             tracing::debug!(
                 target: deepseekcode_telemetry::DESKTOP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                 reason,
                 "activity tree rebuild skipped (no session events)"
             );
@@ -108,6 +109,7 @@ impl SessionActivityStore {
         if roots_after == 0 && roots_before > 0 {
             tracing::warn!(
                 target: deepseekcode_telemetry::DESKTOP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                 reason,
                 event_count,
                 roots_before,
@@ -120,6 +122,7 @@ impl SessionActivityStore {
 
         tracing::info!(
             target: deepseekcode_telemetry::DESKTOP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
             reason,
             event_count,
             roots_before,

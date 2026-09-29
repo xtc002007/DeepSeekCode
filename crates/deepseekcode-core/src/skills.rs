@@ -20,6 +20,14 @@ impl SkillCatalog {
         project_dir: &str,
         index_url: Option<&str>,
     ) -> Vec<SkillEntry> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            project_dir = %project_dir,
+            paths = paths.len(),
+            has_index = index_url.is_some(),
+            "skill discover started"
+        );
         let mut found = Vec::new();
         let mut roots: Vec<PathBuf> = paths
             .iter()
@@ -57,6 +65,13 @@ impl SkillCatalog {
             found.extend(fetch_remote_index(url));
         }
 
+        tracing::info!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            project_dir = %project_dir,
+            skills = found.len(),
+            "skill discover completed"
+        );
         found
     }
 
@@ -233,6 +248,7 @@ fn fetch_remote_index(url: &str) -> Vec<SkillEntry> {
         Err(e) => {
             tracing::warn!(
                 target: deepseekcode_telemetry::APP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
                 url = %url,
                 error = %e,
                 "skills index fetch failed"
@@ -245,6 +261,7 @@ fn fetch_remote_index(url: &str) -> Vec<SkillEntry> {
         Err(e) => {
             tracing::warn!(
                 target: deepseekcode_telemetry::APP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
                 url = %url,
                 error = %e,
                 "skills index parse failed"

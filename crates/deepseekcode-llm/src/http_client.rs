@@ -41,11 +41,28 @@ fn base_builder() -> reqwest::ClientBuilder {
 /// `NO_PROXY`) **and** OS system proxy (Windows registry when the
 /// `system-proxy` reqwest feature is enabled).
 pub fn build_auto_client() -> Client {
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        "llm auto client build start"
+    );
     base_builder().build().unwrap_or_else(|e| {
         tracing::warn!(
             target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             error = %e,
             "llm client builder failed; using default client"
+        );
+        tracing::error!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            error = %e,
+            "llm auto client build failed"
+        );
+        tracing::info!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            "llm auto client fallback to default"
         );
         Client::default()
     })
@@ -54,11 +71,28 @@ pub fn build_auto_client() -> Client {
 /// Direct client: bypasses every proxy. Used as fallback when the proxy path
 /// fails (e.g. VPN proxy down but China endpoint reachable directly).
 pub fn build_direct_client() -> Client {
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        "llm direct client build start"
+    );
     base_builder().no_proxy().build().unwrap_or_else(|e| {
         tracing::warn!(
             target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             error = %e,
             "llm direct client builder failed; using default client"
+        );
+        tracing::error!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            error = %e,
+            "llm direct client build failed"
+        );
+        tracing::info!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            "llm direct client fallback to default"
         );
         Client::default()
     })
@@ -304,18 +338,41 @@ pub async fn post_json_with_fallback(
     non_stream_timeout: bool,
 ) -> Result<Response, String> {
     // 1. primary (auto)
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+        "llm transport primary attempt start"
+    );
     let mut last_err: String;
     match send_one(primary, endpoint, bearer, body, non_stream_timeout).await {
-        Ok(resp) => return Ok(resp),
+        Ok(resp) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                status = %resp.status(),
+                "llm transport primary succeeded"
+            );
+            return Ok(resp);
+        }
         Err(e) => {
             if !is_transport_error(&e) {
+                tracing::error!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                    error = %transport_debug(&e),
+                    "llm transport non-retryable error"
+                );
                 return Err(transport_debug(&e));
             }
             last_err = format!("auto[{}]: {}", proxy_mode_label(), transport_debug(&e));
             tracing::warn!(
                 target: deepseekcode_telemetry::LLM,
-                endpoint = %endpoint,
-                error = %last_err,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                error_summary = %deepseekcode_telemetry::summarize_prompt(&last_err, false),
                 "llm primary transport failed, trying direct"
             );
         }
@@ -328,21 +385,37 @@ pub async fn post_json_with_fallback(
         Ok(resp) => {
             tracing::info!(
                 target: deepseekcode_telemetry::LLM,
-                endpoint = %endpoint,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                status = %resp.status(),
                 "llm direct fallback succeeded"
+            );
+            tracing::debug!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                "llm direct fallback debug"
             );
             return Ok(resp);
         }
         Err(e) => {
             if !is_transport_error(&e) {
+                tracing::error!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                    error = %transport_debug(&e),
+                    "llm direct non-retryable error"
+                );
                 return Err(transport_debug(&e));
             }
             let msg = format!("direct: {}", transport_debug(&e));
             last_err = format!("{last_err} || {msg}");
             tracing::warn!(
                 target: deepseekcode_telemetry::LLM,
-                endpoint = %endpoint,
-                error = %msg,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                error_summary = %deepseekcode_telemetry::summarize_prompt(&msg, false),
                 "llm direct fallback failed, trying explicit proxy"
             );
         }
@@ -356,8 +429,10 @@ pub async fn post_json_with_fallback(
                 Ok(resp) => {
                     tracing::info!(
                         target: deepseekcode_telemetry::LLM,
-                        endpoint = %endpoint,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
+                        endpoint_host = %crate::redact_endpoint_for_log(endpoint),
                         proxy = %mask_proxy(&proxy_url),
+                        status = %resp.status(),
                         "llm forced-proxy fallback succeeded"
                     );
                     return Ok(resp);
@@ -365,11 +440,25 @@ pub async fn post_json_with_fallback(
                 Err(e) => {
                     let msg = format!("proxy[{}]: {}", mask_proxy(&proxy_url), transport_debug(&e));
                     last_err = format!("{last_err} || {msg}");
+                    tracing::warn!(
+                        target: deepseekcode_telemetry::LLM,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
+                        endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                        error_summary = %deepseekcode_telemetry::summarize_prompt(&msg, false),
+                        "llm forced-proxy fallback failed"
+                    );
                 }
             }
         }
     }
 
+    tracing::error!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+        error_summary = %deepseekcode_telemetry::summarize_prompt(&last_err, false),
+        "llm all transports failed"
+    );
     Err(last_err)
 }
 
@@ -440,16 +529,60 @@ async fn send_one_with_auth(
                 let backoff = retry_after_delay(&resp, attempt);
                 tracing::warn!(
                     target: deepseekcode_telemetry::LLM,
-                    endpoint = %endpoint,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    endpoint_host = %crate::redact_endpoint_for_log(endpoint),
                     status = %resp.status(),
                     attempt,
                     backoff_ms = backoff.as_millis() as u64,
                     "llm retryable status, backing off"
                 );
+                tracing::debug!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                    attempt,
+                    "llm retry debug"
+                );
+                if resp.status().as_u16() == 429 {
+                    tracing::info!(
+                        target: deepseekcode_telemetry::LLM,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
+                        endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                        "llm rate-limited; backing off"
+                    );
+                }
                 tokio::time::sleep(backoff).await;
                 continue;
             }
-            other => return other,
+            Ok(resp) => {
+                tracing::debug!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                    status = %resp.status(),
+                    "llm send succeeded"
+                );
+                return Ok(resp);
+            }
+            Err(e) => {
+                tracing::debug!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                    error = %transport_debug(&e),
+                    "llm send transport error"
+                );
+                if !is_transport_error(&e) {
+                    tracing::error!(
+                        target: deepseekcode_telemetry::LLM,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
+                        endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                        error = %transport_debug(&e),
+                        "llm send non-retryable transport error"
+                    );
+                }
+                return Err(e);
+            }
         }
     }
 }
@@ -464,6 +597,12 @@ pub async fn post_json_with_fallback_auth(
     non_stream_timeout: bool,
     auth: impl Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder + Clone,
 ) -> Result<Response, String> {
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+        "llm auth transport primary attempt start"
+    );
     match send_one_with_auth(
         primary,
         endpoint,
@@ -474,15 +613,32 @@ pub async fn post_json_with_fallback_auth(
     )
     .await
     {
-        Ok(resp) => return Ok(resp),
+        Ok(resp) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                status = %resp.status(),
+                "llm auth transport primary succeeded"
+            );
+            return Ok(resp);
+        }
         Err(e) => {
             if !is_transport_error(&e) {
+                tracing::error!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                    error = %transport_debug(&e),
+                    "llm auth transport non-retryable error"
+                );
                 return Err(transport_debug(&e));
             }
             tracing::warn!(
                 target: deepseekcode_telemetry::LLM,
-                endpoint = %endpoint,
-                error = %transport_debug(&e),
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                error_summary = %deepseekcode_telemetry::summarize_prompt(&transport_debug(&e), false),
                 "llm primary transport failed, trying direct"
             );
         }
@@ -498,11 +654,34 @@ pub async fn post_json_with_fallback_auth(
     )
     .await
     {
-        Ok(resp) => return Ok(resp),
+        Ok(resp) => {
+            tracing::info!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                status = %resp.status(),
+                "llm auth direct fallback succeeded"
+            );
+            return Ok(resp);
+        }
         Err(e) => {
             if !is_transport_error(&e) {
+                tracing::error!(
+                    target: deepseekcode_telemetry::LLM,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                    error = %transport_debug(&e),
+                    "llm auth direct non-retryable error"
+                );
                 return Err(transport_debug(&e));
             }
+            tracing::warn!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                error_summary = %deepseekcode_telemetry::summarize_prompt(&transport_debug(&e), false),
+                "llm auth direct fallback failed"
+            );
         }
     }
     if let Some(proxy_url) = resolve_proxy_url() {
@@ -510,11 +689,35 @@ pub async fn post_json_with_fallback_auth(
             match send_one_with_auth(&client, endpoint, bearer, body, non_stream_timeout, auth)
                 .await
             {
-                Ok(resp) => return Ok(resp),
-                Err(e) => return Err(transport_debug(&e)),
+                Ok(resp) => {
+                    tracing::info!(
+                        target: deepseekcode_telemetry::LLM,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
+                        endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                        status = %resp.status(),
+                        "llm auth forced-proxy fallback succeeded"
+                    );
+                    return Ok(resp);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: deepseekcode_telemetry::LLM,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
+                        endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+                        error_summary = %deepseekcode_telemetry::summarize_prompt(&transport_debug(&e), false),
+                        "llm auth forced-proxy fallback failed"
+                    );
+                    return Err(transport_debug(&e));
+                }
             }
         }
     }
+    tracing::error!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        endpoint_host = %crate::redact_endpoint_for_log(endpoint),
+        "llm auth all transports failed"
+    );
     Err("all transports failed".into())
 }
 

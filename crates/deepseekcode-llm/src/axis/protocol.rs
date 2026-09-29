@@ -45,6 +45,25 @@ fn maybe_replay_reasoning(
 pub fn build_openai_chat_body(request: &LlmRequest, stream: bool) -> Value {
     // DeepSeek automatic prefix cache requires a byte-stable prefix:
     // system first, then append-only history, tools sorted by name.
+    tracing::info!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider = %request.provider,
+        model = %request.model,
+        message_count = request.messages.len(),
+        tool_count = request.tools.len(),
+        stream,
+        system_summary = %deepseekcode_telemetry::summarize_prompt(&request.system, false),
+        "llm protocol build_body start"
+    );
+    tracing::debug!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider = %request.provider,
+        model = %request.model,
+        stream,
+        "llm protocol build_body debug"
+    );
     let is_deepseek = request.is_deepseek();
     let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": request.system })];
     for m in &request.messages {
@@ -70,12 +89,36 @@ pub fn build_openai_chat_body(request: &LlmRequest, stream: bool) -> Value {
                 .tool_calls
                 .iter()
                 .map(|c| {
+                    let args = match serde_json::to_string(&c.arguments) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: deepseekcode_telemetry::LLM,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
+                                provider = %request.provider,
+                                model = %request.model,
+                                tool = %c.name,
+                                error = %e,
+                                "llm protocol tool arguments serialize failed; defaulting to empty object"
+                            );
+                            tracing::error!(
+                                target: deepseekcode_telemetry::LLM,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
+                                provider = %request.provider,
+                                model = %request.model,
+                                tool = %c.name,
+                                error = %e,
+                                "llm protocol error: tool args unserializable"
+                            );
+                            "{}".to_string()
+                        }
+                    };
                     json!({
                         "id": c.id,
                         "type": "function",
                         "function": {
                             "name": c.name,
-                            "arguments": serde_json::to_string(&c.arguments).unwrap_or_else(|_| "{}".into()),
+                            "arguments": args,
                         }
                     })
                 })
@@ -124,7 +167,51 @@ pub fn build_openai_chat_body(request: &LlmRequest, stream: bool) -> Value {
     if let Some(n) = request.max_output_tokens {
         if n > 0 && (!is_deepseek || request.tools.is_empty()) {
             body["max_tokens"] = json!(n);
+            tracing::debug!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = %request.provider,
+                model = %request.model,
+                max_tokens = n,
+                "llm protocol max_tokens applied"
+            );
+        } else {
+            tracing::debug!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = %request.provider,
+                model = %request.model,
+                max_output_tokens = ?request.max_output_tokens,
+                "llm protocol max_tokens omitted (deepseek ceiling / legacy zero)"
+            );
         }
+        if n > 1_000_000 {
+            tracing::warn!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider = %request.provider,
+                model = %request.model,
+                max_tokens = n,
+                "llm protocol output cap overflow/truncation risk"
+            );
+        }
+    }
+    tracing::info!(
+        target: deepseekcode_telemetry::LLM,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        provider = %request.provider,
+        model = %request.model,
+        message_count = messages.len(),
+        tool_count = request.tools.len(),
+        "llm protocol build_body succeeded"
+    );
+    if body.get("model").is_none() {
+        tracing::error!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            provider = %request.provider,
+            "llm protocol error: built body missing model"
+        );
     }
     body
 }
@@ -132,10 +219,39 @@ pub fn build_openai_chat_body(request: &LlmRequest, stream: bool) -> Value {
 pub fn merge_extra(body: &mut Value, extra: Option<&Value>) {
     if let Some(extra) = extra {
         if let Some(obj) = extra.as_object() {
+            tracing::debug!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                extra_keys = obj.len(),
+                "llm protocol merge_extra applied"
+            );
             for (key, value) in obj {
                 body[key] = value.clone();
             }
+            tracing::info!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                extra_keys = obj.len(),
+                "llm protocol extras merged"
+            );
+        } else {
+            tracing::warn!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                "llm protocol merge_extra got non-object; ignoring"
+            );
+            tracing::error!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                "llm protocol error: extras not an object"
+            );
         }
+    } else {
+        tracing::debug!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            "llm protocol merge_extra: no extras"
+        );
     }
 }
 

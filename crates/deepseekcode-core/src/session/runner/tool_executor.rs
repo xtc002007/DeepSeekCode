@@ -28,6 +28,7 @@ impl SessionRunner {
 
         tracing::info!(
             target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             session_id = %self.session_id,
             tool = %tool_call.name,
             tool_call_id = %tool_call_id,
@@ -172,6 +173,7 @@ impl SessionRunner {
                 }
                 tracing::warn!(
                     target: deepseekcode_telemetry::TOOL,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                     session_id = %self.session_id,
                     tool = %tool_call.name,
                     tool_call_id = %tool_call_id,
@@ -243,6 +245,7 @@ impl SessionRunner {
 
         tracing::info!(
             target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             session_id = %self.session_id,
             tool = %tool_call.name,
             tool_call_id = %tool_call_id,

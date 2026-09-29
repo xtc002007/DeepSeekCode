@@ -74,12 +74,14 @@ impl McpConnectionPool {
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => tracing::warn!(
                     target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                     server = %name,
                     error = %e,
                     "mcp auto-connect failed"
                 ),
                 Err(_) => tracing::warn!(
                     target: deepseekcode_telemetry::APP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                     server = %name,
                     "mcp auto-connect timed out after 15s"
                 ),
@@ -88,6 +90,12 @@ impl McpConnectionPool {
     }
 
     pub async fn connect(&self, name: &str) -> Result<Vec<String>> {
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            server = %name,
+            "mcp connect started"
+        );
         let cfg = self
             .servers
             .get(name)
@@ -131,16 +139,35 @@ impl McpConnectionPool {
             .await
             .insert(name.to_string(), ConnectedServer { tools, connection });
         self.emit_status(name, true, &tool_names).await;
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            server = %name,
+            tools = tool_names.len(),
+            "mcp connect completed"
+        );
         Ok(tool_names)
     }
 
     pub async fn disconnect(&self, name: &str) -> Result<()> {
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            server = %name,
+            "mcp disconnect started"
+        );
         if self.connected.lock().await.remove(name).is_none() {
             return Err(DeepSeekCodeError::NotFound(format!(
                 "mcp server {name} not connected"
             )));
         }
         self.emit_status(name, false, &[]).await;
+        tracing::info!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            server = %name,
+            "mcp disconnect completed"
+        );
         Ok(())
     }
 
@@ -212,6 +239,13 @@ impl McpConnectionPool {
     }
 
     pub async fn call_tool(&self, server: &str, tool: &str, arguments: Value) -> Result<Value> {
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            server = %server,
+            tool = %tool,
+            "mcp call_tool started"
+        );
         // Single lock acquisition: clone the needed Arc, then release before await.
         let connection = {
             let guard = self.connected.lock().await;

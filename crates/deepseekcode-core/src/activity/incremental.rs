@@ -56,6 +56,13 @@ impl ActivityProjectionState {
 
     /// Apply one SSE event to the projection state (incremental patch or full rebuild flag).
     pub fn apply_event(&mut self, event: &EventEnvelope) -> ActivityApplyOutcome {
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            kind = %event.kind.as_str(),
+            seq = event.seq,
+            "activity apply_event started"
+        );
         let mut rebuild = false;
         let mut bumped = false;
         self.push_event(event.clone());
@@ -129,13 +136,20 @@ impl ActivityProjectionState {
             bumped = true;
         }
 
+        tracing::debug!(
+            target: deepseekcode_telemetry::SESSION,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            rebuild = rebuild,
+            bumped = bumped,
+            "activity apply_event completed"
+        );
         ActivityApplyOutcome { rebuild, bumped }
     }
 }
 
 /// Whether an event should trigger a full activity-tree projection.
 pub fn event_requires_full_rebuild(kind: EventKind) -> bool {
-    matches!(
+    let out = matches!(
         kind,
         EventKind::ProviderTurnStarted
             | EventKind::SessionIdle
@@ -147,7 +161,15 @@ pub fn event_requires_full_rebuild(kind: EventKind) -> bool {
             | EventKind::QuestionRequested
             | EventKind::PlanCompleted
             | EventKind::ActivityUpdated
-    )
+    );
+    tracing::debug!(
+        target: deepseekcode_telemetry::SESSION,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        kind = %kind.as_str(),
+        rebuild = out,
+        "event_requires_full_rebuild evaluated"
+    );
+    out
 }
 
 pub fn patch_tool_started(

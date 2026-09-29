@@ -76,6 +76,7 @@ pub async fn basic_auth_middleware(
             if guard.1 > MAX_FAILS_PER_MINUTE {
                 tracing::warn!(
                     target: deepseekcode_telemetry::SERVER,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
                     path = %request.uri().path(),
                     fails = guard.1,
                     "basic auth throttled: too many failures"
@@ -105,6 +106,7 @@ pub async fn basic_auth_middleware(
     } else {
         tracing::warn!(
             target: deepseekcode_telemetry::SERVER,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             path = %request.uri().path(),
             "basic auth failed"
         );

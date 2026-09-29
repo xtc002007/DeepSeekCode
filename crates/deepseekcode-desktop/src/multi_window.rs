@@ -56,6 +56,7 @@ impl WindowManager {
         self.next_id += 1;
         tracing::info!(
             target: deepseekcode_telemetry::DESKTOP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             window_id = id,
             path = %project_dir.display(),
             "workspace window registered"
@@ -98,10 +99,24 @@ impl WindowManager {
         };
 
         let dir = project_dir.clone();
-        cx.open_window(options, move |_, cx| {
+        tracing::info!(
+            target: deepseekcode_telemetry::DESKTOP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            path = %project_dir.display(),
+            "spawning workspace window"
+        );
+        if let Err(e) = cx.open_window(options, move |_, cx| {
             cx.new(|cx| crate::workspace::WorkspaceView::with_project(dir, cx))
-        })
-        .expect("open window");
+        }) {
+            tracing::error!(
+                target: deepseekcode_telemetry::DESKTOP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                path = %project_dir.display(),
+                error = %e,
+                "spawn workspace window failed"
+            );
+            panic!("open window: {e}");
+        }
     }
 }
 

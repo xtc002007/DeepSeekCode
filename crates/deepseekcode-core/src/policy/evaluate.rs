@@ -29,6 +29,14 @@ pub fn evaluate_patterns(
     patterns: &[String],
     ruleset: &PolicyRuleset,
 ) -> PolicyDecision {
+    tracing::debug!(
+        target: deepseekcode_telemetry::AUDIT,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        scope = %scope,
+        patterns = ?patterns,
+        rules = ruleset.len(),
+        "policy evaluate started"
+    );
     let concrete: Vec<&String> = patterns.iter().filter(|p| *p != "*").collect();
     let eval_patterns: Vec<&String> = if concrete.is_empty() {
         patterns.iter().collect()
@@ -39,16 +47,33 @@ pub fn evaluate_patterns(
     for pattern in eval_patterns {
         let rule = evaluate_rule(scope, pattern, ruleset);
         match rule.action {
-            PolicyAction::Block => return PolicyDecision::Block,
+            PolicyAction::Block => {
+                tracing::info!(
+                    target: deepseekcode_telemetry::AUDIT,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    scope = %scope,
+                    decision = "block",
+                    "policy evaluate decided"
+                );
+                return PolicyDecision::Block;
+            }
             PolicyAction::Prompt => saw_prompt = true,
             PolicyAction::Permit => {}
         }
     }
-    if saw_prompt {
+    let decision = if saw_prompt {
         PolicyDecision::Prompt
     } else {
         PolicyDecision::Permit
-    }
+    };
+    tracing::debug!(
+        target: deepseekcode_telemetry::AUDIT,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        scope = %scope,
+        decision = ?decision,
+        "policy evaluate decided"
+    );
+    decision
 }
 
 pub fn scope_matches(rule_scope: &str, scope: &str) -> bool {

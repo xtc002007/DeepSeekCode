@@ -298,6 +298,7 @@ async fn verify_applied_migration(
         repair_checksum(pool, version, &expected).await?;
         tracing::info!(
             target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             version,
             "upgraded migration checksum to stable sha256 format"
         );
@@ -312,6 +313,7 @@ async fn verify_applied_migration(
         repair_checksum(pool, version, &expected).await?;
         tracing::warn!(
             target: deepseekcode_telemetry::STORAGE,
+            run_id = %deepseekcode_telemetry::current_run_id(),
             version,
             stored_checksum = ?stored,
             expected_checksum = %expected,

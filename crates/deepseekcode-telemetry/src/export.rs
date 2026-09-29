@@ -129,18 +129,66 @@ pub fn export_diagnostic_bundle_with_options(
 }
 
 fn should_redact_diagnostic_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| matches!(ext, "log" | "json" | "txt"))
+    // Product-grade fix: rolled files (`app.log.1`) have extension `1`,
+    // previously bypassing redaction and leaking secrets into diagnostic
+    // bundles. Match by file-name substring instead.
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    name.contains(".log")
+        || name.ends_with(".json")
+        || name.ends_with(".txt")
+        || path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| matches!(ext, "log" | "json" | "txt"))
 }
 
 /// Read the last N lines from app.log for CI / failure dumps.
 /// Streaming reverse scan (P1-13: previously `read_to_string` loaded the
-/// whole file, OOM on large logs).
+/// whole file, OOM on large logs). When `app.log` holds fewer than `lines`,
+/// the remainder is served from the rolled `app.log.1` … `app.log.4` so
+/// rotation never hides recent history.
 pub fn tail_app_log(run_dir: &Path, lines: usize) -> String {
+    if lines == 0 {
+        return String::new();
+    }
+    // Newest first: app.log, then .1 (newest roll) … .4 (oldest kept).
+    let mut chunks: Vec<String> = Vec::new();
+    let mut collected = 0usize;
+    for name in [
+        "app.log",
+        "app.log.1",
+        "app.log.2",
+        "app.log.3",
+        "app.log.4",
+    ] {
+        if collected >= lines {
+            break;
+        }
+        let tail = tail_one_file(&run_dir.join(name), lines - collected);
+        let n = tail.lines().count();
+        if n == 0 {
+            continue;
+        }
+        collected += n;
+        chunks.push(tail);
+    }
+    if chunks.is_empty() {
+        return String::new();
+    }
+    if chunks.len() == 1 {
+        return chunks.pop().unwrap_or_default();
+    }
+    // chunks[0] is newest; reverse so oldest comes first.
+    chunks.into_iter().rev().collect::<Vec<_>>().join("\n")
+}
+
+fn tail_one_file(path: &Path, lines: usize) -> String {
     use std::io::{Read, Seek, SeekFrom};
-    let path = run_dir.join("app.log");
-    let Ok(mut file) = fs::File::open(&path) else {
+    let Ok(mut file) = fs::File::open(path) else {
         return String::new();
     };
     let Ok(size) = file.metadata().map(|m| m.len()) else {
