@@ -109,7 +109,6 @@ fn validated_project_root(
 
 /// Strip ANSI escapes + C0 controls from user-controlled strings before they
 /// reach `tracing!` (log injection) and truncate to 200 chars.
-#[allow(dead_code)]
 pub(crate) fn sanitize_log(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len().min(200));
     let mut chars = raw.chars();
@@ -139,7 +138,6 @@ pub(crate) fn sanitize_log(raw: &str) -> String {
     out
 }
 
-#[allow(dead_code)]
 fn is_valid_name_token(raw: &str) -> bool {
     !raw.is_empty()
         && raw.len() <= 128
@@ -148,7 +146,6 @@ fn is_valid_name_token(raw: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
-#[allow(dead_code)]
 fn validated_provider_id(raw: &str) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
     if is_valid_name_token(raw) {
         Ok(raw.to_string())
@@ -160,7 +157,6 @@ fn validated_provider_id(raw: &str) -> Result<String, (StatusCode, Json<serde_js
     }
 }
 
-#[allow(dead_code)]
 fn validated_mcp_name(raw: &str) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
     if is_valid_name_token(raw) {
         Ok(raw.to_string())
@@ -172,7 +168,6 @@ fn validated_mcp_name(raw: &str) -> Result<String, (StatusCode, Json<serde_json:
     }
 }
 
-#[allow(dead_code)]
 fn validated_plan_id(raw: &str) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
     // Plan ids are ULIDs; reject path separators / traversal outright.
     if ulid::Ulid::from_string(raw).is_ok() {
@@ -1143,6 +1138,18 @@ pub(crate) async fn dismiss_session_plan_prompt(
         Ok(d) => d,
         Err(resp) => return resp.into_response(),
     };
+    let plan_id = match validated_plan_id(&plan_id) {
+        Ok(v) => v,
+        Err(resp) => {
+            tracing::warn!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                plan_id = %sanitize_log(&plan_id),
+                "dismiss_plan rejected invalid plan id"
+            );
+            return resp.into_response();
+        }
+    };
     let session_id = parse_session_path!(&id);
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
@@ -1407,6 +1414,18 @@ pub(crate) async fn connect_provider(
         Ok(d) => d,
         Err(resp) => return resp.into_response(),
     };
+    let id = match validated_provider_id(&id) {
+        Ok(v) => v,
+        Err(resp) => {
+            tracing::warn!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider_id = %sanitize_log(&id),
+                "connect_provider rejected invalid id"
+            );
+            return resp.into_response();
+        }
+    };
     // Read-only catalog access: do not hold engine.write() across network IO.
     let location = {
         let engine = state.engine.read().await;
@@ -1445,6 +1464,18 @@ pub(crate) async fn disconnect_provider(
     let dir = match validated_project_root(&headers) {
         Ok(d) => d,
         Err(resp) => return resp.into_response(),
+    };
+    let id = match validated_provider_id(&id) {
+        Ok(v) => v,
+        Err(resp) => {
+            tracing::warn!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                provider_id = %sanitize_log(&id),
+                "disconnect_provider rejected invalid id"
+            );
+            return resp.into_response();
+        }
     };
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
@@ -1786,6 +1817,18 @@ pub(crate) async fn connect_mcp(
         Ok(d) => d,
         Err(resp) => return resp.into_response(),
     };
+    let name = match validated_mcp_name(&name) {
+        Ok(v) => v,
+        Err(resp) => {
+            tracing::warn!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                mcp_name = %sanitize_log(&name),
+                "connect_mcp rejected invalid name"
+            );
+            return resp.into_response();
+        }
+    };
     let location = {
         let engine = state.engine.read().await;
         engine.location(&dir).await
@@ -1811,6 +1854,18 @@ pub(crate) async fn disconnect_mcp(
     let dir = match validated_project_root(&headers) {
         Ok(d) => d,
         Err(resp) => return resp.into_response(),
+    };
+    let name = match validated_mcp_name(&name) {
+        Ok(v) => v,
+        Err(resp) => {
+            tracing::warn!(
+                target: deepseekcode_telemetry::SERVER,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                mcp_name = %sanitize_log(&name),
+                "disconnect_mcp rejected invalid name"
+            );
+            return resp.into_response();
+        }
     };
     let location = {
         let engine = state.engine.read().await;

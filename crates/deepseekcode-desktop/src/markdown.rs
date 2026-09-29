@@ -693,14 +693,15 @@ fn split_runs_on_newlines(runs: Vec<InlineRun>) -> Vec<Vec<InlineRun>> {
             if segment.is_empty() {
                 continue;
             }
-            lines
-                .last_mut()
-                .expect("line vector non-empty")
-                .push(InlineRun {
+            // `lines` starts with one empty vec and only grows, but UI code
+            // must not crash on a future refactor — skip the segment instead.
+            if let Some(line) = lines.last_mut() {
+                line.push(InlineRun {
                     text: segment.to_string(),
                     styles: run.styles.clone(),
                     url: run.url.clone(),
                 });
+            }
         }
     }
     if lines.len() == 1 && lines[0].is_empty() {

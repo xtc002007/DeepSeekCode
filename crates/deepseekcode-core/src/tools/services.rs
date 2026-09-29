@@ -22,11 +22,16 @@ pub fn with_services<R: Send + 'static>(
     // current-thread runtimes). If a runtime exists, run the scoped future
     // on a dedicated OS thread; otherwise block inline (P0-4/P1-9).
     if tokio::runtime::Handle::try_current().is_ok() {
-        std::thread::spawn(move || {
+        match std::thread::spawn(move || {
             futures::executor::block_on(with_services_async(services, async { f() }))
         })
         .join()
-        .expect("tool services thread panicked")
+        {
+            Ok(v) => v,
+            // Preserve the original panic payload instead of masking it with
+            // a generic `expect` message; callers see the real cause.
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     } else {
         futures::executor::block_on(with_services_async(services, async { f() }))
     }

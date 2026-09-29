@@ -6,7 +6,7 @@ use deepseekcode_schema::agent::AgentKind;
 use deepseekcode_schema::event::{EventEnvelope, EventKind};
 use deepseekcode_schema::plan::SessionPlanSummary;
 use deepseekcode_schema::policy::{PolicyReply, PolicyReplyKind};
-use deepseekcode_schema::provider::ProviderInfo;
+use deepseekcode_schema::provider::{ModelInfo, ProviderInfo};
 use deepseekcode_schema::session::{
     CreateSessionRequest, PromptDelivery, PromptRequest, RevertFileEntry,
 };
@@ -48,7 +48,9 @@ use crate::panel_resize::PanelResizeEdge;
 use crate::permission_dock::{PermissionDock, PolicyPromptState};
 use crate::plan_implement_dock::{PlanImplementDock, PlanImplementPromptState};
 use crate::plan_session_strip::PlanSessionStrip;
-use crate::preferences::{load_preferences, save_preferences, AppPreferences, ThemeId};
+use crate::preferences::{
+    load_preferences, save_preferences, AppPreferences, CustomModelEntry, ThemeId,
+};
 use crate::revert::{RevertAction, RevertDock, RevertDockState};
 use crate::right_panel::RightPanelView;
 use crate::session_activity::{push_session_event, truncate_session_events_on_compaction};
@@ -146,12 +148,16 @@ pub struct WorkspaceView {
     prompt_input: Entity<PromptInput>,
     api_key_input: Entity<PromptInput>,
     base_url_input: Entity<PromptInput>,
+    custom_model_input: Entity<PromptInput>,
     server_url_input: Entity<PromptInput>,
     server_password_input: Entity<PromptInput>,
     worktree_branch_input: Entity<PromptInput>,
     selected_agent: SharedString,
     selected_model: SharedString,
     selected_provider: Option<String>,
+    /// User-added models (Settings → Custom models), persisted in preferences
+    /// and merged into `providers` after every catalog fetch.
+    custom_models: Vec<CustomModelEntry>,
     api_key_dialog: Option<ApiKeyDialogState>,
     settings_open: bool,
     settings_section: SettingsSection,
@@ -267,28 +273,39 @@ impl WorkspaceView {
         .detach();
         let api_key_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
+            input.set_element_id("api-key-input", cx);
             input.set_placeholder("sk-…", cx);
             input.set_masked(true, cx);
             input
         });
         let base_url_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
+            input.set_element_id("base-url-input", cx);
             input.set_placeholder("https://api.example.com/v1 (optional)", cx);
+            input
+        });
+        let custom_model_input = cx.new(|cx| {
+            let mut input = PromptInput::new(cx);
+            input.set_element_id("custom-model-input", cx);
+            input.set_placeholder("e.g. openai/gpt-4o, deepseek/deepseek-chat", cx);
             input
         });
         let server_url_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
+            input.set_element_id("server-url-input", cx);
             input.set_placeholder("http://127.0.0.1:4096 (remote server URL)", cx);
             input
         });
         let server_password_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
+            input.set_element_id("server-password-input", cx);
             input.set_placeholder("Server password (optional)", cx);
             input.set_masked(true, cx);
             input
         });
         let worktree_branch_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
+            input.set_element_id("worktree-branch-input", cx);
             input.set_placeholder("feature/my-branch (optional)", cx);
             input
         });
@@ -309,27 +326,32 @@ impl WorkspaceView {
         .detach();
         let session_title_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
+            input.set_element_id("session-title-input", cx);
             input.set_placeholder("Session title", cx);
             input.set_key_context("SessionTitleInput", cx);
             input
         });
         let permission_allow_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
+            input.set_element_id("permission-allow-input", cx);
             input.set_placeholder("allow rules (one per line)", cx);
             input
         });
         let permission_deny_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
+            input.set_element_id("permission-deny-input", cx);
             input.set_placeholder("Optional feedback when denying…", cx);
             input
         });
         let question_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
+            input.set_element_id("question-input", cx);
             input.set_placeholder("Your answer…", cx);
             input
         });
         let policy_pattern_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
+            input.set_element_id("policy-pattern-input", cx);
             input.set_placeholder("pattern (e.g. git * or .deepseekcode/plan/**)", cx);
             input
         });
@@ -364,12 +386,14 @@ impl WorkspaceView {
             prompt_input,
             api_key_input,
             base_url_input,
+            custom_model_input,
             server_url_input,
             server_password_input,
             worktree_branch_input,
             selected_agent: prefs.selected_agent.into(),
             selected_model: prefs.selected_model.into(),
             selected_provider: prefs.selected_provider,
+            custom_models: prefs.custom_models.clone(),
             api_key_dialog: None,
             settings_open: false,
             settings_section: SettingsSection::General,
@@ -1781,7 +1805,9 @@ Describe this project so the AI assistant has context.\n\n\
             let session_model = std::sync::Mutex::new(None);
             let _ = view.update(cx, |this, cx| {
                 this.providers = providers.clone();
-                this.init_defaults_from_providers(&providers);
+                this.apply_custom_models();
+                let merged = this.providers.clone();
+                this.init_defaults_from_providers(&merged);
                 this.sync_context_window();
                 if let Ok(mut guard) = session_model.lock() {
                     *guard = Some(this.current_session_model());
@@ -1911,6 +1937,14 @@ Describe this project so the AI assistant has context.\n\n\
         {
             self.selected_model = model.name.clone().into();
             self.selected_provider = Some(model.provider_id.clone());
+            self.persist_preferences();
+            return;
+        }
+
+        // Preserve a custom model id (Settings → Custom model, e.g. an
+        // OpenRouter `author/model` id absent from the catalog) instead of
+        // clobbering it with the first catalog entry on every restart.
+        if !selected.is_empty() && self.selected_provider.is_some() {
             self.persist_preferences();
             return;
         }
@@ -4410,7 +4444,32 @@ Describe this project so the AI assistant has context.\n\n\
         self.settings_section = section;
         self.load_permission_inputs(cx);
         self.load_settings_catalog(cx);
+        // Providers were previously fetched only once at project bootstrap:
+        // a transient failure (or opening Settings with no project) left the
+        // AI section permanently empty. Refresh on every open instead.
+        self.refresh_providers(cx);
         cx.notify();
+    }
+
+    /// Re-fetch the provider catalog (connection states + model lists).
+    /// No project / unreachable server → keeps the previous list.
+    fn refresh_providers(&mut self, cx: &mut Context<Self>) {
+        let client_slot = Arc::clone(&self.client);
+        cx.spawn(async move |view, cx| {
+            let client = lock_sdk_client(&client_slot).await;
+            let Some(client) = client else {
+                return;
+            };
+            let Ok(providers) = client.list_providers().await else {
+                return;
+            };
+            let _ = view.update(cx, |this, cx| {
+                this.providers = providers;
+                this.apply_custom_models();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
@@ -4450,6 +4509,57 @@ Describe this project so the AI assistant has context.\n\n\
         let _ = model_id;
     }
 
+    /// Apply an arbitrary model id typed into Settings → Custom model
+    /// (OpenRouter proxies any `author/model` id, so the catalog can never
+    /// enumerate them all). Stored verbatim in preferences; the session
+    /// update passes the id straight through to the provider.
+    /// Add the id typed into Settings → Custom models to the user list
+    /// (persisted in preferences, merged into every catalog fetch) and
+    /// select it. Adding an id that already exists just selects it.
+    pub(crate) fn add_custom_model(&mut self, provider_id: &str, cx: &mut Context<Self>) {
+        let id = self.custom_model_input.read(cx).text().trim().to_string();
+        if id.is_empty() {
+            return;
+        }
+        let known = self.providers.iter().any(|p| {
+            p.id == provider_id && p.models.iter().any(|m| m.id == id)
+        });
+        if !known
+            && !self
+                .custom_models
+                .iter()
+                .any(|c| c.provider_id == provider_id && c.id == id)
+        {
+            self.custom_models.push(CustomModelEntry {
+                provider_id: provider_id.to_string(),
+                id: id.clone(),
+                name: id.clone(),
+            });
+            self.persist_preferences();
+            self.apply_custom_models();
+            self.custom_model_input.update(cx, |input, cx| input.clear(cx));
+        }
+        self.set_model(&id, &id, provider_id, cx);
+    }
+
+    /// Remove one user-added model (persisted; catalog entries untouched).
+    pub(crate) fn remove_custom_model(
+        &mut self,
+        provider_id: &str,
+        model_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.custom_models
+            .retain(|c| !(c.provider_id == provider_id && c.id == model_id));
+        self.persist_preferences();
+        for provider in &mut self.providers {
+            if provider.id == provider_id {
+                provider.models.retain(|m| m.id != model_id);
+            }
+        }
+        cx.notify();
+    }
+
     pub(crate) fn disconnect_provider(&mut self, provider_id: &str, cx: &mut Context<Self>) {
         let client_slot = Arc::clone(&self.client);
         let provider_id = provider_id.to_string();
@@ -4460,6 +4570,7 @@ Describe this project so the AI assistant has context.\n\n\
                 let providers = client.list_providers().await.unwrap_or_default();
                 let _ = view.update(cx, |this, cx| {
                     this.providers = providers;
+                    this.apply_custom_models();
                     cx.notify();
                 });
             }
@@ -4476,7 +4587,30 @@ Describe this project so the AI assistant has context.\n\n\
             theme: self.theme,
             server_url: self.server_url.clone(),
             server_password: self.server_password.clone(),
+            custom_models: self.custom_models.clone(),
         });
+    }
+
+    /// Merge user-added models into the server catalog (dedup by id).
+    /// Called after every provider fetch so customs survive reconnects.
+    fn apply_custom_models(&mut self) {
+        for custom in &self.custom_models {
+            if let Some(provider) = self
+                .providers
+                .iter_mut()
+                .find(|p| p.id == custom.provider_id)
+            {
+                if !provider.models.iter().any(|m| m.id == custom.id) {
+                    provider.models.push(ModelInfo {
+                        id: custom.id.clone(),
+                        name: custom.name.clone(),
+                        provider_id: custom.provider_id.clone(),
+                        context_window: None,
+                        enabled: true,
+                    });
+                }
+            }
+        }
     }
 
     pub(crate) fn set_theme(&mut self, theme_id: ThemeId, cx: &mut Context<Self>) {
@@ -5218,7 +5352,9 @@ Describe this project so the AI assistant has context.\n\n\
                         let providers = client.list_providers().await.unwrap_or_default();
                         let _ = view.update(cx, |this, cx| {
                             this.providers = providers.clone();
-                            this.init_defaults_from_providers(&providers);
+                            this.apply_custom_models();
+                            let merged = this.providers.clone();
+                            this.init_defaults_from_providers(&merged);
                             this.api_key_error = None;
                             this.sync_session_model(cx);
                             cx.notify();
@@ -5433,6 +5569,38 @@ impl Render for WorkspaceView {
                     .is_focused(window)
                 {
                     this.submit_prompt(cx);
+                    return;
+                }
+                // Enter inside the Connect dialog confirms it.
+                if this.api_key_dialog.is_some()
+                    && (this
+                        .api_key_input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window)
+                        || this
+                            .base_url_input
+                            .read(cx)
+                            .focus_handle(cx)
+                            .is_focused(window))
+                {
+                    this.confirm_api_key(cx);
+                    return;
+                }
+                // Enter inside Settings → Custom model adds + selects it.
+                if this
+                    .custom_model_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+                {
+                    let provider = match this.selected_provider.as_deref() {
+                        Some("openrouter") | Some("openai-compatible") => {
+                            this.selected_provider.clone().unwrap_or_default()
+                        }
+                        _ => "openrouter".to_string(),
+                    };
+                    this.add_custom_model(&provider, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &SessionTitleSave, window, cx| {
@@ -5489,6 +5657,9 @@ impl Render for WorkspaceView {
                 self.policy_auto_mode,
                 self.selected_policy_row,
                 self.policy_pattern_input.clone(),
+                self.custom_model_input.clone(),
+                &self.custom_models,
+                self.project_dir.is_some(),
             ))
             .children(self.render_api_key_dialog(cx))
             .child(RevertDock::render_overlay(
@@ -5864,6 +6035,7 @@ impl WorkspaceView {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.close_image_preview(cx);
+                    cx.stop_propagation();
                 }),
             )
             .child(
@@ -6075,10 +6247,11 @@ impl WorkspaceView {
             .id("question-dialog")
             .absolute()
             .inset_0()
-            .bg(theme.bg_overlay)
+            .bg(rgba(0x00000099))
             .flex()
             .items_center()
             .justify_center()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(panel)
             .into_any_element()]
     }
@@ -6092,16 +6265,24 @@ impl WorkspaceView {
             .id("api-key-dialog")
             .absolute()
             .inset_0()
-            .bg(theme.bg_overlay)
+            // Translucent scrim (not opaque `bg_overlay`): the page behind —
+            // including the Settings panel this dialog was opened from —
+            // stays visible around the popup.
+            .bg(rgba(0x00000099))
             .flex()
             .items_center()
             .justify_center()
+            // Swallow clicks so they never reach the Settings panel or the
+            // timeline behind (same fall-through bug as the settings overlay).
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
                     .w(px(400.))
                     .p_4()
                     .rounded_lg()
-                    .bg(theme.bg_elevated)
+                    // `bg_surface` contrasts with the inputs' `bg_elevated`
+                    // so the text fields are actually visible as boxes.
+                    .bg(theme.bg_surface)
                     .border_1()
                     .border_color(theme.border_default)
                     .child(
@@ -6123,7 +6304,11 @@ impl WorkspaceView {
                     .child(
                         div()
                             .mt_3()
-                            .h(px(36.))
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border_default)
+                            .bg(theme.bg_elevated)
+                            .px_2()
                             .child(self.api_key_input.clone()),
                     )
                     .child(
@@ -6136,7 +6321,11 @@ impl WorkspaceView {
                     .child(
                         div()
                             .mt_1()
-                            .h(px(36.))
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border_default)
+                            .bg(theme.bg_elevated)
+                            .px_2()
                             .child(self.base_url_input.clone()),
                     )
                     .children(if let Some(err) = &self.api_key_error {

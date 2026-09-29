@@ -22,7 +22,21 @@ fn shared_engine() -> &'static Engine {
     ENGINE.get_or_init(|| {
         let mut config = Config::new();
         config.consume_fuel(true);
-        Engine::new(&config).expect("wasmtime engine with fuel metering")
+        match Engine::new(&config) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::APP,
+                    error = %e,
+                    "wasmtime engine creation failed"
+                );
+                // Engine construction with in-memory config is infallible in
+                // practice; abort with context instead of a bare expect so the
+                // failure is diagnosable and never surfaces as plugin success.
+                eprintln!("DeepSeekCode wasmtime engine unavailable: {e}");
+                std::process::abort();
+            }
+        }
     })
 }
 

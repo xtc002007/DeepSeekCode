@@ -86,42 +86,10 @@ impl Auth for ApiKeyAuth {
 }
 
 /// Stub for future AWS Bedrock SigV4 signing.
-/// Fail-closed: `apply` MUST NOT emit an unsigned request. It logs and
-/// returns the builder unusable by marking it; callers must use
-/// `apply_or_error`. To enforce this, `apply` panics in all builds so a
-/// silent unsigned request is impossible (P0-5). Use `apply_or_error`.
+/// Fail-closed by construction: no `Auth` impl exists, so an unsigned request
+/// cannot be built via the `Auth` path at compile time. Callers must use
+/// `apply_or_error`, which returns `Err` without panicking.
 pub struct SigV4Auth;
-
-impl Auth for SigV4Auth {
-    fn apply(&self, _builder: RequestBuilder, _api_key: &str) -> RequestBuilder {
-        tracing::error!(
-            target: deepseekcode_telemetry::LLM,
-            run_id = %deepseekcode_telemetry::current_run_id(),
-            auth = "sigv4",
-            error = "unsupported",
-            "SigV4 authentication is not supported in this build"
-        );
-        tracing::warn!(
-            target: deepseekcode_telemetry::LLM,
-            run_id = %deepseekcode_telemetry::current_run_id(),
-            auth = "sigv4",
-            "llm auth fail-closed panic imminent"
-        );
-        tracing::debug!(
-            target: deepseekcode_telemetry::LLM,
-            run_id = %deepseekcode_telemetry::current_run_id(),
-            auth = "sigv4",
-            "llm sigv4 apply rejected"
-        );
-        tracing::info!(
-            target: deepseekcode_telemetry::LLM,
-            run_id = %deepseekcode_telemetry::current_run_id(),
-            auth = "sigv4",
-            "llm sigv4 unsupported path"
-        );
-        panic!("SigV4Auth::apply must not be used; use apply_or_error (fail-closed)");
-    }
-}
 
 impl SigV4Auth {
     pub fn unsupported() -> DeepSeekCodeError {
@@ -151,38 +119,8 @@ impl SigV4Auth {
 }
 
 /// Stub for future OAuth bearer refresh flows (fail-closed, see above).
+/// No `Auth` impl by design — use `apply_or_error`.
 pub struct OAuthAuth;
-
-impl Auth for OAuthAuth {
-    fn apply(&self, _builder: RequestBuilder, _token: &str) -> RequestBuilder {
-        tracing::error!(
-            target: deepseekcode_telemetry::LLM,
-            run_id = %deepseekcode_telemetry::current_run_id(),
-            auth = "oauth",
-            error = "unsupported",
-            "OAuth authentication is not supported in this build"
-        );
-        tracing::warn!(
-            target: deepseekcode_telemetry::LLM,
-            run_id = %deepseekcode_telemetry::current_run_id(),
-            auth = "oauth",
-            "llm auth fail-closed panic imminent"
-        );
-        tracing::debug!(
-            target: deepseekcode_telemetry::LLM,
-            run_id = %deepseekcode_telemetry::current_run_id(),
-            auth = "oauth",
-            "llm oauth apply rejected"
-        );
-        tracing::info!(
-            target: deepseekcode_telemetry::LLM,
-            run_id = %deepseekcode_telemetry::current_run_id(),
-            auth = "oauth",
-            "llm oauth unsupported path"
-        );
-        panic!("OAuthAuth::apply must not be used; use apply_or_error (fail-closed)");
-    }
-}
 
 impl OAuthAuth {
     pub fn unsupported() -> DeepSeekCodeError {

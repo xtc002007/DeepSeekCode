@@ -371,8 +371,17 @@ pub fn word_bounds_at(text: &str, ix: usize) -> Range<usize> {
     if text.is_empty() {
         return 0..0;
     }
-    let ix = snap_to_grapheme(text, ix).min(text.len().saturating_sub(1).max(0));
-    let ch = text[ix..].chars().next();
+    // Clamp BEFORE snapping: `len - 1` may sit inside a multibyte char
+    // (e.g. text ending with '）' bytes 54..57, `len - 1 == 56`), so
+    // snapping after clamping is required to guarantee a char boundary.
+    // The old order (snap then `min(len - 1)`) reintroduced a mid-char
+    // index and panicked at `text[ix..]` — fatal here because selection
+    // runs inside a non-unwinding GPUI callback (process abort).
+    let ix = snap_to_grapheme(text, ix.min(text.len().saturating_sub(1).max(0)));
+    if !text.is_char_boundary(ix) {
+        return 0..0;
+    }
+    let ch = text.get(ix..).and_then(|s| s.chars().next());
     match ch {
         Some(ch) if is_word_char(ch) && !is_cjk(ch) => {
             let mut start = ix;
@@ -622,11 +631,10 @@ impl Element for SelectableText {
             .get(self.block.as_ref())
             .cloned();
         let width_close = |a: Pixels, b: Pixels| a > b - px(1.) && a < b + px(1.);
-        let reuse = cached.as_ref().is_some_and(|entry| {
+        let fragments = if let Some(entry) = cached.as_ref().filter(|entry| {
             entry.text_hash == hash && width_close(entry.width, bounds.size.width)
-        });
-        let fragments = if reuse {
-            cached.expect("checked above").fragments
+        }) {
+            entry.fragments.clone()
         } else {
             let fragments = self.layout_fragments(window, wrap_width);
             let links = self
@@ -1257,6 +1265,24 @@ mod tests {
         // Single CJK char (no dictionary segmentation).
         assert_eq!(word_bounds_at("你好世界", 3), 3..6);
         assert_eq!(word_bounds_at("", 0), 0..0);
+    }
+
+    #[test]
+    fn word_bounds_at_end_of_multibyte_text_does_not_panic() {
+        // Regression: text ending with '）' (3 bytes). Old code did
+        // `snap(ix).min(len - 1)` — with `ix == len` the `min` produced a
+        // mid-char index (56 inside bytes 54..57) and panicked at
+        // `text[ix..]`, aborting the process from a non-unwinding callback.
+        let text = "测试内容（说明）";
+        let len = text.len();
+        // '）' is 3 bytes; len - 1 is strictly inside it.
+        assert!(!text.is_char_boundary(len - 1));
+        let last_start = len - '）'.len_utf8();
+        // Cursor past the end and mid-char indices must all snap safely.
+        assert_eq!(word_bounds_at(text, len), last_start..len);
+        assert_eq!(word_bounds_at(text, len - 1), last_start..len);
+        assert_eq!(word_bounds_at(text, len + 99), last_start..len);
+        assert_eq!(word_bounds_at(text, last_start + 1), last_start..len);
     }
 
     #[test]

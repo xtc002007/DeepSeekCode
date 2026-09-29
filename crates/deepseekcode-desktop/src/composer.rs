@@ -40,6 +40,11 @@ pub enum PromptInputEvent {
 
 pub struct PromptInput {
     focus_handle: FocusHandle,
+    /// Unique GPUI element id. Every `PromptInput` entity rendered in the
+    /// same window MUST use a distinct id — duplicate ids break hit-testing
+    /// and focus routing, which previously made the API-key dialog inputs
+    /// (api_key + base_url share one dialog) unclickable.
+    element_id: SharedString,
     pub content: SharedString,
     placeholder: SharedString,
     selected_range: Range<usize>,
@@ -61,6 +66,7 @@ impl PromptInput {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
+            element_id: "prompt-input".into(),
             content: SharedString::default(),
             placeholder: COMPOSER_PLACEHOLDER.into(),
             selected_range: 0..0,
@@ -86,6 +92,12 @@ impl PromptInput {
 
     pub fn set_key_context(&mut self, name: impl Into<String>, cx: &mut Context<Self>) {
         self.key_context_name = name.into();
+        cx.notify();
+    }
+
+    /// Unique GPUI element id for this input (see `element_id` docs).
+    pub fn set_element_id(&mut self, id: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.element_id = id.into();
         cx.notify();
     }
 
@@ -190,9 +202,12 @@ impl PromptInput {
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Explicit focus: without this, clicks inside dialogs (API-key,
+        // settings) never route keyboard/IME input to the tapped field.
+        window.focus(&self.focus_handle, cx);
         self.is_selecting = true;
         if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), cx);
@@ -756,7 +771,7 @@ impl Render for PromptInput {
         }
 
         div()
-            .id("prompt-input")
+            .id(ElementId::Name(self.element_id.clone()))
             .flex_1()
             .when(!self.compact, |el| el.min_h(px(48.)))
             .when(self.compact, |el| el.h_full().min_h(px(0.)))

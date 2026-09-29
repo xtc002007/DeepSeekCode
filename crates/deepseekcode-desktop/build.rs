@@ -9,7 +9,10 @@ fn generate_icons() {
     use std::path::Path;
 
     let icons_dir = Path::new("assets/icons");
-    let out_path = Path::new(&std::env::var("OUT_DIR").unwrap()).join("icons_generated.rs");
+    let out_path = Path::new(
+        &std::env::var("OUT_DIR").expect("build.rs: OUT_DIR not set by Cargo"),
+    )
+    .join("icons_generated.rs");
 
     println!("cargo:rerun-if-changed=assets/icons");
 
@@ -41,7 +44,13 @@ fn generate_icons() {
 
     for entry in &entries {
         let path = entry.path();
-        let stem = path.file_stem().unwrap().to_string_lossy();
+        // Skip entries without a valid UTF-8 stem instead of panicking:
+        // a stray file (e.g. `.DS_Store`, non-UTF8 name) must not break
+        // the whole desktop build.
+        let Some(stem_os) = path.file_stem() else {
+            continue;
+        };
+        let stem = stem_os.to_string_lossy();
         let variant = to_pascal_case(&stem);
         code.push_str(&format!("    {variant},\n"));
     }
@@ -52,7 +61,10 @@ fn generate_icons() {
 
     for entry in &entries {
         let path = entry.path();
-        let stem = path.file_stem().unwrap().to_string_lossy();
+        let Some(stem_os) = path.file_stem() else {
+            continue;
+        };
+        let stem = stem_os.to_string_lossy();
         let variant = to_pascal_case(&stem);
         code.push_str(&format!(
             "            Self::{variant} => \"icons/{stem}.svg\",\n"
@@ -62,13 +74,20 @@ fn generate_icons() {
     code.push_str("        }\n    }\n\n    pub fn all() -> &'static [IconName] {\n        &[\n");
     for entry in &entries {
         let path = entry.path();
-        let stem = path.file_stem().unwrap().to_string_lossy();
+        let Some(stem_os) = path.file_stem() else {
+            continue;
+        };
+        let stem = stem_os.to_string_lossy();
         let variant = to_pascal_case(&stem);
         code.push_str(&format!("            IconName::{variant},\n"));
     }
     code.push_str("        ]\n    }\n}\n");
 
-    fs::write(out_path, code).expect("write icons_generated.rs");
+    // Build-script IO failure must fail the build loudly with context
+    // (a silent `ok()` would generate a missing-symbols compile error later).
+    if let Err(e) = fs::write(out_path, code) {
+        panic!("build.rs: failed to write icons_generated.rs: {e}");
+    }
 }
 
 fn to_pascal_case(name: &str) -> String {
@@ -103,7 +122,10 @@ fn compile_windows_resources() {
     if std::path::Path::new("assets/icon.png").exists() {
         // P1-12: write to OUT_DIR, never pollute the source tree (previously
         // overwrote `assets/icon.ico` on every build).
-        let out_ico = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("icon.ico");
+        let out_ico = std::path::Path::new(
+            &std::env::var("OUT_DIR").expect("build.rs: OUT_DIR not set by Cargo"),
+        )
+        .join("icon.ico");
         write_ico_from_png("assets/icon.png", &out_ico.to_string_lossy());
         let mut res = winres::WindowsResource::new();
         res.set_icon(&out_ico.to_string_lossy());

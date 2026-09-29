@@ -115,7 +115,10 @@ impl WindowManager {
                 error = %e,
                 "spawn workspace window failed"
             );
-            panic!("open window: {e}");
+            // Never `panic!` in a UI callback: it aborts the whole GPUI event
+            // loop without cleanup. Surface the error and keep the existing
+            // windows alive.
+            eprintln!("DeepSeekCode failed to open workspace window: {e}");
         }
     }
 }

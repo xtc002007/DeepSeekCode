@@ -14,17 +14,51 @@ static USE_DEDICATED_ENGINE_RUNTIME: AtomicBool = AtomicBool::new(false);
 
 /// Desktop clients should call this once at startup so session/tool I/O never shares the UI tokio pool.
 pub fn install_dedicated_engine_runtime() {
-    let _ = DEDICATED_ENGINE_RUNTIME
-        .get_or_init(|| Runtime::new().expect("deepseekcode dedicated engine runtime"));
-    USE_DEDICATED_ENGINE_RUNTIME.store(true, Ordering::SeqCst);
+    match Runtime::new() {
+        Ok(rt) => {
+            let _ = DEDICATED_ENGINE_RUNTIME.set(rt);
+            USE_DEDICATED_ENGINE_RUNTIME.store(true, Ordering::SeqCst);
+        }
+        Err(e) => {
+            tracing::error!(
+                target: deepseekcode_telemetry::APP,
+                error = %e,
+                "dedicated engine runtime creation failed; falling back to current runtime"
+            );
+        }
+    }
 }
 
 fn dedicated_engine_handle() -> Handle {
-    DEDICATED_ENGINE_RUNTIME
-        .get()
-        .expect("dedicated engine runtime not installed")
-        .handle()
-        .clone()
+    if let Some(rt) = DEDICATED_ENGINE_RUNTIME.get() {
+        return rt.handle().clone();
+    }
+    // Fallback instead of panicking: embedded can run on the current runtime
+    // (with reduced isolation) rather than crashing the host process.
+    match Handle::try_current() {
+        Ok(h) => {
+            tracing::warn!(
+                target: deepseekcode_telemetry::APP,
+                "dedicated engine runtime not installed; using current runtime"
+            );
+            h
+        }
+        Err(_) => {
+            tracing::error!(
+                target: deepseekcode_telemetry::APP,
+                "no tokio runtime available for embedded engine; creating ephemeral one"
+            );
+            // Last resort: leak a runtime handle so embedded still works in
+            // non-async contexts instead of panicking.
+            let rt = Runtime::new().unwrap_or_else(|e| {
+                eprintln!("DeepSeekCode embedded runtime unavailable: {e}");
+                std::process::exit(1);
+            });
+            let handle = rt.handle().clone();
+            std::mem::forget(rt);
+            handle
+        }
+    }
 }
 
 pub struct EmbeddedEngine {

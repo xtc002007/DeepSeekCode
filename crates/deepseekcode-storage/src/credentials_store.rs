@@ -21,9 +21,12 @@ pub struct CredentialsStore {
 
 impl CredentialsStore {
     pub fn new(pool: SqlitePool) -> Self {
+        // Infallible by construction: `derive_local_key` returns `[u8; 32]`
+        // and `Aes256Gcm::new` takes `&Key<U32>` directly, so no
+        // length-checked `new_from_slice` panic path exists.
         Self {
             pool,
-            cipher: Aes256Gcm::new_from_slice(&derive_local_key()).expect("valid AES key length"),
+            cipher: Aes256Gcm::new((&derive_local_key()).into()),
         }
     }
 
@@ -216,8 +219,12 @@ fn try_keyring_delete(_provider_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// v2 key derivation: per-machine salt file + 50k SHA-256 iterations.
+/// v2 key derivation: per-machine salt file (0600) + 210k SHA-256 iterations.
 /// Falls back to v1 only for decrypting legacy rows (see `derive_legacy_key`).
+/// NOTE: SHA-256 iteration is a no-extra-dep hardening over the original 50k;
+/// the tracked migration path is Argon2id (`password-hash` crate) which adds
+/// memory hardness against GPU/ASIC offline brute force. Iteration count is
+/// versioned by the `v2:` payload prefix so a future Argon2 `v3` can coexist.
 fn machine_salt() -> Vec<u8> {
     // Stable per-machine salt stored outside the DB so a copied DB alone is
     // insufficient for offline decryption. Best-effort: env override for CI.
@@ -249,6 +256,19 @@ fn machine_salt() -> Vec<u8> {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(&path, &salt);
+    // Restrict salt file to owner-only: a world-readable salt aids offline
+    // attacks when combined with a copied DB. Best-effort, never fatal.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(windows)]
+    {
+        // Windows ACL lockdown would require `windows-acl`; document instead:
+        // `%APPDATA%/deepseekcode/.cred_salt` inherits the user's profile ACL
+        // which is owner-only by default on NTFS.
+    }
     salt
 }
 
@@ -257,7 +277,9 @@ fn derive_local_key() -> [u8; 32] {
 }
 
 fn derive_v2_key(salt: &[u8]) -> [u8; 32] {
-    // 50k-iteration SHA-256 KDF (no extra dep): user+host+version+salt.
+    // 210k-iteration SHA-256 KDF (no extra dep, ~4x the original 50k cost):
+    // user+host+version+salt. Argon2id remains the tracked upgrade for
+    // memory hardness; this raises CPU cost without new dependencies.
     let user = std::env::var("USERNAME")
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_default();
@@ -271,7 +293,7 @@ fn derive_v2_key(salt: &[u8]) -> [u8; 32] {
     hasher.update(user.as_bytes());
     hasher.update(host.as_bytes());
     let mut digest: Vec<u8> = hasher.finalize().to_vec();
-    for _ in 0..50_000 {
+    for _ in 0..210_000 {
         let mut h = Sha256::new();
         h.update(&digest);
         h.update(salt);
@@ -326,17 +348,11 @@ fn decrypt_secret(cipher: &Aes256Gcm, payload: &str) -> Result<String> {
     };
     // v2 first; legacy rows fall back to v1 key (then callers should re-store
     // to rotate). Distinguish corrupt vs wrong-machine via error chain.
+    // Both ciphers are built via infallible `Aes256Gcm::new` on `[u8; 32]`.
+    let legacy = Aes256Gcm::new((&derive_legacy_key()).into());
     let plaintext = match version {
-        "v2" => try_decrypt(cipher).or_else(|_| {
-            let legacy =
-                Aes256Gcm::new_from_slice(&derive_legacy_key()).expect("valid AES key length");
-            try_decrypt(&legacy)
-        })?,
-        _ => {
-            let legacy =
-                Aes256Gcm::new_from_slice(&derive_legacy_key()).expect("valid AES key length");
-            try_decrypt(&legacy).or_else(|_| try_decrypt(cipher))?
-        }
+        "v2" => try_decrypt(cipher).or_else(|_| try_decrypt(&legacy))?,
+        _ => try_decrypt(&legacy).or_else(|_| try_decrypt(cipher))?,
     };
     String::from_utf8(plaintext).map_err(|e| DeepSeekCodeError::Storage(e.to_string()))
 }

@@ -1,4 +1,4 @@
-use crate::preferences::ThemeId;
+use crate::preferences::{CustomModelEntry, ThemeId};
 use crate::theme::ThemeTokens;
 use crate::ui::scrollbar::render_flex_scroll_viewport;
 use deepseekcode_config::PolicyMode;
@@ -96,6 +96,9 @@ impl SettingsView {
         policy_auto_mode: bool,
         selected_policy_row: Option<usize>,
         policy_pattern_input: Entity<crate::composer::PromptInput>,
+        custom_model_input: Entity<crate::composer::PromptInput>,
+        custom_models: &[CustomModelEntry],
+        has_project: bool,
     ) -> AnyElement {
         if !open {
             return div().into_any_element();
@@ -107,10 +110,17 @@ impl SettingsView {
             .id("settings-overlay")
             .absolute()
             .inset_0()
-            .bg(theme.bg_overlay)
+            // Translucent scrim: the workspace behind stays visible around
+            // the centered panel (opaque `bg_overlay` hid the whole page).
+            .bg(rgba(0x00000099))
             .flex()
             .items_center()
             .justify_center()
+            // Swallow clicks: without this, mouse-downs on the panel fall
+            // through to the timeline behind and start text selection there
+            // instead of focusing the tapped control. Children (front-most)
+            // still receive the event first; only behind elements are cut off.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
                     .id("settings-panel")
@@ -145,6 +155,9 @@ impl SettingsView {
                         policy_auto_mode,
                         selected_policy_row,
                         policy_pattern_input,
+                        custom_model_input,
+                        custom_models,
+                        has_project,
                     ))
                     .child(render_close_button(cx)),
             )
@@ -315,6 +328,9 @@ fn render_content(
     policy_auto_mode: bool,
     selected_policy_row: Option<usize>,
     policy_pattern_input: Entity<crate::composer::PromptInput>,
+    custom_model_input: Entity<crate::composer::PromptInput>,
+    custom_models: &[CustomModelEntry],
+    has_project: bool,
 ) -> impl IntoElement {
     let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
     let body: AnyElement = match section {
@@ -327,6 +343,9 @@ fn render_content(
             selected_agent,
             selected_model,
             selected_provider,
+            custom_model_input,
+            custom_models,
+            has_project,
         )
         .into_any_element(),
         SettingsSection::General => {
@@ -457,8 +476,24 @@ fn render_ai_section(
     selected_agent: &str,
     selected_model: &str,
     selected_provider: Option<&str>,
+    custom_model_input: Entity<crate::composer::PromptInput>,
+    custom_models: &[CustomModelEntry],
+    has_project: bool,
 ) -> impl IntoElement {
     let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
+    // Custom model ids only make sense for providers that proxy arbitrary
+    // ids (OpenRouter / OpenAI-compatible). Default to OpenRouter.
+    let custom_provider_id = match selected_provider {
+        Some("openrouter") | Some("openai-compatible") => {
+            selected_provider.unwrap_or("openrouter").to_string()
+        }
+        _ => "openrouter".to_string(),
+    };
+    let custom_provider_name = providers
+        .iter()
+        .find(|p| p.id == custom_provider_id)
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| custom_provider_id.clone());
     div()
         .flex()
         .flex_col()
@@ -479,8 +514,117 @@ fn render_ai_section(
             &theme,
             "Providers",
             "Connect API keys once — stored in OS keychain with encrypted local fallback.",
-            render_providers(cx, providers),
+            render_providers(cx, providers, has_project),
         ))
+        .child(settings_group(
+            &theme,
+            "Custom models",
+            "Add any model id (OpenRouter format author/model, e.g. openai/gpt-4o, deepseek/deepseek-chat). Entries appear in the model lists and persist across restarts.",
+            render_custom_model_manager(
+                cx,
+                &theme,
+                providers,
+                custom_models,
+                custom_model_input,
+                custom_provider_id,
+                custom_provider_name,
+            ),
+        ))
+}
+
+/// User-managed model list: existing entries with per-row Remove plus an
+/// input + Add row. Adding also selects the new id as the default model.
+fn render_custom_model_manager(
+    cx: &Context<crate::workspace::WorkspaceView>,
+    theme: &ThemeTokens,
+    providers: &[ProviderInfo],
+    custom_models: &[CustomModelEntry],
+    custom_model_input: Entity<crate::composer::PromptInput>,
+    provider_id: String,
+    provider_name: String,
+) -> impl IntoElement {
+    let mut body = div().flex().flex_col().gap_2();
+    if custom_models.is_empty() {
+        body = body.child(
+            div()
+                .text_xs()
+                .text_color(theme.text_muted)
+                .child("No custom models yet — add one below."),
+        );
+    } else {
+        for entry in custom_models {
+            let entry_provider = entry.provider_id.clone();
+            let entry_id = entry.id.clone();
+            let provider_label = providers
+                .iter()
+                .find(|p| p.id == entry_provider)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| entry_provider.clone());
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme.bg_elevated)
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family("Consolas")
+                            .text_color(theme.text_secondary)
+                            .child(format!("{provider_label} | {}", entry.id)),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_md()
+                            .bg(theme.error.opacity(0.15))
+                            .text_xs()
+                            .text_color(theme.error)
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.remove_custom_model(&entry_provider, &entry_id, cx);
+                                }),
+                            )
+                            .child("Remove"),
+                    )
+                    .into_any_element(),
+            );
+        }
+    }
+    body = body.child(
+        div()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border_default)
+            .bg(theme.bg_elevated)
+            .px_2()
+            .child(custom_model_input.clone()),
+    );
+    body = body.child(
+        div()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .bg(theme.bg_selected)
+            .text_xs()
+            .text_center()
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.add_custom_model(&provider_id, cx);
+                }),
+            )
+            .child(format!("Add to {provider_name}")),
+    );
+    body
 }
 
 fn render_agent_choices(
@@ -1720,8 +1864,16 @@ fn render_string_list(
 fn render_providers(
     cx: &Context<crate::workspace::WorkspaceView>,
     providers: &[ProviderInfo],
+    has_project: bool,
 ) -> impl IntoElement {
     let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
+    if providers.is_empty() {
+        return div().text_sm().text_color(theme.text_muted).child(if has_project {
+            "Couldn't load providers — close and reopen Settings; if it persists, check Diagnostics."
+        } else {
+            "No project open — open a folder first (sidebar → Open Folder…), then connect API keys here."
+        });
+    }
     let mut list = div().flex().flex_col().gap_2();
     for provider in providers {
         let provider_id = provider.id.clone();
@@ -1841,6 +1993,34 @@ fn render_model_choices(
     }
 
     let mut list = div().flex().flex_col().gap_1();
+    // A custom model id (set via "Custom model" below) is not in the
+    // catalog — surface it as the active row so the selection is visible
+    // instead of silently showing nothing selected.
+    let known = models.iter().any(|(_, model_id, model_name, _)| {
+        selected_model == model_id || selected_model == model_name
+    });
+    if !known && !selected_model.is_empty() {
+        let custom_id = selected_model.to_string();
+        let custom_provider = selected_provider.unwrap_or("openrouter").to_string();
+        let custom_label = format!("Custom · {selected_model}");
+        list = list.child(
+            div()
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .cursor_pointer()
+                .bg(theme.bg_selected)
+                .border_1()
+                .border_color(theme.border_focus)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        this.set_model(&custom_id, &custom_id, &custom_provider, cx);
+                    }),
+                )
+                .child(custom_label),
+        );
+    }
     for (provider_name, model_id, model_name, provider_id) in models {
         let active = selected_model == model_id || selected_model == model_name;
         let label = format!("{provider_name} · {model_name}");

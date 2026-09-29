@@ -458,7 +458,12 @@ fn chunk_task_rows(rows: &[FlattenedActivityRow], task_active: bool) -> Vec<Task
         if starts_task {
             raw.push(Vec::new());
         }
-        raw.last_mut().expect("task chunk").push(row);
+        // `raw` always holds at least one chunk by construction above, but
+        // never `expect` in UI rendering: a logic regression must degrade to
+        // a dropped row, not a full desktop crash.
+        if let Some(chunk) = raw.last_mut() {
+            chunk.push(row);
+        }
     }
 
     // 2. Per chunk: hoist the last depth-1 assistant text as the summary

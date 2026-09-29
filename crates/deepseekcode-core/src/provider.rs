@@ -242,6 +242,9 @@ fn provider_entry(id: &str, name: &str, creds: &HashMap<String, String>) -> Prov
             model("deepseek-v4-pro", "DeepSeek V4 Pro", id, 1_000_000),
             model("deepseek-chat", "DeepSeek Chat (legacy)", id, 1_000_000),
         ],
+        // One seed entry only: further OpenRouter ids are user-managed
+        // (Settings → Custom models, persisted in preferences) since the
+        // catalog can never enumerate them all.
         "openrouter" => vec![model("openai/gpt-4o-mini", "GPT-4o Mini (OR)", id, 128_000)],
         _ => vec![],
     };

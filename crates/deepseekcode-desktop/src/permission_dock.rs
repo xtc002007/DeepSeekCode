@@ -64,14 +64,27 @@ impl PermissionDock {
                     .text_color(theme.text_secondary)
                     .child("Review this action before the agent continues."),
             )
-            .child(crate::ui::multiline_text::render_multiline(&detail, |el| {
-                el.p_2()
+            // Bounded internal scroll: an uncapped detail (e.g. a full
+            // todowrite JSON payload) grows the flex_shrink_0 dock without
+            // limit and squeezes the composer out of the clipped column.
+            // Same max_h + overflow_y_scroll pattern as the todo strip.
+            .child(
+                div()
+                    .id("permission-dock-detail")
                     .rounded_md()
                     .bg(theme.bg_base)
-                    .text_xs()
-                    .font_family("Consolas")
-                    .text_color(theme.text_primary)
-            }))
+                    .max_h(px(220.))
+                    .overflow_y_scroll()
+                    .child(crate::ui::multiline_text::render_multiline(
+                        &detail,
+                        |el| {
+                            el.p_2()
+                                .text_xs()
+                                .font_family("Consolas")
+                                .text_color(theme.text_primary)
+                        },
+                    )),
+            )
             .when(!patterns.is_empty(), |el| {
                 let count = patterns.len();
                 let toggle_label = if patterns_expanded {

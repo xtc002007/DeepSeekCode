@@ -31,6 +31,15 @@ impl ThemeId {
     }
 }
 
+/// One user-added model entry (Settings → Custom models), e.g. an
+/// OpenRouter `author/model` id the static catalog cannot enumerate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomModelEntry {
+    pub provider_id: String,
+    pub id: String,
+    pub name: String,
+}
+
 /// In-memory preferences (includes server password loaded from keyring).
 #[derive(Debug, Clone)]
 pub struct AppPreferences {
@@ -41,6 +50,7 @@ pub struct AppPreferences {
     pub server_url: Option<String>,
     pub server_password: Option<String>,
     pub theme: ThemeId,
+    pub custom_models: Vec<CustomModelEntry>,
 }
 
 impl Default for AppPreferences {
@@ -53,6 +63,7 @@ impl Default for AppPreferences {
             server_url: None,
             server_password: None,
             theme: ThemeId::Dark,
+            custom_models: Vec::new(),
         }
     }
 }
@@ -72,6 +83,10 @@ struct PreferencesFile {
     pub server_password: Option<String>,
     #[serde(default)]
     pub theme: ThemeId,
+    /// User-added models (Settings → Custom models). `default` keeps old
+    /// files loadable.
+    #[serde(default)]
+    pub custom_models: Vec<CustomModelEntry>,
 }
 
 impl Default for PreferencesFile {
@@ -85,6 +100,7 @@ impl Default for PreferencesFile {
             server_url: defaults.server_url,
             server_password: None,
             theme: defaults.theme,
+            custom_models: defaults.custom_models,
         }
     }
 }
@@ -99,6 +115,7 @@ impl From<PreferencesFile> for AppPreferences {
             server_url: file.server_url,
             server_password: None,
             theme: file.theme,
+            custom_models: file.custom_models,
         }
     }
 }
@@ -113,6 +130,7 @@ impl From<&AppPreferences> for PreferencesFile {
             server_url: prefs.server_url.clone(),
             server_password: None,
             theme: prefs.theme,
+            custom_models: prefs.custom_models.clone(),
         }
     }
 }

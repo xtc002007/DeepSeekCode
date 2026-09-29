@@ -8,7 +8,18 @@ pub struct DeepSeekCodeApp;
 
 impl DeepSeekCodeApp {
     pub fn run() {
-        let runtime = Runtime::new().expect("tokio runtime");
+        let runtime = match Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                tracing::error!(
+                    target: deepseekcode_telemetry::DESKTOP,
+                    error = %e,
+                    "desktop tokio runtime creation failed"
+                );
+                eprintln!("DeepSeekCode desktop failed to start tokio runtime: {e}");
+                std::process::exit(1);
+            }
+        };
         let _guard = runtime.enter();
         tracing::info!(
             target: deepseekcode_telemetry::DESKTOP,
@@ -49,7 +60,8 @@ impl DeepSeekCodeApp {
                             error = %e,
                             "desktop window open failed"
                         );
-                        panic!("open window: {e}");
+                        eprintln!("DeepSeekCode failed to open window: {e}");
+                        std::process::exit(1);
                     }
                 }
             });

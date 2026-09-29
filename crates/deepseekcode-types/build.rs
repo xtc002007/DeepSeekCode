@@ -13,7 +13,11 @@ fn main() {
 }
 
 fn ensure_git_hooks() {
-    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    // CARGO_MANIFEST_DIR is always set by Cargo; fail loudly with context
+    // instead of a bare `unwrap()` so a broken invocation is diagnosable.
+    let manifest_dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("build.rs: CARGO_MANIFEST_DIR not set"),
+    );
     let Some(root) = find_repo_root(&manifest_dir) else {
         return;
     };

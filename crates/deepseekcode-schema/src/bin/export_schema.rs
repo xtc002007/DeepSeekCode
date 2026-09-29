@@ -14,7 +14,6 @@ use deepseekcode_schema::policy::{
 };
 use deepseekcode_schema::session::{CreateSessionRequest, PromptDelivery, PromptRequest, Session};
 use schemars::schema_for;
-use std::io::Write;
 
 fn main() {
     let schemas: Vec<(&str, schemars::schema::RootSchema)> = vec![
@@ -69,13 +68,37 @@ fn main() {
     let out_dir = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "target/schema".to_string());
-    std::fs::create_dir_all(&out_dir).expect("create schema dir");
+    // CLI tool: IO failures must exit non-zero with context instead of a
+    // bare `expect` panic trace, so CI logs point at the failing path.
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        eprintln!("export_schema: cannot create {out_dir}: {e}");
+        std::process::exit(1);
+    }
 
+    let mut failed = false;
     for (name, schema) in schemas {
         let path = format!("{out_dir}/{name}.json");
-        let json = serde_json::to_string_pretty(&schema).expect("serialize schema");
-        let mut file = std::fs::File::create(&path).expect("create schema file");
-        file.write_all(json.as_bytes()).expect("write schema");
-        eprintln!("wrote {path}");
+        let json = match serde_json::to_string_pretty(&schema) {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("export_schema: serialize {name}: {e}");
+                failed = true;
+                continue;
+            }
+        };
+        match std::fs::File::create(&path)
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(json.as_bytes())
+            }) {
+            Ok(()) => eprintln!("wrote {path}"),
+            Err(e) => {
+                eprintln!("export_schema: write {path}: {e}");
+                failed = true;
+            }
+        }
+    }
+    if failed {
+        std::process::exit(1);
     }
 }

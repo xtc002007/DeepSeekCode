@@ -358,13 +358,30 @@ fn parse_proxy(proxy_url: &str) -> Option<(String, u16, Option<String>)> {
     };
     // Strip trailing path if any.
     let hostport = hostport.split('/').next().unwrap_or(hostport);
-    // IPv6 `[::1]:port` — keep simple: split last ':'.
-    let (host, port) = match hostport.rsplit_once(':') {
-        Some((h, p)) => match p.parse::<u16>() {
-            Ok(port) => (h.trim_matches(&['[', ']'][..]).to_string(), port),
-            Err(_) => (hostport.to_string(), default_port),
-        },
-        None => (hostport.to_string(), default_port),
+    // IPv6-aware: `[::1]:port` -> host `::1`; bare `::1` (no brackets, no
+    // port) must not be split on the last ':' (would yield host `::`).
+    let (host, port) = if hostport.starts_with('[') {
+        match hostport.split_once(']') {
+            Some((h, rest)) => {
+                let port = rest
+                    .trim_start_matches(':')
+                    .parse::<u16>()
+                    .unwrap_or(default_port);
+                (h.trim_start_matches('[').to_string(), port)
+            }
+            None => (hostport.trim_matches(&['[', ']'][..]).to_string(), default_port),
+        }
+    } else if hostport.matches(':').count() > 1 {
+        // Bare IPv6 literal without port.
+        (hostport.to_string(), default_port)
+    } else {
+        match hostport.rsplit_once(':') {
+            Some((h, p)) => match p.parse::<u16>() {
+                Ok(port) => (h.to_string(), port),
+                Err(_) => (hostport.to_string(), default_port),
+            },
+            None => (hostport.to_string(), default_port),
+        }
     };
     if host.is_empty() {
         return None;
@@ -376,15 +393,23 @@ fn parse_proxy(proxy_url: &str) -> Option<(String, u16, Option<String>)> {
     Some((host, port, auth_b64))
 }
 
-#[allow(clippy::double_ended_iterator_last)]
 fn host_of(endpoint: &str) -> Option<String> {
-    endpoint
+    let hostport = endpoint
         .split("://")
-        .last()
-        .and_then(|r| r.split('/').next())
-        .and_then(|h| h.rsplit('@').next())
-        .and_then(|h| h.split(':').next())
-        .map(|s| s.to_string())
+        .last()?
+        .split('/')
+        .next()?
+        .rsplit('@')
+        .next()?;
+    // Bracket-aware IPv6: `[::1]:443` -> `::1`; bare `::1` stays whole.
+    let host = if let Some(stripped) = hostport.strip_prefix('[') {
+        stripped.split(']').next().unwrap_or("").to_string()
+    } else if hostport.matches(':').count() > 1 {
+        hostport.to_string()
+    } else {
+        hostport.split(':').next().unwrap_or("").to_string()
+    };
+    if host.is_empty() { None } else { Some(host) }
 }
 
 async fn request_via<C>(
