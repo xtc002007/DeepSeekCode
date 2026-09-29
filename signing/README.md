@@ -29,6 +29,32 @@ DEEPSEEKCODE_SIGNING_PUBLIC_KEY_PATH=signing/deepseekcode.key.pub
 DEEPSEEKCODE_SIGNING_PRIVATE_KEY_PASSWORD=<your-password-or-empty>
 ```
 
+## 口令轮换与 CI 说明
+
+- 本地 `.env` 中的 `DEEPSEEKCODE_SIGNING_PRIVATE_KEY_PASSWORD` 仅用于本地签名，
+  **绝不提交**（`.gitignore` 已覆盖 `.env`）。若疑似泄露，立即生成新的强口令
+  （≥32 位随机字符）并同步更新 GitHub Secret。
+- CI 通过 Repository Secrets
+  (`DEEPSEEKCODE_SIGNING_PRIVATE_KEY[_PASSWORD]` 等) 注入，签名脚本经临时文件
+  管道传递口令（`release-env.psm1::Invoke-MinisignSign`），**不在命令行参数与
+  日志中回显**。
+
+## 本地私钥文件权限（S2）
+
+- `signing/*.key` / `*.pfx` 已被 `.gitignore` 覆盖（本机 `git check-ignore`
+  确认 `signing/deepseekcode.key` 被忽略），禁止提交；仓库只保留
+  `deepseekcode.key.pub`。
+- 私钥文件应仅本机可读。Windows 下限制 ACL 示例：
+
+```powershell
+icacls signing\deepseekcode.key /inheritance:r /grant:r "$env:USERNAME:(R,W)"
+```
+
+- 备选：将私钥移出仓库目录（如 `%USERPROFILE%\.deepseekcode\signing\`），
+  并把 `.env` 中的 `DEEPSEEKCODE_SIGNING_PRIVATE_KEY_PATH` 指向绝对路径。
+- 发布前必跑 `.\scripts\release\scan-secrets.ps1`（gitleaks 全仓扫描）；
+  若私钥曾被提交，立即轮换密钥并重新签名全部产物（见 SECURITY.md）。
+
 ## 验证与上传 CI Secrets
 
 ```powershell

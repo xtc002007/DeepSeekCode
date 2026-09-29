@@ -4,6 +4,7 @@ description = "Command-line interface for DeepSeekCode"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 # Binary-only crate: distributed via cargo-dist/NSIS channels, never crates.io.
 publish = false
 

@@ -1,6 +1,7 @@
 use crate::axis::protocol::{merge_extra, Protocol};
 use crate::axis::{
     endpoint::Endpoint, framing::Framing, OpenAiChatEndpoint, OpenAiChatProtocol, SseFraming,
+    SseSplitter,
 };
 use crate::event::LlmEvent;
 use crate::request::LlmRequest;
@@ -27,7 +28,7 @@ impl OpenAiRoute {
     }
 }
 
-pub(crate) fn chat_endpoint(base_url: Option<&str>) -> String {
+pub(crate) fn chat_endpoint(base_url: Option<&str>) -> Result<String> {
     OpenAiChatEndpoint.resolve(base_url)
 }
 
@@ -46,7 +47,7 @@ pub async fn generate(
 ) -> Result<crate::request::LlmResponse> {
     let start = std::time::Instant::now();
     let route = OpenAiRoute::new();
-    let url = route.endpoint.resolve(base_url);
+    let url = route.endpoint.resolve(base_url)?;
     let endpoint_host = crate::redact_endpoint_for_log(&url);
     tracing::info!(
         target: deepseekcode_telemetry::LLM,
@@ -140,7 +141,15 @@ pub async fn generate(
                 "llm openai generate context overflow"
             );
         }
-        return Err(DeepSeekCodeError::Llm(text));
+        // Raw body never leaves this path: return sanitized, keep raw only
+        // as a summarized log above (mirrors anthropic generate).
+        tracing::debug!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            raw_summary = %deepseekcode_telemetry::summarize_prompt(&text, false),
+            "llm openai generate raw error summarized"
+        );
+        return Err(DeepSeekCodeError::Llm(sanitized));
     }
 
     let status = response.status();
@@ -209,7 +218,7 @@ pub async fn stream(
 ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent>> + Send>>> {
     let start = std::time::Instant::now();
     let route = OpenAiRoute::new();
-    let url = route.endpoint.resolve(base_url);
+    let url = route.endpoint.resolve(base_url)?;
     let endpoint_host = crate::redact_endpoint_for_log(&url);
     tracing::info!(
         target: deepseekcode_telemetry::LLM,
@@ -302,7 +311,13 @@ pub async fn stream(
                 "llm openai stream context overflow"
             );
         }
-        return Err(DeepSeekCodeError::Llm(text));
+        tracing::debug!(
+            target: deepseekcode_telemetry::LLM,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            raw_summary = %deepseekcode_telemetry::summarize_prompt(&text, false),
+            "llm openai stream raw error summarized"
+        );
+        return Err(DeepSeekCodeError::Llm(sanitized));
     }
     tracing::info!(
         target: deepseekcode_telemetry::LLM,
@@ -320,55 +335,22 @@ pub async fn stream(
         .map(|chunk| chunk.map_err(|e| DeepSeekCodeError::Llm(e.to_string())))
         .scan(
             (
-                Vec::<u8>::new(),
+                SseSplitter::new(),
                 HashMap::<usize, (String, String, String)>::new(),
             ),
             move |state, chunk| {
-                let (buffer, tool_acc) = state;
+                let (splitter, tool_acc) = state;
                 match chunk {
                     Ok(bytes) => {
-                        // Byte-level buffering: never split multi-byte UTF-8
-                        // across chunks (P0-5 mojibake fix).
-                        buffer.extend_from_slice(&bytes);
-                        if buffer.len() > 1024 * 1024 {
-                            tracing::warn!(
-                                target: deepseekcode_telemetry::LLM,
-                                run_id = %deepseekcode_telemetry::current_run_id(),
-                                provider = "openai",
-                                buffer_len = buffer.len(),
-                                "llm openai stream buffer overflow; truncating"
-                            );
-                            tracing::error!(
-                                target: deepseekcode_telemetry::LLM,
-                                run_id = %deepseekcode_telemetry::current_run_id(),
-                                provider = "openai",
-                                "llm openai stream truncation triggered"
-                            );
-                            buffer.clear();
-                            return futures::future::ready(Some(vec![]));
-                        }
-                        let text = String::from_utf8_lossy(buffer).to_string();
-                        let normalized = text.replace("\r\n", "\n");
+                        // Shared `SseSplitter`: Vec<u8> buffering, CRLF
+                        // normalization, 1 MiB cap, UTF-8-boundary-safe drain.
+                        // Only complete `\n\n` frames with successful decode
+                        // are consumed.
+                        let frames = splitter.push_and_split(&bytes);
                         let mut events = Vec::new();
-                        // Split off all complete `\n\n`-terminated frames.
-                        let mut remainder = normalized.as_str();
-                        let mut consumed_chars = 0usize;
-                        while let Some(pos) = remainder.find("\n\n") {
-                            let frame = &remainder[..pos + 2];
+                        for frame in &frames {
                             events.extend(framing.parse_sse_frame(frame, tool_acc));
-                            consumed_chars += frame.len();
-                            remainder = &remainder[pos + 2..];
                         }
-                        // Drain consumed bytes (char-boundary safe via String).
-                        let consumed_bytes = text.len() - remainder.len();
-                        let drain = consumed_bytes.min(buffer.len());
-                        // Ensure drain lands on a UTF-8 boundary.
-                        let mut drain = drain;
-                        while drain > 0 && !text.is_char_boundary(text.len() - remainder.len()) {
-                            drain = drain.saturating_sub(1);
-                        }
-                        let _ = buffer.drain(..drain);
-                        let _ = consumed_chars;
                         futures::future::ready(Some(events))
                     }
                     Err(e) => futures::future::ready(Some(vec![Err(e)])),

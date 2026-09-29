@@ -1131,6 +1131,36 @@ impl SessionStore {
                 .fetch_all(&self.pool)
                 .await
                 .unwrap_or_default();
+        // Tool-output sidecars live in <project>/.deepseekcode/tool-output/
+        // as {session}_{call}_{tool}.json and are NOT tracked in DB.
+        // Resolve project dir first so delete GCs them (P2 leak).
+        let project_dir: Option<String> =
+            sqlx::query_scalar(r#"SELECT working_directory FROM sessions WHERE id = ?"#)
+                .bind(&id)
+                .fetch_optional(&self.pool)
+                .await
+                .unwrap_or(None);
+        let tool_output_files: Vec<std::path::PathBuf> = project_dir
+            .as_deref()
+            .map(|d| {
+                let dir = std::path::Path::new(d).join(".deepseekcode").join("tool-output");
+                let prefix = format!("{session_id}_");
+                std::fs::read_dir(&dir)
+                    .map(|entries| {
+                        entries
+                            .filter_map(|e| e.ok())
+                            .map(|e| e.path())
+                            .filter(|p| {
+                                p.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .map(|n| n.starts_with(&prefix))
+                                    .unwrap_or(false)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
         let mut tx = self.pool.begin().await.map_err(|e| {
             tracing::error!(
                 target: deepseekcode_telemetry::STORAGE,
@@ -1182,13 +1212,18 @@ impl SessionStore {
         for f in snapshot_files {
             let _ = std::fs::remove_file(&f);
         }
+        let tool_output_count = tool_output_files.len();
+        for f in tool_output_files {
+            let _ = std::fs::remove_file(&f);
+        }
         tracing::info!(
             target: deepseekcode_telemetry::STORAGE,
             run_id = %deepseekcode_telemetry::current_run_id(),
             operation = "session.delete",
             session_id = %session_id,
             duration_ms = _op_start.elapsed().as_millis() as u64,
-            files = snapshot_count,
+            files = snapshot_count + tool_output_count,
+            tool_output_files = tool_output_count,
             "storage op ok"
         );
         Ok(())
@@ -1672,6 +1707,87 @@ impl SessionStore {
             duration_ms = _op_start.elapsed().as_millis() as u64,
             "storage op ok"
         );
+        Ok(())
+    }
+
+    /// Atomic assistant turn + tool calls in a single transaction (P0).
+    /// Previously `insert_assistant_turn` + N×`append_tool_call` used N+1
+    /// transactions; a crash in between left assistant without/with-half
+    /// tool_calls, forcing synthetic fake tool results on resume.
+    /// `touch updated_at` is inside the same tx.
+    pub async fn insert_assistant_turn_with_calls(
+        &self,
+        id: MessageId,
+        session_id: SessionId,
+        reasoning: Option<&str>,
+        text: &str,
+        calls: &[(String, String, serde_json::Value)],
+    ) -> Result<()> {
+        let now = Utc::now();
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            DeepSeekCodeError::Storage(e.to_string())
+        })?;
+        let seq = self.next_message_seq_tx(&mut tx, session_id).await?;
+        sqlx::query(
+            r#"INSERT INTO messages (id, session_id, role, seq, created_at) VALUES (?, ?, 'assistant', ?, ?)"#,
+        )
+        .bind(id.to_string())
+        .bind(session_id.to_string())
+        .bind(seq)
+        .bind(now.to_rfc3339())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+
+        let mut part_index = 0i64;
+        if let Some(reasoning) = reasoning.filter(|r| !r.is_empty()) {
+            sqlx::query(
+                r#"INSERT INTO message_parts (message_id, part_index, kind, text) VALUES (?, ?, 'reasoning', ?)"#,
+            )
+            .bind(id.to_string())
+            .bind(part_index)
+            .bind(reasoning)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+            part_index += 1;
+        }
+        if !text.is_empty() {
+            sqlx::query(
+                r#"INSERT INTO message_parts (message_id, part_index, kind, text) VALUES (?, ?, 'text', ?)"#,
+            )
+            .bind(id.to_string())
+            .bind(part_index)
+            .bind(text)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+            part_index += 1;
+        }
+        for (tool_call_id, tool_name, input) in calls {
+            sqlx::query(
+                r#"INSERT INTO message_parts (message_id, part_index, kind, tool_call_id, tool_name, tool_input)
+                   VALUES (?, ?, 'tool_call', ?, ?, ?)"#,
+            )
+            .bind(id.to_string())
+            .bind(part_index)
+            .bind(tool_call_id)
+            .bind(tool_name)
+            .bind(input.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+            part_index += 1;
+        }
+        sqlx::query(r#"UPDATE sessions SET updated_at = ? WHERE id = ?"#)
+            .bind(now.to_rfc3339())
+            .bind(session_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
         Ok(())
     }
 
@@ -2284,10 +2400,9 @@ impl SessionStore {
             session_id = %to_session,
             "storage op start"
         );
-        let cutoff_seq = from_messages
+        let cutoff_idx = from_messages
             .iter()
-            .find(|m| m.id == until_message_id)
-            .map(|m| m.seq)
+            .position(|m| m.id == until_message_id)
             .ok_or_else(|| {
                 tracing::warn!(
                     target: deepseekcode_telemetry::STORAGE,
@@ -2299,6 +2414,69 @@ impl SessionStore {
                 );
                 DeepSeekCodeError::NotFound(format!("message {until_message_id} not in session"))
             })?;
+        let mut end_idx = cutoff_idx;
+        // Never cut a tool group in half: if cutoff is an assistant with
+        // tool_calls, include following consecutive Tool messages; if cutoff
+        // itself is Tool, its parent assistant is already included via seq.
+        // Without this the fork would persist dangling tool_use without result.
+        while end_idx + 1 < from_messages.len()
+            && from_messages[end_idx + 1].role == deepseekcode_schema::message::MessageRole::Tool
+            && matches!(
+                from_messages[cutoff_idx].role,
+                deepseekcode_schema::message::MessageRole::Assistant
+                    | deepseekcode_schema::message::MessageRole::Tool
+            ) {
+            // Only extend over Tool messages directly following the cutoff run:
+            // stop at the first non-Tool message.
+            end_idx += 1;
+            // If we stepped onto Tool but the run started at non-assistant/tool,
+            // break (defensive; loop condition already guards).
+            if from_messages[end_idx].role != deepseekcode_schema::message::MessageRole::Tool {
+                break;
+            }
+        }
+        let cutoff_seq = from_messages[end_idx].seq;
+        // Validate completeness: every assistant ToolCall in the copied prefix
+        // must have its Tool result also in the prefix (or be the trailing
+        // expanded group above). Otherwise rollback instead of persisting half.
+        {
+            use std::collections::HashSet;
+            let mut call_ids: HashSet<String> = HashSet::new();
+            let mut result_ids: HashSet<String> = HashSet::new();
+            for m in from_messages.iter().filter(|m| m.seq <= cutoff_seq) {
+                for p in &m.parts {
+                    match p.kind {
+                        deepseekcode_schema::message::PartKind::ToolCall => {
+                            if let Some(id) = &p.tool_call_id {
+                                call_ids.insert(id.clone());
+                            }
+                        }
+                        deepseekcode_schema::message::PartKind::ToolResult => {
+                            if let Some(id) = &p.tool_call_id {
+                                result_ids.insert(id.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                // Tool-role messages carry results as parts; also count them.
+                if m.role == deepseekcode_schema::message::MessageRole::Tool {
+                    for p in &m.parts {
+                        if let Some(id) = &p.tool_call_id {
+                            result_ids.insert(id.clone());
+                        }
+                    }
+                }
+            }
+            let missing: Vec<String> =
+                call_ids.difference(&result_ids).cloned().collect();
+            if !missing.is_empty() {
+                return Err(DeepSeekCodeError::InvalidInput(format!(
+                    "fork would cut tool group in half; missing results for {:?}; choose a later message",
+                    missing
+                )));
+            }
+        }
         for msg in from_messages.iter().filter(|m| m.seq <= cutoff_seq) {
             self.insert_copied_message_in_tx(tx, to_session, msg)
                 .await?;

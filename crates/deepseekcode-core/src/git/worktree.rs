@@ -1,3 +1,4 @@
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -36,19 +37,16 @@ pub fn worktree_info(path: &Path) -> Option<WorktreeInfo> {
     let root = discover_git_root(path)?;
     let mut cmd = Command::new("git");
     crate::process::hide_console(&mut cmd);
+    // Pass the repo path as OsStr (no UTF-8 loss) and decode branch as
+    // lossy UTF-8 instead of silently dropping non-UTF-8 output.
     let branch = cmd
-        .args([
-            "-C",
-            &root.to_string_lossy(),
-            "rev-parse",
-            "--abbrev-ref",
-            "HEAD",
-        ])
+        .arg("-C")
+        .arg(root.as_os_str())
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty());
     Some(WorktreeInfo { root, branch })
 }
@@ -127,22 +125,17 @@ impl GitWorktreeManager {
             .join(".deepseekcode")
             .join("worktrees")
             .join(&name);
-        std::fs::create_dir_all(&worktree_dir)
-            .map_err(deepseekcode_types::DeepSeekCodeError::Io)?;
-
-        let mut args: Vec<&str> = vec!["worktree", "add"];
-        if let Some(branch_name) = branch {
-            args.extend(["-b", branch_name]);
-            args.push(worktree_dir.to_str().unwrap_or_default());
-        } else {
-            args.extend([
-                "--detach",
-                worktree_dir.to_str().unwrap_or_default(),
-                "HEAD",
-            ]);
+        // Do NOT pre-create the directory: `git worktree add` creates it.
+        // Pre-creating makes git fail ("already exists") and leaves an empty
+        // dir behind. On failure below we remove any partial dir git left.
+        // Use OsStr args throughout so non-UTF-8 paths never silently become
+        // "" via `to_str().unwrap_or_default()`.
+        let result = self.git_add_worktree(branch, &worktree_dir);
+        if let Err(e) = result {
+            // Best-effort cleanup of a half-created worktree dir.
+            let _ = std::fs::remove_dir_all(&worktree_dir);
+            return Err(e);
         }
-
-        self.git(&args)?;
 
         Ok(WorktreeEntry {
             path: worktree_dir.display().to_string(),
@@ -193,6 +186,47 @@ impl GitWorktreeManager {
             e
         })?;
         Ok(())
+    }
+
+    /// `git worktree add` with OsStr path handling (no UTF-8 loss).
+    /// Separated so `create()` can clean up the dir on failure.
+    fn git_add_worktree(
+        &self,
+        branch: Option<&str>,
+        worktree_dir: &Path,
+    ) -> Result<String, deepseekcode_types::DeepSeekCodeError> {
+        let mut cmd = Command::new("git");
+        cmd.current_dir(&self.repo_root);
+        crate::process::hide_console(&mut cmd);
+        // Build args as OsString so non-UTF-8 paths survive verbatim.
+        let mut args: Vec<OsString> = vec!["worktree".into(), "add".into()];
+        if let Some(branch_name) = branch {
+            args.push("-b".into());
+            args.push(OsStr::new(branch_name).to_os_string());
+        } else {
+            args.push("--detach".into());
+        }
+        args.push(worktree_dir.as_os_str().to_os_string());
+        if branch.is_none() {
+            args.push("HEAD".into());
+        }
+        // Log lossy only for diagnostics; the spawn uses OsStr verbatim.
+        let log_args = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let output = cmd.args(&args).output().map_err(|e| {
+            deepseekcode_types::DeepSeekCodeError::Other(format!("git command failed: {e}"))
+        })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(deepseekcode_types::DeepSeekCodeError::Other(format!(
+                "git {log_args} failed: {stderr}{stdout}"
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
     fn git(&self, args: &[&str]) -> Result<String, deepseekcode_types::DeepSeekCodeError> {

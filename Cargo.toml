@@ -85,9 +85,9 @@ jsonc-parser = { version = "0.27", features = ["serde"] }
 
 # HTTP
 axum = { version = "0.8", features = ["ws", "macros"] }
-# Single WebSocket stack: axum 0.8 uses tokio-tungstenite 0.26; the desktop
-# PTY client must use the same (a direct 0.29 dep compiled a second stack).
-tokio-tungstenite = { version = "0.26" }
+# Single WebSocket stack: axum 0.8.9 uses tokio-tungstenite 0.29; workspace
+# pins 0.29 so desktop PTY compiles a single stack (previously 0.26+0.29 dual).
+tokio-tungstenite = { version = "0.29" }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 # P1-9: `blocking` removed (deadlocks when misused inside async; no caller

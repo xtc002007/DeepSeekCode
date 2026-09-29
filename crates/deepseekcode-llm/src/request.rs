@@ -1,4 +1,5 @@
 use deepseekcode_schema::tool::ToolDefinition;
+use deepseekcode_types::Result;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,7 +142,7 @@ impl LlmRequest {
     /// Validate before any network call: empty provider/model, malformed
     /// base URL, and absurd token caps are rejected early (P0-5).
     /// `Some(0)` is accepted as the legacy "omit" spelling.
-    pub fn validate(&self) -> Result<(), deepseekcode_types::DeepSeekCodeError> {
+    pub fn validate(&self) -> Result<()> {
         tracing::debug!(
             target: deepseekcode_telemetry::LLM,
             run_id = %deepseekcode_telemetry::current_run_id(),

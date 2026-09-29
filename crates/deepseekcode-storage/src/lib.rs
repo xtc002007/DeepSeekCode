@@ -12,7 +12,7 @@ pub mod todo_store;
 pub mod tool_output;
 
 pub use credentials_store::CredentialsStore;
-pub use database::Database;
+pub use database::{acquire_immediate, Database};
 pub use event_store::{admit_prompt, EventStore};
 pub use paths::{
     directory_paths_equal, normalize_directory_path, normalize_directory_path_for_lookup,

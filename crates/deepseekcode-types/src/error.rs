@@ -25,6 +25,12 @@ pub enum DeepSeekCodeError {
     #[error("tool failure: {0}")]
     ToolFailure(String),
 
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
+    #[error("rate limited: {0}")]
+    RateLimited(String),
+
     #[error("llm error: {0}")]
     Llm(String),
 

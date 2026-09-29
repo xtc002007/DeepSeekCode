@@ -162,22 +162,17 @@ pub async fn admit_prompt(
     prompt: &str,
     delivery: PromptDelivery,
 ) -> Result<()> {
-    // Transactional admit: BEGIN IMMEDIATE serializes concurrent prompts on
-    // the same session so MAX+1 cannot allocate duplicate admitted_seq.
-    // INSERT OR IGNORE is kept for idempotency, but a conflicting row with
-    // different content is surfaced (not silently dropped).
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-    sqlx::query("SELECT 1")
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+    // True `BEGIN IMMEDIATE` (not `pool.begin()`/DEFERRED) serializes
+    // concurrent prompts on the same session so MAX+1 cannot allocate
+    // duplicate admitted_seq. `acquire_immediate` takes the RESERVED lock up
+    // front with busy retry; raw BEGIN has no Drop guard so every error path
+    // rolls back explicitly. `has_seq` is probed per call (no process-global
+    // cache) so parallel tests on different DBs never cross-pollute.
+    let mut conn = crate::database::acquire_immediate(pool).await?;
     let has_seq: bool = sqlx::query_scalar::<_, i64>(
         r#"SELECT COUNT(*) FROM pragma_table_info('session_input') WHERE name = 'admitted_seq'"#,
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await
     .map(|c: i64| c > 0)
     .unwrap_or(false);
@@ -185,15 +180,25 @@ pub async fn admit_prompt(
         PromptDelivery::Steer => "steer",
         PromptDelivery::Queue => "queue",
     };
+    // Local helper: rollback the raw IMMEDIATE tx, then map to storage error.
+    macro_rules! fail {
+        ($e:expr) => {{
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            return Err(DeepSeekCodeError::Storage($e.to_string()));
+        }};
+    }
     if has_seq {
-        let next: i64 = sqlx::query_scalar(
+        let next: i64 = match sqlx::query_scalar(
             r#"SELECT COALESCE(MAX(admitted_seq), 0) + 1 FROM session_input WHERE session_id = ?"#,
         )
         .bind(session_id.to_string())
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut *conn)
         .await
-        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
-        let result = sqlx::query(
+        {
+            Ok(v) => v,
+            Err(e) => fail!(e),
+        };
+        let result = match sqlx::query(
             r#"INSERT OR IGNORE INTO session_input (id, session_id, prompt, delivery, admitted_at, promoted, admitted_seq) VALUES (?, ?, ?, ?, ?, 0, ?)"#,
         )
         .bind(message_id.to_string())
@@ -202,19 +207,27 @@ pub async fn admit_prompt(
         .bind(delivery_str)
         .bind(Utc::now().to_rfc3339())
         .bind(next)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
-        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        {
+            Ok(v) => v,
+            Err(e) => fail!(e),
+        };
         // OR IGNORE with 0 rows = id collision: verify content matches.
         if result.rows_affected() == 0 {
-            let existing: Option<(String, String)> =
-                sqlx::query_as(r#"SELECT prompt, delivery FROM session_input WHERE id = ?"#)
-                    .bind(message_id.to_string())
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+            let existing: Option<(String, String)> = match sqlx::query_as(
+                r#"SELECT prompt, delivery FROM session_input WHERE id = ?"#,
+            )
+            .bind(message_id.to_string())
+            .fetch_optional(&mut *conn)
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => fail!(e),
+            };
             if let Some((ep, ed)) = existing {
                 if ep != prompt || ed != delivery_str {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
                     return Err(DeepSeekCodeError::AlreadyExists(format!(
                         "prompt id {message_id} already admitted with different content"
                     )));
@@ -222,7 +235,7 @@ pub async fn admit_prompt(
             }
         }
     } else {
-        let result = sqlx::query(
+        let result = match sqlx::query(
             r#"INSERT OR IGNORE INTO session_input (id, session_id, prompt, delivery, admitted_at, promoted) VALUES (?, ?, ?, ?, ?, 0)"#,
         )
         .bind(message_id.to_string())
@@ -230,18 +243,26 @@ pub async fn admit_prompt(
         .bind(prompt)
         .bind(delivery_str)
         .bind(Utc::now().to_rfc3339())
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
-        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+        {
+            Ok(v) => v,
+            Err(e) => fail!(e),
+        };
         if result.rows_affected() == 0 {
-            let existing: Option<(String, String)> =
-                sqlx::query_as(r#"SELECT prompt, delivery FROM session_input WHERE id = ?"#)
-                    .bind(message_id.to_string())
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+            let existing: Option<(String, String)> = match sqlx::query_as(
+                r#"SELECT prompt, delivery FROM session_input WHERE id = ?"#,
+            )
+            .bind(message_id.to_string())
+            .fetch_optional(&mut *conn)
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => fail!(e),
+            };
             if let Some((ep, ed)) = existing {
                 if ep != prompt || ed != delivery_str {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
                     return Err(DeepSeekCodeError::AlreadyExists(format!(
                         "prompt id {message_id} already admitted with different content"
                     )));
@@ -249,8 +270,9 @@ pub async fn admit_prompt(
             }
         }
     }
-    tx.commit()
-        .await
-        .map_err(|e| DeepSeekCodeError::Storage(e.to_string()))?;
+    if let Err(e) = sqlx::query("COMMIT").execute(&mut *conn).await {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+        return Err(DeepSeekCodeError::Storage(e.to_string()));
+    }
     Ok(())
 }

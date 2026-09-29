@@ -3,6 +3,7 @@ use deepseekcode_plugin::{HookRegistry, PluginHost};
 use deepseekcode_storage::{normalize_directory_path, CredentialsStore, Database, PolicyStore};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 use crate::mcp::McpConnectionPool;
@@ -29,7 +30,15 @@ pub struct LocationMap {
     db: Arc<Database>,
     config: RwLock<DeepSeekCodeConfig>,
     credentials: Arc<CredentialsStore>,
+    /// Last successful `get_or_create` per location for idle-TTL eviction.
+    /// Dropping a `LocationServices` drops its in-memory runners; the DB
+    /// epoch stays in SQLite so eviction is lossless.
+    last_access: RwLock<HashMap<String, Instant>>,
 }
+
+/// Idle TTL for cached locations (30min). Exceeding entries are evicted on
+/// the next `get_or_create` so long-lived processes do not leak runners.
+pub const LOCATION_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
 
 impl LocationMap {
     pub fn new(db: Arc<Database>, config: DeepSeekCodeConfig) -> Self {
@@ -39,7 +48,51 @@ impl LocationMap {
             db,
             config: RwLock::new(config),
             credentials,
+            last_access: RwLock::new(HashMap::new()),
         }
+    }
+
+    async fn touch(&self, project_dir: &str) {
+        self.last_access
+            .write()
+            .await
+            .insert(project_dir.to_string(), Instant::now());
+    }
+
+    /// Evict locations idle longer than `ttl`. Runner state is in-memory
+    /// only; the context epoch stays in SQLite, so eviction never loses
+    /// durable state. Called opportunistically from `get_or_create`.
+    pub async fn evict_idle_locations(&self, ttl: Duration) {
+        let now = Instant::now();
+        let idle: Vec<String> = {
+            let guard = self.last_access.read().await;
+            guard
+                .iter()
+                .filter(|(_, at)| now.duration_since(**at) > ttl)
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+        if idle.is_empty() {
+            return;
+        }
+        {
+            let mut locations = self.locations.write().await;
+            for dir in &idle {
+                locations.remove(dir);
+            }
+        }
+        {
+            let mut guard = self.last_access.write().await;
+            for dir in &idle {
+                guard.remove(dir);
+            }
+        }
+        tracing::info!(
+            target: deepseekcode_telemetry::APP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            evicted = idle.len(),
+            "location idle eviction completed"
+        );
     }
 
     pub async fn update_config(&self, config: DeepSeekCodeConfig) {
@@ -48,6 +101,10 @@ impl LocationMap {
             run_id = %deepseekcode_telemetry::current_run_id(),
             "location update_config started"
         );
+        // Unified lock order: locations -> config. Each lock is held short
+        // and never nested (no `config.write` held across a `locations`
+        // acquisition) so `update_config` cannot ABBA-deadlock with
+        // `get_or_create` (which is locations.write -> config.read).
         // Per-location config: previously a single global config was shared
         // and providers/mcp/shell/plugins/session_service never refreshed.
         // Now reload policy (with DB grants) + providers + materialization.
@@ -55,7 +112,10 @@ impl LocationMap {
             let locations = self.locations.read().await;
             locations.keys().cloned().collect()
         };
-        *self.config.write().await = config.clone();
+        {
+            // Short write, dropped before any `locations` acquisition below.
+            *self.config.write().await = config.clone();
+        }
         for dir in &project_dirs {
             let services_opt = {
                 let locations = self.locations.read().await;
@@ -83,10 +143,15 @@ impl LocationMap {
             "location get_or_create started"
         );
         let project_dir = normalize_directory_path(project_dir);
-        let mut locations = self.locations.write().await;
-        if let Some(services) = locations.get(&project_dir) {
-            return services.clone();
+        // Fast-path: short read, never hold `write` across awaits (P0: previously
+        // `locations.write()` was held across spawn_blocking/providers/mcp/plugin
+        // which blocked all locations on one slow location).
+        if let Some(services) = self.locations.read().await.get(&project_dir).cloned() {
+            self.touch(&project_dir).await;
+            return services;
         }
+        // Opportunistic idle eviction (lossless: DB epoch stays in SQLite).
+        self.evict_idle_locations(LOCATION_IDLE_TTL).await;
 
         let config = self.config.read().await.clone();
         let policy_store = PolicyStore::new(self.db.pool().clone());
@@ -223,7 +288,16 @@ impl LocationMap {
             active_session_ids,
             wasm_tools,
         });
-        locations.insert(project_dir, services.clone());
+        // Insert-if-absent: another task may have created it while we built
+        // outside the lock. Never overwrite the winner.
+        {
+            let mut locations = self.locations.write().await;
+            if let Some(existing) = locations.get(&project_dir) {
+                return existing.clone();
+            }
+            locations.insert(project_dir.clone(), services.clone());
+        }
+        self.touch(&project_dir).await;
         services
     }
 

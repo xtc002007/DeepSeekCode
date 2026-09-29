@@ -5,6 +5,53 @@ use std::time::Duration;
 
 pub struct Database {
     pool: SqlitePool,
+    /// Cached at open (after migrations): whether `session_input.admitted_seq`
+    /// exists. Per-DB flag replaces the previous process-global `OnceLock`
+    /// which leaked across DBs in tests (cross-DB pollution).
+    has_admitted_seq: bool,
+}
+
+/// Acquire a dedicated SQLite connection already inside `BEGIN IMMEDIATE`.
+/// `pool.begin()` is DEFERRED and does NOT serialize concurrent
+/// `MAX(admitted_seq)+1` readers; IMMEDIATE takes the RESERVED lock up front
+/// so a second writer blocks (busy-timeout) instead of reading the same MAX.
+/// Retries on SQLITE_BUSY with backoff; caller MUST `COMMIT`/`ROLLBACK`.
+pub async fn acquire_immediate(
+    pool: &SqlitePool,
+) -> Result<sqlx::pool::PoolConnection<sqlx::Sqlite>> {
+    use deepseekcode_types::DeepSeekCodeError;
+    let mut attempt = 0u32;
+    loop {
+        let mut conn = pool.acquire().await.map_err(|e| {
+            DeepSeekCodeError::Storage(format!("acquire for BEGIN IMMEDIATE failed: {e}"))
+        })?;
+        match sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await {
+            Ok(_) => return Ok(conn),
+            Err(e) => {
+                let msg = e.to_string().to_lowercase();
+                let busy = msg.contains("locked") || msg.contains("busy");
+                if busy && attempt < 30 {
+                    attempt += 1;
+                    drop(conn);
+                    tokio::time::sleep(Duration::from_millis(5 * attempt as u64)).await;
+                    continue;
+                }
+                return Err(DeepSeekCodeError::Storage(format!(
+                    "BEGIN IMMEDIATE failed: {e}"
+                )));
+            }
+        }
+    }
+}
+
+pub(crate) async fn probe_has_admitted_seq(pool: &SqlitePool) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*) FROM pragma_table_info('session_input') WHERE name = 'admitted_seq'"#,
+    )
+    .fetch_one(pool)
+    .await
+    .map(|c: i64| c > 0)
+    .unwrap_or(false)
 }
 
 impl Database {
@@ -93,7 +140,10 @@ impl Database {
             duration_ms = start.elapsed().as_millis() as u64,
             "database opened"
         );
-        Ok(Self { pool })
+        // Probe once per Database (not per process): migrations guarantee the
+        // column on fresh DBs; legacy DBs are healed in `repair_legacy_backfills`.
+        let has_admitted_seq = probe_has_admitted_seq(&pool).await;
+        Ok(Self { pool, has_admitted_seq })
     }
 
     pub async fn open_in_memory() -> Result<Self> {
@@ -127,5 +177,10 @@ fn normalize_sqlite_url(path: &str) -> String {
 impl Database {
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    /// Per-DB `admitted_seq` flag probed once at open (no global cache).
+    pub fn has_admitted_seq(&self) -> bool {
+        self.has_admitted_seq
     }
 }

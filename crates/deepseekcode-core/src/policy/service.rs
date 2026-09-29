@@ -161,16 +161,26 @@ impl PolicyService {
     pub async fn load_from_db(&self) -> Result<()> {
         if let Some(store) = &self.store {
             let grants = store.load_grants(&self.project_dir).await?;
-            *self.project_grants.write().await = grants
-                .iter()
-                .map(|g| deepseekcode_schema::policy::PolicyRule {
+            // Keep both literal `~/` and expanded absolute forms so matching
+            // is HOME-drift independent (dual evaluation in `pattern_matches`
+            // also covers this; storing both preserves pre-fix expanded rows).
+            let mut rules = Vec::new();
+            for g in grants {
+                let expanded = expand_home_for_grant(&g.pattern);
+                rules.push(deepseekcode_schema::policy::PolicyRule {
                     scope: g.scope.clone(),
-                    // Expand `~` consistently with config file rules so
-                    // `~/.ssh=block`-style grants actually match absolutes.
-                    pattern: expand_home_for_grant(&g.pattern),
+                    pattern: g.pattern.clone(),
                     action: deepseekcode_schema::policy::PolicyAction::Permit,
-                })
-                .collect();
+                });
+                if expanded != g.pattern {
+                    rules.push(deepseekcode_schema::policy::PolicyRule {
+                        scope: g.scope.clone(),
+                        pattern: expanded,
+                        action: deepseekcode_schema::policy::PolicyAction::Permit,
+                    });
+                }
+            }
+            *self.project_grants.write().await = rules;
         }
         Ok(())
     }
@@ -214,6 +224,34 @@ impl PolicyService {
         ])
     }
 
+    /// Base ruleset without volatile session/project grants. Blocks here are
+    /// authoritative and can never be overridden by a remembered grant.
+    async fn base_ruleset(&self, agent: &AgentKind) -> PolicyRuleset {
+        let agent_name = format!("{agent:?}").to_lowercase();
+        let agent_cfg = self.agent_rules.read().await.get(&agent_name).cloned();
+        merge_rulesets([
+            agent_default_ruleset(agent),
+            self.global_rules.read().await.clone(),
+            agent_cfg.unwrap_or_default(),
+        ])
+    }
+
+    /// True when the base (non-grant) ruleset explicitly blocks this call.
+    /// Used to (a) give Block priority over grants during evaluation and
+    /// (b) refuse to persist grants that would override an explicit Block.
+    async fn is_blocked_by_base(
+        &self,
+        agent: &AgentKind,
+        scope: &str,
+        patterns: &[String],
+    ) -> bool {
+        let base = self.base_ruleset(agent).await;
+        matches!(
+            evaluate_patterns(scope, patterns, &base),
+            deepseekcode_schema::policy::PolicyDecision::Block
+        )
+    }
+
     pub async fn evaluate(
         &self,
         session_id: SessionId,
@@ -221,6 +259,12 @@ impl PolicyService {
         scope: &str,
         patterns: &[String],
     ) -> PolicyDecision {
+        // Block priority: an explicit Block in defaults/global/agent config
+        // wins over any session/project grant (last-match-wins would otherwise
+        // let a remembered Permit override the Block).
+        if self.is_blocked_by_base(agent, scope, patterns).await {
+            return PolicyDecision::Block;
+        }
         let ruleset = self.effective_ruleset(session_id, agent).await;
         evaluate_patterns(scope, patterns, &ruleset)
     }
@@ -277,16 +321,23 @@ impl PolicyService {
                     });
                 }
                 PolicyDecision::Prompt => {
+                    // Fail-closed: auto/YOLO must never silently permit
+                    // outside-workspace access (previously auto-permitted).
                     if self.is_auto_mode().await {
-                        self.emit_auto_permitted(
-                            session_id,
-                            "outside_workspace",
-                            tool_name,
-                            &ow_patterns,
-                            input.clone(),
-                        )
-                        .await?;
-                        return Ok(PolicyOutcome::Permitted);
+                        tracing::warn!(
+                            target: deepseekcode_telemetry::AUDIT,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
+                            session_id = %session_id,
+                            tool = tool_name,
+                            scope = "outside_workspace",
+                            "policy blocked: outside workspace auto-denied"
+                        );
+                        return Ok(PolicyOutcome::Blocked {
+                            reason: format!(
+                                "access outside workspace denied (auto mode never permits outside access): {}",
+                                outside.join(", ")
+                            ),
+                        });
                     }
                     let outcome = self
                         .prompt(
@@ -637,6 +688,39 @@ impl PolicyService {
             .collect()
     }
 
+    /// Session-filtered pending list (prevents cross-session approval via
+    /// enumerable IDs; routes must use this with the caller's session).
+    pub async fn list_pending_for_session(&self, session_id: SessionId) -> Vec<PolicyRequest> {
+        self.pending
+            .read()
+            .await
+            .values()
+            .filter(|e| e.request.session_id == session_id)
+            .map(|e| e.request.clone())
+            .collect()
+    }
+
+    /// Session-scoped reply: verifies the pending request belongs to
+    /// `expected_session` before resolving (cross-session reply rejected).
+    pub async fn reply_in_session(
+        &self,
+        expected_session: SessionId,
+        id: PermissionId,
+        reply: PolicyReply,
+    ) -> Result<()> {
+        {
+            let pending = self.pending.read().await;
+            if let Some(entry) = pending.get(&id) {
+                if entry.request.session_id != expected_session {
+                    return Err(DeepSeekCodeError::PermissionDenied(format!(
+                        "policy request {id} does not belong to this session"
+                    )));
+                }
+            }
+        }
+        self.reply(id, reply).await
+    }
+
     pub async fn list_grants(&self) -> Result<Vec<PolicyGrant>> {
         if let Some(store) = &self.store {
             store.load_grants(&self.project_dir).await
@@ -646,8 +730,11 @@ impl PolicyService {
     }
 
     pub async fn delete_grant(&self, id: &str) -> Result<()> {
+        // Project-scoped delete only (prevents cross-tenant deletion via
+        // enumerable IDs). Legacy unscoped `delete_grant` now delegates to
+        // the scoped variant with this service's project root.
         if let Some(store) = &self.store {
-            store.delete_grant(id).await?;
+            store.delete_grant_in_project(id, &self.project_dir).await?;
             self.load_from_db().await?;
         }
         Ok(())
@@ -814,10 +901,13 @@ impl PolicyService {
 }
 
 fn is_path_scoped_tool(tool_name: &str) -> bool {
+    // `write` maps to `edit` via `tool_scope`, but list it explicitly for
+    // clarity; `apply_patch` has its own scope and must also block (not
+    // prompt) on outside-workspace writes.
     matches!(
         tool_scope(tool_name).as_str(),
-        "read" | "edit" | "list" | "glob" | "grep"
-    )
+        "read" | "edit" | "write" | "apply_patch" | "list" | "glob" | "grep"
+    ) || matches!(tool_name, "write" | "apply_patch")
 }
 
 fn build_global_ruleset(config: &DeepSeekCodeConfig) -> PolicyRuleset {

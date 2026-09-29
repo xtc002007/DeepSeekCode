@@ -6,6 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
+// Lock policy: every `Mutex` below guards short critical sections (map
+// insert/remove, PTY handle clone) with no user-code reentrancy, so a
+// poisoned lock means a previous holder panicked mid-section. We recover with
+// `unwrap_or_else(|e| e.into_inner())` (state is a plain map/handle and safe
+// to keep using) instead of aborting the server; broadcast `send` failures
+// (no receivers) are already ignored with `let _ =`.
 pub const PTY_TICKET_HEADER: &str = "x-deepseekcode-ticket";
 pub const PTY_TICKET_HEADER_VALUE: &str = "1";
 pub const PTY_TICKET_QUERY: &str = "ticket";
@@ -70,12 +76,12 @@ impl PtyManager {
         let master = Arc::new(Mutex::new(pair.master));
         let mut reader = master
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .try_clone_reader()
             .map_err(|e| DeepSeekCodeError::Other(e.to_string()))?;
         let writer = master
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take_writer()
             .map_err(|e| DeepSeekCodeError::Other(e.to_string()))?;
 
@@ -109,7 +115,7 @@ impl PtyManager {
         });
         self.sessions
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(id.to_string(), session.clone());
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
@@ -139,7 +145,10 @@ impl PtyManager {
                     }
                 }
             }
-            sessions_cleanup.lock().unwrap().remove(&pty_id_cleanup);
+            sessions_cleanup
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&pty_id_cleanup);
         });
         Ok(session)
     }
@@ -150,14 +159,17 @@ impl PtyManager {
         }
         let ticket = ulid::Ulid::new().to_string();
         let expires_at = Instant::now() + PTY_TICKET_TTL;
-        self.tickets.lock().unwrap().insert(
-            ticket.clone(),
-            PtyTicketRecord {
-                pty_id: pty_id.to_string(),
-                directory: directory.to_string(),
-                expires_at,
-            },
-        );
+        self.tickets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                ticket.clone(),
+                PtyTicketRecord {
+                    pty_id: pty_id.to_string(),
+                    directory: directory.to_string(),
+                    expires_at,
+                },
+            );
         Ok((ticket, PTY_TICKET_TTL.as_secs()))
     }
 
@@ -185,7 +197,7 @@ impl PtyManager {
         // Lazy sweep of expired tickets on every ownership check.
         self.tickets
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .retain(|_, record| record.expires_at > Instant::now());
         let session = self.get(id)?;
         if Self::dirs_equal(&session.directory, directory) {
@@ -196,7 +208,10 @@ impl PtyManager {
     }
 
     pub fn consume_ticket(&self, ticket: &str, pty_id: &str, directory: &str) -> bool {
-        let mut tickets = self.tickets.lock().unwrap();
+        let mut tickets = self
+            .tickets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         tickets.retain(|_, record| record.expires_at > Instant::now());
         let Some(record) = tickets.remove(ticket) else {
             return false;
@@ -205,7 +220,11 @@ impl PtyManager {
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<PtySession>> {
-        self.sessions.lock().unwrap().get(id).cloned()
+        self.sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(id)
+            .cloned()
     }
 
     pub fn write(&self, id: &str, data: &[u8]) -> Result<()> {
@@ -215,7 +234,7 @@ impl PtyManager {
         session
             .writer
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .write_all(data)
             .map_err(DeepSeekCodeError::Io)?;
         Ok(())
@@ -227,7 +246,10 @@ impl PtyManager {
     pub fn destroy(&self, id: &str, directory: &str) -> Result<()> {
         let start = std::time::Instant::now();
         let session = {
-            let mut sessions = self.sessions.lock().unwrap();
+            let mut sessions = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let session = sessions
                 .get(id)
                 .cloned()
@@ -255,7 +277,7 @@ impl PtyManager {
         }
         self.tickets
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .retain(|_, record| record.pty_id != id);
         tracing::info!(
             target: deepseekcode_telemetry::SERVER,
@@ -275,7 +297,7 @@ impl PtyManager {
         if let Err(e) = session
             .master
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .resize(PtySize {
                 rows,
                 cols,

@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use deepseekcode_types::Result;
 use libloading::{Library, Symbol};
 use std::collections::HashMap;
-use std::ffi::CStr;
 use std::path::Path;
 use std::sync::Arc;
 #[cfg(feature = "wasm")]
@@ -297,10 +296,16 @@ impl PluginHost {
                     WasmPluginRuntime::validate(&path)?;
                     let module = Module::from_file(&engine, &path)
                         .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
-                    self.wasm_modules.insert(
-                        path.file_name().unwrap().to_string_lossy().to_string(),
-                        module,
-                    );
+                    // `file_name` is None only for paths ending in `..`/root;
+                    // fail closed instead of panicking on a hostile dir entry.
+                    let stem = path.file_name().ok_or_else(|| {
+                        deepseekcode_types::DeepSeekCodeError::Other(format!(
+                            "invalid wasm plugin path (no file name): {}",
+                            path.display()
+                        ))
+                    })?;
+                    self.wasm_modules
+                        .insert(stem.to_string_lossy().to_string(), module);
                 }
             }
             Ok(())
@@ -347,8 +352,19 @@ impl PluginHost {
         }
     }
 
+    /// Load a native (`.dll`/`.so`/`.dylib`) plugin.
+    ///
+    /// Prefer **WASM plugins** (`load_wasm_dir_with_trust`, signature-pinned
+    /// via [`crate::verify::verify_wasm_file`]): they run sandboxed in
+    /// wasmtime with fuel metering. Native plugins run in-process with full
+    /// process privileges — enable them only for explicitly trusted local
+    /// libraries. NOTE: unlike WASM, native libraries have **no default
+    /// signature verification**; treat `load_native_dir` as allow-listed local
+    /// trust (see Policy `plugins` rules, which take precedence).
     fn load_native_plugin(&mut self, path: &Path) -> Result<()> {
-        // SAFETY: plugin init must not unwind across the FFI boundary.
+        // SAFETY: `Library::new` + symbol calls execute third-party machine
+        // code in-process; plugin init must not unwind across the FFI
+        // boundary. Callers must only pass explicitly trusted local paths.
         unsafe {
             let library = Library::new(path).map_err(|e| {
                 deepseekcode_types::DeepSeekCodeError::Other(format!(
@@ -378,10 +394,27 @@ impl PluginHost {
                         path.display()
                     ))
                 })?;
-            let plugin_id = CStr::from_ptr(id_fn() as *const std::ffi::c_char)
-                .to_string_lossy()
-                .trim_end_matches('\0')
-                .to_string();
+            // Validate the raw pointer before `CStr::from_ptr` (null or
+            // unterminated/long data from a buggy/malicious plugin must not
+            // cause UB or unbounded reads): null-check + bounded length scan.
+            let raw = id_fn();
+            if raw.is_null() {
+                return Err(deepseekcode_types::DeepSeekCodeError::Other(format!(
+                    "native plugin {} returned null plugin id",
+                    path.display()
+                )));
+            }
+            const MAX_PLUGIN_ID_LEN: usize = 256;
+            let len = (0..MAX_PLUGIN_ID_LEN)
+                .find(|&i| *raw.add(i) == 0)
+                .ok_or_else(|| {
+                    deepseekcode_types::DeepSeekCodeError::Other(format!(
+                        "native plugin {} plugin id not NUL-terminated within {MAX_PLUGIN_ID_LEN} bytes",
+                        path.display()
+                    ))
+                })?;
+            let id_bytes = std::slice::from_raw_parts(raw, len);
+            let plugin_id = String::from_utf8_lossy(id_bytes).into_owned();
 
             tracing::info!(
                 target: deepseekcode_telemetry::APP,
@@ -445,10 +478,14 @@ impl PluginHost {
                     let engine = WasmPluginRuntime::create_engine();
                     let module = Module::from_file(&engine, path)
                         .map_err(|e| deepseekcode_types::DeepSeekCodeError::Other(e.to_string()))?;
-                    self.wasm_modules.insert(
-                        path.file_name().unwrap().to_string_lossy().to_string(),
-                        module,
-                    );
+                    let stem = path.file_name().ok_or_else(|| {
+                        deepseekcode_types::DeepSeekCodeError::Other(format!(
+                            "invalid wasm plugin path (no file name): {}",
+                            path.display()
+                        ))
+                    })?;
+                    self.wasm_modules
+                        .insert(stem.to_string_lossy().to_string(), module);
                 }
             } else if Self::is_native_plugin(path) {
                 self.load_native_plugin(path)?;

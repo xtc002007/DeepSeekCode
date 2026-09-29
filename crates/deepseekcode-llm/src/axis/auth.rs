@@ -1,4 +1,4 @@
-use deepseekcode_types::DeepSeekCodeError;
+use deepseekcode_types::{DeepSeekCodeError, Result};
 use reqwest::RequestBuilder;
 
 pub trait Auth {
@@ -139,7 +139,7 @@ impl SigV4Auth {
         &self,
         _builder: RequestBuilder,
         _api_key: &str,
-    ) -> Result<RequestBuilder, DeepSeekCodeError> {
+    ) -> Result<RequestBuilder> {
         tracing::warn!(
             target: deepseekcode_telemetry::LLM,
             run_id = %deepseekcode_telemetry::current_run_id(),
@@ -200,7 +200,7 @@ impl OAuthAuth {
         &self,
         _builder: RequestBuilder,
         _token: &str,
-    ) -> Result<RequestBuilder, DeepSeekCodeError> {
+    ) -> Result<RequestBuilder> {
         tracing::warn!(
             target: deepseekcode_telemetry::LLM,
             run_id = %deepseekcode_telemetry::current_run_id(),

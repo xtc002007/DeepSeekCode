@@ -869,7 +869,7 @@ impl Tool for ApplyPatchTool {
             }))
         })
         .await
-        .map_err(|e| {
+        .inspect_err(|e| {
             tracing::error!(
                 target: deepseekcode_telemetry::TOOL,
                 run_id = %deepseekcode_telemetry::current_run_id(),
@@ -878,7 +878,6 @@ impl Tool for ApplyPatchTool {
                 error = %e.message,
                 "apply_patch failed"
             );
-            e
         })
     }
 }

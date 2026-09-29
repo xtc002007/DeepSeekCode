@@ -4,6 +4,7 @@ description = "LLM protocol layer with four-axis routing for DeepSeekCode"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 deepseekcode-types = { workspace = true }
@@ -12,7 +13,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { workspace = true }
-eventsource-stream = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }

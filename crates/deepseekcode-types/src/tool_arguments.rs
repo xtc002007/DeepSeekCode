@@ -11,6 +11,11 @@ pub fn parse_tool_arguments(raw: &str) -> Value {
         return value;
     }
 
+    // Prefer streaming JSON parser: correctly skips braces inside strings.
+    // Falls back to string-aware brace scan for concatenated objects.
+    if let Some(v) = last_json_value_streaming(trimmed) {
+        return v;
+    }
     let mut last_valid = None;
     let bytes = trimmed.as_bytes();
     let mut i = 0;
@@ -22,21 +27,35 @@ pub fn parse_tool_arguments(raw: &str) -> Value {
         let begin = i;
         let mut depth = 0;
         let mut j = i;
+        let mut in_str = false;
+        let mut escaped = false;
         while j < bytes.len() {
-            match bytes[j] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        let slice = &trimmed[begin..=j];
-                        if let Ok(value) = serde_json::from_str::<Value>(slice) {
-                            last_valid = Some(value);
-                        }
-                        i = j + 1;
-                        break;
-                    }
+            let b = bytes[j];
+            if in_str {
+                if escaped {
+                    escaped = false;
+                } else if b == b'\\' {
+                    escaped = true;
+                } else if b == b'"' {
+                    in_str = false;
                 }
-                _ => {}
+            } else {
+                match b {
+                    b'"' => in_str = true,
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            let slice = &trimmed[begin..=j];
+                            if let Ok(value) = serde_json::from_str::<Value>(slice) {
+                                last_valid = Some(value);
+                            }
+                            i = j + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
             }
             j += 1;
         }
@@ -46,6 +65,24 @@ pub fn parse_tool_arguments(raw: &str) -> Value {
     }
 
     last_valid.unwrap_or_else(|| json!({ "raw": trimmed }))
+}
+
+/// Streaming parse: yield the last complete JSON value in a concatenated
+/// stream (handles braces inside strings via serde). Returns None when no
+/// prefix parses.
+fn last_json_value_streaming(raw: &str) -> Option<Value> {
+    use serde_json::de::Deserializer;
+    let mut last = None;
+    let mut de = Deserializer::from_str(raw).into_iter::<Value>();
+    for item in de.by_ref() {
+        if let Ok(v) = item {
+            last = Some(v);
+        } else {
+            break;
+        }
+    }
+    // Only accept if at least one value parsed; otherwise fall back to scan.
+    last
 }
 
 /// Unwrap `{"raw": "..."}` envelopes, re-parse concatenated fragments, and

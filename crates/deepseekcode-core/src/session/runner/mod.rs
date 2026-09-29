@@ -124,6 +124,10 @@ pub struct SessionRunner {
     /// progress or success clears it. Threaded into every `CompactionContext`
     /// built here so auto/overflow/manual share one record.
     compaction_failure: Mutex<Option<FailedCompaction>>,
+    /// Manual/auto compaction mutual exclusion: compact_manual_turn and drain
+    /// `maybe_auto_compact` share runner/failure_slot; without a critical
+    /// section they double-call summarizer and interleave commits (P1).
+    compaction_mutex: Mutex<()>,
 }
 
 impl SessionRunner {
@@ -184,6 +188,7 @@ impl SessionRunner {
             loop_guard_turn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             system_cache: Mutex::new(std::collections::HashMap::new()),
             compaction_failure: Mutex::new(None),
+            compaction_mutex: Mutex::new(()),
         }
     }
 
@@ -594,6 +599,7 @@ impl SessionRunner {
         system: &str,
         llm_messages: &[LlmMessage],
     ) -> Result<()> {
+        let _guard = self.compaction_mutex.lock().await;
         let agent = format!("{:?}", session.agent).to_lowercase();
         let mcp_tools = self.provider_visible_mcp_tools().await;
         let tools = {
@@ -630,6 +636,7 @@ impl SessionRunner {
         session: &deepseekcode_schema::session::Session,
         llm_messages: &[LlmMessage],
     ) -> Result<bool> {
+        let _guard = self.compaction_mutex.lock().await;
         let (baseline, _) = self.prepare_context_epoch().await?;
         let agent = format!("{:?}", session.agent).to_lowercase();
         let mcp_tools = self.provider_visible_mcp_tools().await;
@@ -662,6 +669,7 @@ impl SessionRunner {
     /// so the stored lineage matches subsequent turns and validates on read.
     /// P0-2: never a hollow context; history is appended, never rewritten.
     pub async fn compact_manual_turn(&self) -> Result<bool> {
+        let _guard = self.compaction_mutex.lock().await;
         // P1-3: explicit operator intent bypasses the same-view block (mirrors
         // Reasonix `trigger != manual`): the user asked for exactly one fresh
         // attempt. Fresh failures below still re-arm the record.
@@ -1154,44 +1162,78 @@ impl SessionRunner {
             }
         };
 
-        let stream_timeout = std::time::Duration::from_secs(90);
+        let stream_timeout = deepseekcode_llm::STREAM_IDLE_TIMEOUT;
         loop {
-            let next = tokio::time::timeout(stream_timeout, stream.next()).await;
-            // Steer delivery must promote DURING the provider turn, not only
-            // at the next loop head. Opportunistically drain steer inbox while
-            // streaming so a concurrent steer lands before the turn settles.
-            // Best-effort: promotion failures never abort the stream.
-            let _ = self.promote_steer_if_any().await;
-            let event = match next {
-                Ok(Some(item)) => item,
-                Ok(None) => break,
-                Err(_) => {
-                    tracing::error!(
-                        target: deepseekcode_telemetry::LLM,
-                        run_id = %deepseekcode_telemetry::current_run_id(),
-                        session_id = %self.session_id,
-                        provider = %request.provider,
-                        model = %request.model,
-                        "llm stream idle timeout"
-                    );
-                    return Err(DeepSeekCodeError::Llm(
-                        "provider stream timed out waiting for data".into(),
-                    ));
-                }
-            };
+            // Interruptible wait: `interrupt()` only sets CancelToken, so the
+            // loop must not sit inside `timeout(90s)` while cancelled. Select
+            // on cancel first so move/delete/interrupt exit promptly (P0).
             if self.interrupted.is_cancelled() {
                 if assistant_started {
-                    // Persist only the streamed text/reasoning. Tool calls are
-                    // deliberately NOT persisted: none of them have started
-                    // executing at this point, and storing them would leave a
-                    // dangling tool_use without a tool result (which breaks
-                    // strict tool-chain validation on resume).
                     self.persist_interrupted_assistant_turn(assistant_id, &content, &reasoning)
                         .await?;
                 }
                 return Err(DeepSeekCodeError::SessionInterrupted);
             }
-            match event? {
+            tokio::select! {
+                biased;
+                _ = self.interrupted.cancelled() => {
+                    if assistant_started {
+                        self.persist_interrupted_assistant_turn(assistant_id, &content, &reasoning)
+                            .await?;
+                    }
+                    return Err(DeepSeekCodeError::SessionInterrupted);
+                }
+                next = tokio::time::timeout(stream_timeout, stream.next()) => {
+                    // Steer delivery must promote DURING the provider turn, not only
+                    // at the next loop head. Opportunistically drain steer inbox while
+                    // streaming so a concurrent steer lands before the turn settles.
+                    if let Err(e) = self.promote_steer_if_any().await {
+                        tracing::warn!(
+                            target: deepseekcode_telemetry::SESSION,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
+                            session_id = %self.session_id,
+                            error = %e,
+                            "steer promote during stream failed; will retry next turn"
+                        );
+                    }
+                    let event = match next {
+                        Ok(Some(item)) => item,
+                        Ok(None) => break,
+                        Err(_) => {
+                            // Timeout branch: re-check cancel before reporting.
+                            if self.interrupted.is_cancelled() {
+                                if assistant_started {
+                                    self.persist_interrupted_assistant_turn(assistant_id, &content, &reasoning)
+                                        .await?;
+                                }
+                                return Err(DeepSeekCodeError::SessionInterrupted);
+                            }
+                            tracing::error!(
+                                target: deepseekcode_telemetry::LLM,
+                                run_id = %deepseekcode_telemetry::current_run_id(),
+                                session_id = %self.session_id,
+                                provider = %request.provider,
+                                model = %request.model,
+                                "llm stream idle timeout"
+                            );
+                            return Err(DeepSeekCodeError::Llm(
+                                "provider stream timed out waiting for data".into(),
+                            ));
+                        }
+                    };
+                    if self.interrupted.is_cancelled() {
+                        if assistant_started {
+                            // Persist only the streamed text/reasoning. Tool calls are
+                            // deliberately NOT persisted: none of them have started
+                            // executing at this point, and storing them would leave a
+                            // dangling tool_use without a tool result (which breaks
+                            // strict tool-chain validation on resume).
+                            self.persist_interrupted_assistant_turn(assistant_id, &content, &reasoning)
+                                .await?;
+                        }
+                        return Err(DeepSeekCodeError::SessionInterrupted);
+                    }
+                    match event? {
                 LlmEvent::ReasoningDelta(delta) => {
                     assistant_started = true;
                     reasoning.push_str(&delta);
@@ -1272,23 +1314,29 @@ impl SessionRunner {
                 }
                 LlmEvent::Completed => break,
                 LlmEvent::Error(e) => {
-                    if !assistant_started && is_context_overflow(&e) {
+                    // Mid-stream overflow with partial deltas must also enter
+                    // compaction recovery (previously only !assistant_started).
+                    // Partial deltas are discarded; compaction retries the turn.
+                    if is_context_overflow(&e) {
                         overflow_error = Some(e);
                         break;
                     }
                     return Err(DeepSeekCodeError::Llm(e));
                 }
+                    }
+                }
             }
         }
 
         if let Some(err) = overflow_error {
-            if !assistant_started && allow_overflow_recovery {
+            if allow_overflow_recovery {
                 tracing::warn!(
                     target: deepseekcode_telemetry::SESSION,
                     run_id = %deepseekcode_telemetry::current_run_id(),
                     session_id = %self.session_id,
                     error = %err,
-                    "context overflow before assistant output; compacting and retrying"
+                    assistant_started,
+                    "context overflow; compacting and retrying (partial deltas discarded)"
                 );
                 self.compact_on_overflow(session, &baseline, &request.messages)
                     .await?;
@@ -1313,8 +1361,25 @@ impl SessionRunner {
             })
             .collect();
 
+        // Atomic persistence: assistant + tool_calls in one tx (P0). Crash
+        // between N+1 tx previously left dangling tool_use without result.
+        let atomic_calls: Vec<(String, String, serde_json::Value)> = calls
+            .iter()
+            .map(|call| {
+                let tool_call_id = provider_tool_call_id(call);
+                tracing::info!(
+                    target: deepseekcode_telemetry::SESSION,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    session_id = %self.session_id,
+                    tool = %call.name,
+                    tool_call_id = %tool_call_id,
+                    "persisting tool call (atomic)"
+                );
+                (tool_call_id, call.name.clone(), call.arguments.clone())
+            })
+            .collect();
         self.sessions
-            .insert_assistant_turn(
+            .insert_assistant_turn_with_calls(
                 assistant_id,
                 self.session_id,
                 if reasoning.is_empty() {
@@ -1323,42 +1388,9 @@ impl SessionRunner {
                     Some(reasoning.as_str())
                 },
                 &content,
+                &atomic_calls,
             )
             .await?;
-
-        let tool_part_offset = if reasoning.is_empty() {
-            if content.is_empty() {
-                0
-            } else {
-                1
-            }
-        } else if content.is_empty() {
-            1
-        } else {
-            2
-        };
-
-        for (idx, call) in calls.iter().enumerate() {
-            let tool_call_id = provider_tool_call_id(call);
-            tracing::info!(
-                target: deepseekcode_telemetry::SESSION,
-                run_id = %deepseekcode_telemetry::current_run_id(),
-                session_id = %self.session_id,
-                tool = %call.name,
-                tool_call_id = %tool_call_id,
-                part_index = idx,
-                "persisting tool call"
-            );
-            self.sessions
-                .append_tool_call(
-                    assistant_id,
-                    tool_part_offset + idx as i64,
-                    &tool_call_id,
-                    &call.name,
-                    &call.arguments,
-                )
-                .await?;
-        }
 
         // Issue-2: unified estimator — system + content + reasoning +
         // tool_calls + tools_json. The old hand-rolled sum omitted

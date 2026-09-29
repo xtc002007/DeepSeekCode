@@ -1,5 +1,10 @@
+use deepseekcode_types::Result;
+
 pub trait Endpoint {
-    fn resolve(&self, base_url: Option<&str>) -> String;
+    fn resolve(
+        &self,
+        base_url: Option<&str>,
+    ) -> Result<String>;
 }
 
 pub struct OpenAiChatEndpoint;
@@ -36,28 +41,33 @@ fn join_endpoint(base: &str, suffix: &str) -> String {
     format!("{trimmed}{suffix}")
 }
 
-fn validate_base_url(base: Option<&str>) -> Option<String> {
-    let raw = base?.trim();
+fn validate_base_url(base: Option<&str>) -> Result<Option<String>> {
+    let Some(raw) = base else {
+        return Ok(None);
+    };
+    let raw = raw.trim();
     if raw.is_empty() || raw.len() > 512 || raw.contains([' ', '\0', '\n', '\r']) {
-        tracing::warn!(
+        tracing::error!(
             target: deepseekcode_telemetry::LLM,
             run_id = %deepseekcode_telemetry::current_run_id(),
-            base_host = %crate::redact_endpoint_for_log(raw),
             base_len = raw.len(),
-            "llm endpoint base_url malformed; falling back to default"
+            "llm endpoint base_url malformed; rejecting (no silent fallback)"
         );
-        return None;
+        return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
+            "invalid llm base_url: must be http(s) URL <=512 chars without whitespace".into(),
+        ));
     }
     let lower = raw.to_ascii_lowercase();
     if !(lower.starts_with("https://") || lower.starts_with("http://")) {
-        tracing::warn!(
+        tracing::error!(
             target: deepseekcode_telemetry::LLM,
             run_id = %deepseekcode_telemetry::current_run_id(),
-            base_host = %crate::redact_endpoint_for_log(raw),
             error = "scheme must be http(s)",
-            "llm endpoint base_url scheme invalid; falling back to default"
+            "llm endpoint base_url scheme invalid; rejecting (no silent fallback)"
         );
-        return None;
+        return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
+            "invalid llm base_url: scheme must be http(s)://".into(),
+        ));
     }
     tracing::debug!(
         target: deepseekcode_telemetry::LLM,
@@ -65,12 +75,15 @@ fn validate_base_url(base: Option<&str>) -> Option<String> {
         base_host = %crate::redact_endpoint_for_log(raw),
         "llm endpoint base_url validated"
     );
-    Some(raw.trim_end_matches('/').to_string())
+    Ok(Some(raw.trim_end_matches('/').to_string()))
 }
 
 impl Endpoint for OpenAiChatEndpoint {
-    fn resolve(&self, base_url: Option<&str>) -> String {
-        match validate_base_url(base_url) {
+    fn resolve(
+        &self,
+        base_url: Option<&str>,
+    ) -> Result<String> {
+        match validate_base_url(base_url)? {
             Some(valid) => {
                 let endpoint = join_endpoint(&valid, "/chat/completions");
                 tracing::info!(
@@ -91,33 +104,21 @@ impl Endpoint for OpenAiChatEndpoint {
                         run_id = %deepseekcode_telemetry::current_run_id(),
                         "llm endpoint resolve produced empty url"
                     );
+                    return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
+                        "llm endpoint resolve produced empty url".into(),
+                    ));
                 }
-                endpoint
+                Ok(endpoint)
             }
             None => {
                 let fallback = "https://api.openai.com/v1/chat/completions".to_string();
-                if base_url.is_some() {
-                    tracing::warn!(
-                        target: deepseekcode_telemetry::LLM,
-                        run_id = %deepseekcode_telemetry::current_run_id(),
-                        endpoint_host = %crate::redact_endpoint_for_log(&fallback),
-                        "llm endpoint falling back to openai default"
-                    );
-                } else {
-                    tracing::info!(
-                        target: deepseekcode_telemetry::LLM,
-                        run_id = %deepseekcode_telemetry::current_run_id(),
-                        endpoint_host = %crate::redact_endpoint_for_log(&fallback),
-                        "llm endpoint selected: openai default"
-                    );
-                }
-                tracing::debug!(
+                tracing::info!(
                     target: deepseekcode_telemetry::LLM,
                     run_id = %deepseekcode_telemetry::current_run_id(),
                     endpoint_host = %crate::redact_endpoint_for_log(&fallback),
-                    "llm endpoint default debug"
+                    "llm endpoint selected: openai default"
                 );
-                fallback
+                Ok(fallback)
             }
         }
     }
@@ -126,8 +127,11 @@ impl Endpoint for OpenAiChatEndpoint {
 pub struct AnthropicMessagesEndpoint;
 
 impl Endpoint for AnthropicMessagesEndpoint {
-    fn resolve(&self, base_url: Option<&str>) -> String {
-        match validate_base_url(base_url) {
+    fn resolve(
+        &self,
+        base_url: Option<&str>,
+    ) -> Result<String> {
+        match validate_base_url(base_url)? {
             Some(valid) => {
                 let endpoint = join_endpoint(&valid, "/messages");
                 tracing::info!(
@@ -136,45 +140,22 @@ impl Endpoint for AnthropicMessagesEndpoint {
                     endpoint_host = %crate::redact_endpoint_for_log(&endpoint),
                     "llm endpoint selected: anthropic custom base"
                 );
-                tracing::debug!(
-                    target: deepseekcode_telemetry::LLM,
-                    run_id = %deepseekcode_telemetry::current_run_id(),
-                    endpoint_host = %crate::redact_endpoint_for_log(&endpoint),
-                    "llm endpoint resolve debug"
-                );
                 if endpoint.trim().is_empty() {
-                    tracing::error!(
-                        target: deepseekcode_telemetry::LLM,
-                        run_id = %deepseekcode_telemetry::current_run_id(),
-                        "llm endpoint resolve produced empty url"
-                    );
+                    return Err(deepseekcode_types::DeepSeekCodeError::InvalidInput(
+                        "llm endpoint resolve produced empty url".into(),
+                    ));
                 }
-                endpoint
+                Ok(endpoint)
             }
             None => {
                 let fallback = "https://api.anthropic.com/v1/messages".to_string();
-                if base_url.is_some() {
-                    tracing::warn!(
-                        target: deepseekcode_telemetry::LLM,
-                        run_id = %deepseekcode_telemetry::current_run_id(),
-                        endpoint_host = %crate::redact_endpoint_for_log(&fallback),
-                        "llm endpoint falling back to anthropic default"
-                    );
-                } else {
-                    tracing::info!(
-                        target: deepseekcode_telemetry::LLM,
-                        run_id = %deepseekcode_telemetry::current_run_id(),
-                        endpoint_host = %crate::redact_endpoint_for_log(&fallback),
-                        "llm endpoint selected: anthropic default"
-                    );
-                }
-                tracing::debug!(
+                tracing::info!(
                     target: deepseekcode_telemetry::LLM,
                     run_id = %deepseekcode_telemetry::current_run_id(),
                     endpoint_host = %crate::redact_endpoint_for_log(&fallback),
-                    "llm endpoint default debug"
+                    "llm endpoint selected: anthropic default"
                 );
-                fallback
+                Ok(fallback)
             }
         }
     }

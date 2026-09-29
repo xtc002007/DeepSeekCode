@@ -51,6 +51,16 @@ cargo license --json
 | cargo-dist | CLI distribution (optional channel) | MIT / Apache-2.0 |
 | release-plz | crates.io publishing (optional channel) | MIT / Apache-2.0 |
 
+## Local Reference Checkouts (not shipped)
+
+| Directory | Content | License holder |
+|-----------|---------|----------------|
+| `third-party-code/` (gitignored, dev-only) | Upstream reference checkout(s), currently `DeepSeek-Reasonix` — design reference only, never built, packaged, or published | Respective upstream owners |
+
+See `third-party-code/README.md`. If any snippet from these trees is copied
+into this repository, add a row above naming the file, upstream commit, and
+license, per the upstream terms.
+
 ## Trademarks
 
 DeepSeek, OpenAI, Anthropic, and other names are trademarks of their respective owners. This project is not affiliated with or endorsed by those organizations unless explicitly stated.

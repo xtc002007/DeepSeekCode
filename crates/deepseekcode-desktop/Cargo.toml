@@ -4,6 +4,7 @@ description = "DeepSeekCode desktop application built with GPUI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 publish = false
 
@@ -44,6 +45,13 @@ camino = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
 similar = { workspace = true }
+# GPUI vendor note: `gpui`/`gpui_platform` are not on crates.io — they are
+# pinned to a reviewed `zed-industries/zed` git rev (57261fef…). Bumping the
+# rev requires re-running `cargo check -p deepseekcode-desktop` on
+# Windows + macOS, re-recording the rev in THIRD_PARTY_NOTICES.md, and
+# confirming `cargo tree -p deepseekcode-desktop` pulls no new duplicate
+# transitive deps. No `[patch]`/vendor dir: the git rev is the single source
+# of truth and Cargo's git cache handles offline rebuilds.
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", rev = "57261fef89db4ba6767617e74324c682754ff3f4" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui_platform", rev = "57261fef89db4ba6767617e74324c682754ff3f4" }
 rust-embed = { version = "8.5", features = ["interpolate-folder-path"] }

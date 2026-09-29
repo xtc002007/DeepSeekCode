@@ -1,5 +1,5 @@
 use crate::axis::framing::sse_data_payload;
-use crate::axis::{AnthropicMessagesEndpoint, ApiKeyAuth, Auth, BearerAuth, Endpoint};
+use crate::axis::{AnthropicMessagesEndpoint, ApiKeyAuth, Auth, BearerAuth, Endpoint, SseSplitter};
 use crate::event::LlmEvent;
 use crate::request::{LlmMessage, LlmRequest, LlmRole};
 use crate::tool_call::LlmToolCall;
@@ -48,7 +48,7 @@ pub async fn generate(
     api_key: Option<String>,
 ) -> Result<crate::request::LlmResponse> {
     let start = std::time::Instant::now();
-    let url = AnthropicMessagesEndpoint.resolve(request.base_url.as_deref());
+    let url = AnthropicMessagesEndpoint.resolve(request.base_url.as_deref())?;
     let endpoint_host = crate::redact_endpoint_for_log(&url);
     tracing::info!(
         target: deepseekcode_telemetry::LLM,
@@ -277,7 +277,7 @@ pub async fn stream(
     api_key: Option<String>,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent>> + Send>>> {
     let start = std::time::Instant::now();
-    let url = AnthropicMessagesEndpoint.resolve(request.base_url.as_deref());
+    let url = AnthropicMessagesEndpoint.resolve(request.base_url.as_deref())?;
     let endpoint_host = crate::redact_endpoint_for_log(&url);
     tracing::info!(
         target: deepseekcode_telemetry::LLM,
@@ -394,44 +394,14 @@ pub async fn stream(
         .map(|chunk| chunk.map_err(|e| DeepSeekCodeError::Llm(e.to_string())))
         .scan(
             (
-                Vec::<u8>::new(),
+                SseSplitter::new(),
                 HashMap::<usize, (String, String, String)>::new(),
             ),
-            |(buffer, tool_blocks), chunk| match chunk {
+            |(splitter, tool_blocks), chunk| match chunk {
                 Ok(bytes) => {
-                    // Byte-level buffering: never split multi-byte UTF-8
-                    // across chunks; normalize CRLF so `\r\n\r\n` frames split.
-                    buffer.extend_from_slice(&bytes);
-                    if buffer.len() > 1024 * 1024 {
-                        tracing::warn!(
-                            target: deepseekcode_telemetry::LLM,
-                            run_id = %deepseekcode_telemetry::current_run_id(),
-                            provider = "anthropic",
-                            buffer_len = buffer.len(),
-                            "llm anthropic stream buffer overflow; truncating"
-                        );
-                        tracing::error!(
-                            target: deepseekcode_telemetry::LLM,
-                            run_id = %deepseekcode_telemetry::current_run_id(),
-                            provider = "anthropic",
-                            "llm anthropic stream truncation triggered"
-                        );
-                        buffer.clear();
-                        return futures::future::ready(Some(vec![]));
-                    }
-                    let text = String::from_utf8_lossy(buffer).to_string();
-                    let normalized = text.replace("\r\n", "\n");
-                    let mut frames: Vec<String> = Vec::new();
-                    let mut remainder = normalized.as_str();
-                    while let Some(pos) = remainder.find("\n\n") {
-                        frames.push(remainder[..pos + 2].to_string());
-                        remainder = &remainder[pos + 2..];
-                    }
-                    // Drain consumed bytes; the remainder stays buffered.
-                    // Char-boundary safe: both views derive from the same
-                    // lossy text, so lengths agree on boundaries.
-                    let drain = (text.len() - remainder.len()).min(buffer.len());
-                    let _ = buffer.drain(..drain);
+                    // Shared `SseSplitter`: Vec<u8> buffering, CRLF
+                    // normalization, 1 MiB cap, UTF-8-boundary-safe drain.
+                    let frames = splitter.push_and_split(&bytes);
                     let mut events = Vec::new();
                     for frame in &frames {
                         for line in frame.lines() {
@@ -566,8 +536,9 @@ fn build_body(request: &LlmRequest) -> Value {
     }
     flush_tool_results(&mut messages, &mut pending_tool_results);
 
-    // Honor request.max_output_tokens (model透传); default 4096 preserved.
-    let max_tokens = request.max_output_tokens.unwrap_or(4096);
+    // Honor request.max_output_tokens; `None`/`Some(0)` (legacy omit)
+    // normalize to the 4096 default so `max_tokens: 0` is never sent.
+    let max_tokens = request.effective_max_output_tokens().unwrap_or(4096);
     let tools: Vec<Value> = request
         .tools
         .iter()

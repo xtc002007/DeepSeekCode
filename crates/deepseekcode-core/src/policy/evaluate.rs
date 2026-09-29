@@ -44,6 +44,7 @@ pub fn evaluate_patterns(
         concrete
     };
     let mut saw_prompt = false;
+    let mut saw_exact_permit = false;
     for pattern in eval_patterns {
         let rule = evaluate_rule(scope, pattern, ruleset);
         match rule.action {
@@ -58,10 +59,23 @@ pub fn evaluate_patterns(
                 return PolicyDecision::Block;
             }
             PolicyAction::Prompt => saw_prompt = true,
-            PolicyAction::Permit => {}
+            PolicyAction::Permit => {
+                // Exact grant (e.g. Once `echo once`) covers the turn even when
+                // derived prefix views (`echo *`, `echo`) still map to Prompt.
+                // Without this, fail-closed defaults would require the grant to
+                // enumerate every derived view, forcing over-broad `prefix *`
+                // grants (e.g. `git *` covering `git rm`) to make same-command
+                // retries pass. Exact-permit wins over derived-prompt, but never
+                // over Block (handled above).
+                if rule.pattern == **pattern {
+                    saw_exact_permit = true;
+                }
+            }
         }
     }
-    let decision = if saw_prompt {
+    let decision = if saw_exact_permit {
+        PolicyDecision::Permit
+    } else if saw_prompt {
         PolicyDecision::Prompt
     } else {
         PolicyDecision::Permit
@@ -90,22 +104,63 @@ pub fn pattern_matches(rule_pattern: &str, pattern: &str) -> bool {
     if rule_pattern == "*" || rule_pattern == pattern {
         return true;
     }
+    // Dual evaluation for `~/` canonical form vs expanded absolute form:
+    // a rule written as `~/.ssh*` must match an extracted absolute
+    // `/home/u/.ssh/id_rsa` and vice versa (HOME drift / startup staleness).
+    let expanded_rule = expand_tilde_for_match(rule_pattern);
+    let expanded_value = expand_tilde_for_match(pattern);
+    if expanded_rule != rule_pattern || expanded_value != pattern {
+        if expanded_rule == expanded_value {
+            return true;
+        }
+        if wildcard_match(&expanded_rule, &expanded_value) {
+            return true;
+        }
+    }
     wildcard_match(rule_pattern, pattern)
+}
+
+/// Expand `~/`, `$HOME/` for matching only (no FS access). Used so
+/// `~/`-canonical rules match absolute values and vice versa.
+fn expand_tilde_for_match(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Some(home) = deepseekcode_types::home_dir() {
+            return format!("{}/{}", home.display(), rest);
+        }
+    }
+    if let Some(rest) = s.strip_prefix("$HOME/") {
+        if let Some(home) = deepseekcode_types::home_dir() {
+            return format!("{}/{}", home.display(), rest);
+        }
+    }
+    s.to_string()
+}
+
+/// Validate a glob pattern at load/write time (fail-closed). Returns an
+/// error for syntactically invalid globs instead of silently treating them
+/// as non-matches (which previously fell through to a fail-open permit).
+pub fn validate_glob_pattern(pattern: &str) -> Result<(), String> {
+    if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
+        glob::Pattern::new(pattern).map(|_| ()).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn wildcard_match(rule: &str, value: &str) -> bool {
     if rule.contains('*') || rule.contains('?') || rule.contains('[') {
+        // Invalid globs fail closed (no match); callers must validate at
+        // load time via `validate_glob_pattern` to reject them loudly.
         return glob::Pattern::new(rule)
             .map(|p| p.matches(value))
             .unwrap_or(false);
-    }
-    if let Some(prefix) = rule.strip_suffix('*') {
-        return value.starts_with(prefix);
     }
     false
 }
 
 fn mcp_scope_matches(rule_scope: &str, scope: &str) -> bool {
+    // Canonical form is `mcp:<server>:<tool>` (see `tool_scope`); legacy
+    // `mcp_<server>_<tool>` / `<server>_<tool>` forms are also accepted for
+    // DB rows written before the fix.
     let Some(rest) = rule_scope.strip_prefix("mcp:") else {
         return false;
     };
@@ -115,11 +170,46 @@ fn mcp_scope_matches(rule_scope: &str, scope: &str) -> bool {
     if server.is_empty() {
         return false;
     }
-    if tool.is_empty() || tool == "*" {
-        return scope.starts_with(&format!("mcp_{server}_"))
-            || scope.starts_with(&format!("{server}_"));
+    // Normalize the concrete scope to (server, tool) regardless of form.
+    let (scope_server, scope_tool): (String, String) =
+        if let Some(s) = scope.strip_prefix("mcp:") {
+            let mut sp = s.splitn(2, ':');
+            (
+                sp.next().unwrap_or("").to_string(),
+                sp.next().unwrap_or("").to_string(),
+            )
+        } else if let Some(s) = scope.strip_prefix("mcp_") {
+            match s.split_once('_') {
+                Some((srv, tl)) => (srv.to_string(), tl.to_string()),
+                None => (s.to_string(), String::new()),
+            }
+        } else {
+            match scope.split_once('_') {
+                Some((srv, tl)) if srv == server => (srv.to_string(), tl.to_string()),
+                _ => (String::new(), String::new()),
+            }
+        };
+    if scope_server != server {
+        // Fallback to legacy prefix matching for mixed-form rules.
+        if tool.is_empty() || tool == "*" {
+            return scope.starts_with(&format!("mcp_{server}_"))
+                || scope.starts_with(&format!("{server}_"))
+                || scope.starts_with(&format!("mcp:{server}:"))
+                || scope == format!("mcp:{server}")
+                || scope == format!("mcp:{server}:*");
+        }
+        return false;
     }
-    scope == format!("mcp_{server}_{tool}") || scope == format!("{server}_{tool}")
+    if tool.is_empty() || tool == "*" {
+        return true;
+    }
+    // Support trailing wildcards in tool part (e.g. `mcp:gh:search*`).
+    if tool.contains('*') || tool.contains('?') || tool.contains('[') {
+        return glob::Pattern::new(tool)
+            .map(|p| p.matches(&scope_tool))
+            .unwrap_or(false);
+    }
+    scope_tool == tool
 }
 
 #[cfg(test)]

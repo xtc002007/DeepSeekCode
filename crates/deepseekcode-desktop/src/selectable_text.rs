@@ -41,9 +41,10 @@ fn selection_color() -> Rgba {
 
 #[derive(Clone, Debug, Default)]
 pub struct TimelineTextSelection {
-    pub block: String,
-    pub text: String,
-    pub range: Range<usize>,
+    pub anchor_block: String,
+    pub anchor_offset: usize,
+    pub focus_block: String,
+    pub focus_offset: usize,
 }
 
 #[derive(Clone)]
@@ -689,21 +690,26 @@ impl Element for SelectableText {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let selection = self
-            .view
-            .read(cx)
-            .timeline_text_selection
-            .clone()
-            .filter(|sel| sel.block == self.block.as_ref() && !sel.range.is_empty());
+        let range_opt = {
+            let view = self.view.read(cx);
+            view.timeline_text_selection.as_ref().and_then(|sel| {
+                selection_range_for_block(
+                    sel,
+                    self.block.as_ref(),
+                    &view.timeline_text_layouts,
+                )
+            })
+        };
+        let selection = range_opt.filter(|r| !r.is_empty());
         for (index, fragment) in prepaint.fragments.iter().enumerate() {
             let line_dx = align_offset(self.align, bounds.size.width, fragment.line.width());
             let origin = point(
                 bounds.origin.x + line_dx,
                 bounds.origin.y + self.line_height * index as f32,
             );
-            if let Some(sel) = selection.as_ref() {
-                let start = sel.range.start.max(fragment.start).min(fragment.end);
-                let end = sel.range.end.max(fragment.start).min(fragment.end);
+            if let Some(range) = selection.as_ref() {
+                let start = range.start.max(fragment.start).min(fragment.end);
+                let end = range.end.max(fragment.start).min(fragment.end);
                 if end > start {
                     let x0 = fragment.line.x_for_index(start - fragment.start);
                     let x1 = fragment.line.x_for_index(end - fragment.start);
@@ -759,24 +765,27 @@ impl WorkspaceView {
         };
         if click_count >= 3 {
             self.timeline_text_selection = Some(TimelineTextSelection {
-                block: block.clone(),
-                text: layout.text.clone(),
-                range: 0..layout.text.len(),
+                anchor_block: block.clone(),
+                anchor_offset: 0,
+                focus_block: block.clone(),
+                focus_offset: layout.text.len(),
             });
             self.timeline_text_press = None;
         } else if click_count == 2 {
             let range = word_bounds_at(&layout.text, offset);
             self.timeline_text_selection = Some(TimelineTextSelection {
-                block: block.clone(),
-                text: layout.text.clone(),
-                range,
+                anchor_block: block.clone(),
+                anchor_offset: range.start,
+                focus_block: block.clone(),
+                focus_offset: range.end,
             });
             self.timeline_text_press = None;
         } else {
             self.timeline_text_selection = Some(TimelineTextSelection {
-                block: block.clone(),
-                text: layout.text.clone(),
-                range: offset..offset,
+                anchor_block: block.clone(),
+                anchor_offset: offset,
+                focus_block: block.clone(),
+                focus_offset: offset,
             });
             self.timeline_text_press = Some(TimelineTextPress {
                 block,
@@ -787,43 +796,54 @@ impl WorkspaceView {
     }
 
     pub(crate) fn text_selection_move(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
-        let (block, anchor) = match &self.timeline_text_press {
+        let (anchor_block, anchor_offset) = match &self.timeline_text_press {
             Some(press) => (press.block.clone(), press.anchor),
             _ => return,
         };
-        let layout = match self.timeline_text_layouts.get(&block) {
+        // Anchor must still exist; otherwise the drag has no origin.
+        if !self.timeline_text_layouts.contains_key(&anchor_block) {
+            return;
+        }
+        // Multi-block drag: the cursor may sit in gaps (padding, icons,
+        // markers) or over another block. Fall back to the nearest block by
+        // visual distance so crossing paragraphs/list items/tables keeps
+        // extending the selection instead of stalling at the origin block.
+        let focus_block =
+            match find_block_at(&self.timeline_text_layouts, pos).or_else(|| {
+                find_nearest_block(&self.timeline_text_layouts, pos)
+            }) {
+                Some(block) => block,
+                None => return,
+            };
+        let layout = match self.timeline_text_layouts.get(&focus_block) {
             Some(layout) => layout.clone(),
             None => return,
         };
-        let offset = match hit_offset(&layout, &layout.text, pos) {
+        let focus_offset = match hit_offset(&layout, &layout.text, pos) {
             Some(offset) => offset,
             None => return,
         };
         if let Some(selection) = self.timeline_text_selection.as_mut() {
-            if selection.block == block {
-                selection.range = normalize_range(&layout.text, anchor, offset);
-            }
+            selection.anchor_block = anchor_block;
+            selection.anchor_offset = anchor_offset;
+            selection.focus_block = focus_block;
+            selection.focus_offset = focus_offset;
+        } else {
+            self.timeline_text_selection = Some(TimelineTextSelection {
+                anchor_block: anchor_block.clone(),
+                anchor_offset,
+                focus_block,
+                focus_offset,
+            });
         }
         cx.notify();
     }
 
     pub(crate) fn text_selection_up(&mut self, cx: &mut Context<Self>) {
-        let press = match self.timeline_text_press.clone() {
-            Some(press) => press,
-            None => return,
-        };
-        self.timeline_text_press = None;
-        let layout = match self.timeline_text_layouts.get(&press.block) {
-            Some(layout) => layout.clone(),
-            None => return,
-        };
-        // Refresh the snapshot text so copy uses current content.
-        if let Some(selection) = self.timeline_text_selection.as_mut() {
-            if selection.block == press.block {
-                selection.text = layout.text.clone();
-            }
+        if self.timeline_text_press.is_some() {
+            self.timeline_text_press = None;
+            cx.notify();
         }
-        cx.notify();
     }
 
     pub(crate) fn text_selection_up_out(&mut self, cx: &mut Context<Self>) {
@@ -898,15 +918,10 @@ impl WorkspaceView {
     }
 
     pub(crate) fn copy_timeline_selection(&mut self, cx: &mut Context<Self>) {
-        if let Some(selection) = self.timeline_text_selection.as_ref() {
-            let range =
-                normalize_range(&selection.text, selection.range.start, selection.range.end);
-            if !range.is_empty() {
-                if let Some(text) = selection.text.get(range) {
-                    if !text.is_empty() {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
-                    }
-                }
+        if let Some(selection) = self.timeline_text_selection.clone() {
+            let text = collect_selection_text(&selection, &self.timeline_text_layouts);
+            if !text.is_empty() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
         }
     }
@@ -952,6 +967,250 @@ pub(crate) fn is_browsable_url(url: &str) -> bool {
     lower.starts_with("http://") || lower.starts_with("https://")
 }
 
+/// Visual position of a block for document ordering (top-to-bottom,
+/// then left-to-right so table cells on one row read in column order).
+fn layout_pos(layout: &TextBlockLayout) -> (f32, f32) {
+    let y: f32 = layout.origin.y.into();
+    let x: f32 = layout.origin.x.into();
+    (y, x)
+}
+
+fn cmp_pos(a: (f32, f32), b: (f32, f32)) -> std::cmp::Ordering {
+    a.0.partial_cmp(&b.0)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+/// Highlight byte range for `block` under a possibly multi-block selection.
+///
+/// - Same block: ordered + grapheme-snapped range (may be empty for a caret).
+/// - Endpoint blocks: from/to the endpoint offset (clamped + snapped).
+/// - Middle blocks: full text.
+/// - Outside the anchor↔focus interval: `None`.
+pub fn selection_range_for_block(
+    selection: &TimelineTextSelection,
+    block: &str,
+    layouts: &std::collections::HashMap<String, TextBlockLayout>,
+) -> Option<Range<usize>> {
+    if selection.anchor_block == selection.focus_block {
+        if block != selection.anchor_block {
+            return None;
+        }
+        let layout = layouts.get(block)?;
+        if layout.text.is_empty() {
+            return None;
+        }
+        return Some(normalize_range(
+            &layout.text,
+            selection.anchor_offset,
+            selection.focus_offset,
+        ));
+    }
+    let anchor_layout = layouts.get(&selection.anchor_block)?;
+    let focus_layout = layouts.get(&selection.focus_block)?;
+    let self_layout = layouts.get(block)?;
+    if self_layout.text.is_empty() {
+        return None;
+    }
+    let anchor_pos = layout_pos(anchor_layout);
+    let focus_pos = layout_pos(focus_layout);
+    let self_pos = layout_pos(self_layout);
+    let (start_block, start_offset, start_pos, end_block, end_offset, end_pos) =
+        if cmp_pos(anchor_pos, focus_pos) <= std::cmp::Ordering::Equal {
+            (
+                &selection.anchor_block,
+                selection.anchor_offset,
+                anchor_pos,
+                &selection.focus_block,
+                selection.focus_offset,
+                focus_pos,
+            )
+        } else {
+            (
+                &selection.focus_block,
+                selection.focus_offset,
+                focus_pos,
+                &selection.anchor_block,
+                selection.anchor_offset,
+                anchor_pos,
+            )
+        };
+    // Outside the interval: no highlight.
+    if cmp_pos(self_pos, start_pos) == std::cmp::Ordering::Less
+        || cmp_pos(self_pos, end_pos) == std::cmp::Ordering::Greater
+    {
+        return None;
+    }
+    let len = self_layout.text.len();
+    let snap = |ix: usize| snap_to_grapheme(&self_layout.text, ix.min(len));
+    if block == start_block.as_str() {
+        let s = snap(start_offset);
+        return Some(s..len);
+    }
+    if block == end_block.as_str() {
+        let e = snap(end_offset);
+        return Some(0..e);
+    }
+    Some(0..len)
+}
+
+/// Concatenate the selected slices in visual order for `Ctrl+C`.
+///
+/// Same-block selections behave exactly as before. Multi-block selections join
+/// endpoint slices + full middle blocks; blocks sharing a visual row (table
+/// cells) join with `\t`, otherwise with `\n`.
+pub fn collect_selection_text(
+    selection: &TimelineTextSelection,
+    layouts: &std::collections::HashMap<String, TextBlockLayout>,
+) -> String {
+    if selection.anchor_block == selection.focus_block {
+        let Some(layout) = layouts.get(&selection.anchor_block) else {
+            return String::new();
+        };
+        let range = normalize_range(&layout.text, selection.anchor_offset, selection.focus_offset);
+        if range.is_empty() {
+            return String::new();
+        }
+        return layout.text.get(range).unwrap_or("").to_string();
+    }
+    let Some(anchor_layout) = layouts.get(&selection.anchor_block) else {
+        return String::new();
+    };
+    let Some(focus_layout) = layouts.get(&selection.focus_block) else {
+        return String::new();
+    };
+    let anchor_pos = layout_pos(anchor_layout);
+    let focus_pos = layout_pos(focus_layout);
+    let (start_block, start_offset, start_pos, end_block, end_offset) =
+        if cmp_pos(anchor_pos, focus_pos) <= std::cmp::Ordering::Equal {
+            (
+                &selection.anchor_block,
+                selection.anchor_offset,
+                anchor_pos,
+                &selection.focus_block,
+                selection.focus_offset,
+            )
+        } else {
+            (
+                &selection.focus_block,
+                selection.focus_offset,
+                focus_pos,
+                &selection.anchor_block,
+                selection.anchor_offset,
+            )
+        };
+    let Some(end_layout) = layouts.get(end_block) else {
+        return String::new();
+    };
+    let end_pos = layout_pos(end_layout);
+    // Visual order of every laid-out block.
+    let mut ordered: Vec<(&String, &TextBlockLayout)> = layouts.iter().collect();
+    ordered.sort_by(|a, b| cmp_pos(layout_pos(a.1), layout_pos(b.1)));
+    let start_idx = ordered
+        .iter()
+        .position(|(k, _)| *k == start_block);
+    let end_idx = ordered.iter().position(|(k, _)| *k == end_block);
+    let (Some(start_idx), Some(end_idx)) = (start_idx, end_idx) else {
+        return String::new();
+    };
+    let (lo, hi) = if start_idx <= end_idx {
+        (start_idx, end_idx)
+    } else {
+        (end_idx, start_idx)
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let mut prev_y: Option<f32> = None;
+    let mut prev_h: Option<f32> = None;
+    let mut out = String::new();
+    for (key, layout) in ordered[lo..=hi].iter() {
+        // Skip blocks outside the Y interval (stale hidden layouts).
+        let (y, _) = layout_pos(layout);
+        let in_y = if start_pos.0 <= end_pos.0 {
+            y >= start_pos.0 - 0.5 && y <= end_pos.0 + block_height(layout) + 0.5
+        } else {
+            y >= end_pos.0 - 0.5 && y <= start_pos.0 + block_height(layout) + 0.5
+        };
+        if !in_y {
+            continue;
+        }
+        let len = layout.text.len();
+        let slice = if key.as_str() == start_block.as_str() && key.as_str() == end_block.as_str() {
+            let r = normalize_range(&layout.text, start_offset, end_offset);
+            layout.text.get(r).unwrap_or("").to_string()
+        } else if key.as_str() == start_block.as_str() {
+            let s = snap_to_grapheme(&layout.text, start_offset.min(len));
+            layout.text.get(s..).unwrap_or("").to_string()
+        } else if key.as_str() == end_block.as_str() {
+            let e = snap_to_grapheme(&layout.text, end_offset.min(len));
+            layout.text.get(..e).unwrap_or("").to_string()
+        } else {
+            layout.text.clone()
+        };
+        if slice.is_empty() {
+            continue;
+        }
+        // Separator: same visual row → tab (table cells), else newline.
+        if !parts.is_empty() {
+            let same_row = match (prev_y, prev_h) {
+                (Some(py), Some(ph)) => (y - py).abs() < (ph.max(block_height(layout)) * 0.5).max(1.0),
+                _ => false,
+            };
+            out.push_str(if same_row { "\t" } else { "\n" });
+        }
+        out.push_str(&slice);
+        parts.push(slice);
+        prev_y = Some(y);
+        prev_h = Some(block_height(layout));
+    }
+    out
+}
+
+fn block_height(layout: &TextBlockLayout) -> f32 {
+    let h: f32 = layout.line_height.into();
+    (h * layout.fragments.len() as f32).max(1.0)
+}
+
+/// Nearest laid-out block for drags sitting in gaps (padding, icons,
+/// markers). Exact hits win; otherwise the smallest visual distance
+/// (vertical primary, horizontal tie-break via Euclidean distance).
+fn find_nearest_block(
+    layouts: &std::collections::HashMap<String, TextBlockLayout>,
+    pos: Point<Pixels>,
+) -> Option<String> {
+    let px: f32 = pos.x.into();
+    let py: f32 = pos.y.into();
+    let mut best: Option<(f32, String)> = None;
+    for (key, layout) in layouts.iter() {
+        if layout.fragments.is_empty() {
+            continue;
+        }
+        let ox: f32 = layout.origin.x.into();
+        let oy: f32 = layout.origin.y.into();
+        let h = block_height(layout);
+        let w: f32 = layout.width.into();
+        let dy = if py < oy {
+            oy - py
+        } else if py > oy + h {
+            py - (oy + h)
+        } else {
+            0.0
+        };
+        let dx = if px < ox {
+            ox - px
+        } else if px > ox + w {
+            px - (ox + w)
+        } else {
+            0.0
+        };
+        let dist = dy * dy + dx * dx;
+        match &best {
+            Some((bd, _)) if dist >= *bd => {}
+            _ => best = Some((dist, key.clone())),
+        }
+    }
+    best.map(|(_, k)| k)
+}
+
 /// Block key under a window-space point (row padding included).
 fn find_block_at(
     layouts: &std::collections::HashMap<String, TextBlockLayout>,
@@ -976,7 +1235,10 @@ fn find_block_at(
 mod tests {
     // NOTE: never `use super::*` here — the parent's `use gpui::*` would pull
     // gpui's `test` module into scope and break `#[test]` resolution.
-    use super::{normalize_range, snap_to_grapheme, word_bounds_at};
+    use super::{
+        collect_selection_text, normalize_range, selection_range_for_block, snap_to_grapheme,
+        word_bounds_at, TextBlockLayout, TimelineTextSelection,
+    };
 
     #[test]
     fn normalize_range_orders_and_snaps() {
@@ -1005,5 +1267,96 @@ mod tests {
         assert_eq!(snap_to_grapheme(text, 4), 3);
         assert_eq!(snap_to_grapheme(text, 3), 3);
         assert_eq!(snap_to_grapheme(text, 99), text.len());
+    }
+
+    fn mock_layout(y: f32, x: f32, text: &str) -> TextBlockLayout {
+        TextBlockLayout {
+            origin: gpui::point(gpui::px(x), gpui::px(y)),
+            width: gpui::px(400.0),
+            line_height: gpui::px(18.0),
+            align: gpui::TextAlign::Left,
+            text_hash: 0,
+            text: text.to_string(),
+            fragments: Vec::new(),
+            links: Vec::new(),
+        }
+    }
+
+    fn three_blocks() -> std::collections::HashMap<String, TextBlockLayout> {
+        let mut m = std::collections::HashMap::new();
+        m.insert("a".to_string(), mock_layout(0.0, 0.0, "第一行内容"));
+        m.insert("b".to_string(), mock_layout(20.0, 0.0, "第二行内容"));
+        m.insert("c".to_string(), mock_layout(40.0, 0.0, "第三行内容"));
+        m
+    }
+
+    #[test]
+    fn multi_block_range_covers_endpoints_and_middle() {
+        let layouts = three_blocks();
+        // Anchor in the middle of `a`, focus in the middle of `c`.
+        // "第一行内容" bytes: each CJK 3 bytes; offset 3 = after 第一.
+        let sel = TimelineTextSelection {
+            anchor_block: "a".to_string(),
+            anchor_offset: 3,
+            focus_block: "c".to_string(),
+            focus_offset: 6,
+        };
+        assert_eq!(
+            selection_range_for_block(&sel, "a", &layouts),
+            Some(3.."第一行内容".len())
+        );
+        assert_eq!(
+            selection_range_for_block(&sel, "b", &layouts),
+            Some(0.."第二行内容".len())
+        );
+        assert_eq!(selection_range_for_block(&sel, "c", &layouts), Some(0..6));
+        // Reverse drag gives the same per-block ranges.
+        let rev = TimelineTextSelection {
+            anchor_block: "c".to_string(),
+            anchor_offset: 6,
+            focus_block: "a".to_string(),
+            focus_offset: 3,
+        };
+        assert_eq!(
+            selection_range_for_block(&rev, "a", &layouts),
+            Some(3.."第一行内容".len())
+        );
+        assert_eq!(
+            selection_range_for_block(&rev, "b", &layouts),
+            Some(0.."第二行内容".len())
+        );
+        assert_eq!(selection_range_for_block(&rev, "c", &layouts), Some(0..6));
+    }
+
+    #[test]
+    fn multi_block_copy_joins_with_newlines() {
+        let layouts = three_blocks();
+        let sel = TimelineTextSelection {
+            anchor_block: "a".to_string(),
+            anchor_offset: 3,
+            focus_block: "c".to_string(),
+            focus_offset: 6,
+        };
+        let text = collect_selection_text(&sel, &layouts);
+        let a_tail = "第一行内容".get(3..).unwrap();
+        let c_head = "第三行内容".get(..6).unwrap();
+        assert_eq!(text, format!("{a_tail}\n第二行内容\n{c_head}"));
+    }
+
+    #[test]
+    fn same_block_selection_unchanged() {
+        let layouts = three_blocks();
+        let sel = TimelineTextSelection {
+            anchor_block: "b".to_string(),
+            anchor_offset: 6,
+            focus_block: "b".to_string(),
+            focus_offset: 3,
+        };
+        assert_eq!(selection_range_for_block(&sel, "b", &layouts), Some(3..6));
+        assert_eq!(selection_range_for_block(&sel, "a", &layouts), None);
+        assert_eq!(
+            collect_selection_text(&sel, &layouts),
+            "第二行内容".get(3..6).unwrap()
+        );
     }
 }

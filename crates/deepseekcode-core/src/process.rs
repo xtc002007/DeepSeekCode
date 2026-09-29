@@ -74,12 +74,23 @@ impl SessionChildPidGuard {
     }
 
     /// Detach without unregistering (used when ownership is handed over).
-    /// Consumes self without running `Drop` unregister so the PID stays
-    /// tracked; callers must eventually `unregister_session_child_pid`.
-    /// Previously `disarm` only flipped a flag on a by-value self that was
-    /// then dropped with `armed=false`, leaking the entry forever.
-    pub fn disarm(self) {
-        std::mem::forget(self);
+    /// Consumes self and returns an explicit [`DetachedPid`] that MUST be
+    /// consumed (see `#[must_use]`): the PID stays tracked until the holder
+    /// calls [`DetachedPid::unregister`] or [`DetachedPid::release`].
+    /// Explicit handle (instead of `mem::forget`) makes exception-path leaks
+    /// visible at the type level instead of silently leaking the guard.
+    pub fn disarm(self) -> DetachedPid {
+        let detached = DetachedPid {
+            session_id: self.session_id,
+            pid: self.pid,
+            consumed: false,
+        };
+        // Suppress `Drop::unregister` without `mem::forget`: wrap in
+        // `ManuallyDrop` so the guard shell (no heap allocation) is simply
+        // not dropped. The PID stays registered under `detached`.
+        let mut this = std::mem::ManuallyDrop::new(self);
+        this.armed = false;
+        detached
     }
 }
 
@@ -87,6 +98,57 @@ impl Drop for SessionChildPidGuard {
     fn drop(&mut self) {
         if self.armed {
             unregister_session_child_pid(self.session_id, self.pid);
+        }
+    }
+}
+
+/// Explicit ownership of a still-tracked child PID after
+/// [`SessionChildPidGuard::disarm`]. `#[must_use]` forces callers to handle
+/// it: either [`DetachedPid::unregister`] (normal completion) or
+/// [`DetachedPid::release`] (transfer to an external reaper). Dropping
+/// without consuming logs a warning so exception-path leaks are visible
+/// instead of silent.
+#[must_use = "DetachedPid must be explicitly released or unregistered, otherwise the PID stays tracked"]
+pub struct DetachedPid {
+    session_id: SessionId,
+    pid: u32,
+    consumed: bool,
+}
+
+impl DetachedPid {
+    pub fn session_id(&self) -> SessionId {
+        self.session_id
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// Keep the PID tracked and hand ownership to an external reaper.
+    /// Consumes self without unregistering (explicit, auditable).
+    pub fn release(mut self) {
+        self.consumed = true;
+        // `self` drops here with `consumed=true`, so `Drop` below skips the
+        // leak warning. The PID intentionally stays registered.
+    }
+
+    /// Normal completion: remove the PID from the registry.
+    pub fn unregister(mut self) {
+        self.consumed = true;
+        unregister_session_child_pid(self.session_id, self.pid);
+    }
+}
+
+impl Drop for DetachedPid {
+    fn drop(&mut self) {
+        if !self.consumed {
+            tracing::warn!(
+                target: deepseekcode_telemetry::APP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %self.session_id,
+                pid = self.pid,
+                "DetachedPid dropped without release/unregister; PID stays tracked (exception-path leak)"
+            );
         }
     }
 }

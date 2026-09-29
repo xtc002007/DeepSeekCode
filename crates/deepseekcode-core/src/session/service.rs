@@ -166,43 +166,36 @@ impl SessionService {
             PromptDelivery::Queue => "queue",
         };
 
-        // BEGIN IMMEDIATE serializes concurrent prompts on the same session
-        // so MAX+1 cannot allocate duplicate admitted_seq (P0-7).
-        let mut tx = self
-            .db
-            .pool()
-            .begin()
+        // True `BEGIN IMMEDIATE` serializes concurrent prompts on the same
+        // session so MAX+1 cannot allocate duplicate admitted_seq (P0-7).
+        // `pool.begin()` is DEFERRED: two writers could both read the same
+        // MAX before either writes. We use `acquire_immediate` (dedicated
+        // connection + `BEGIN IMMEDIATE` + busy retry) — the most robust of
+        // the three options (no schema migration for UNIQUE, no process-wide
+        // per-session Mutex map to maintain). Per-DB `has_admitted_seq`
+        // (probed once at `Database::open`) replaces the old process-global
+        // `OnceLock` which polluted across DBs in tests.
+        let mut conn = deepseekcode_storage::acquire_immediate(self.db.pool())
             .await
             .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
-        sqlx::query("SELECT 1")
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
-        // Hot-path DDL probe cached per process: migrations guarantee the
-        // column exists on fresh DBs; only legacy DBs need the fallback.
-        static HAS_SEQ_CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let has_seq = if let Some(cached) = HAS_SEQ_CACHE.get() {
-            *cached
-        } else {
-            let probed = sqlx::query_scalar::<_, i64>(
-                r#"SELECT COUNT(*) FROM pragma_table_info('session_input') WHERE name = 'admitted_seq'"#,
-            )
-            .fetch_one(&mut *tx)
-            .await
-            .map(|c: i64| c > 0)
-            .unwrap_or(false);
-            let _ = HAS_SEQ_CACHE.set(probed);
-            probed
-        };
+        let has_seq = self.db.has_admitted_seq();
+        // Raw IMMEDIATE tx has no `Transaction` Drop guard: every error path
+        // below rolls back explicitly before returning.
         let inserted = if has_seq {
-            let next: Option<i64> = sqlx::query_scalar(
+            let next: Option<i64> = match sqlx::query_scalar(
                 r#"SELECT COALESCE(MAX(admitted_seq), 0) + 1 FROM session_input WHERE session_id = ?"#,
             )
             .bind(req.session_id.to_string())
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut *conn)
             .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
-            sqlx::query(
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                    return Err(deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()));
+                }
+            };
+            match sqlx::query(
                 r#"INSERT OR IGNORE INTO session_input (id, session_id, prompt, delivery, admitted_at, promoted, admitted_seq)
                    VALUES (?, ?, ?, ?, ?, 0, ?)"#,
             )
@@ -212,11 +205,17 @@ impl SessionService {
             .bind(delivery_str)
             .bind(chrono::Utc::now().to_rfc3339())
             .bind(next.unwrap_or(1))
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                    return Err(deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()));
+                }
+            }
         } else {
-            sqlx::query(
+            match sqlx::query(
                 r#"INSERT OR IGNORE INTO session_input (id, session_id, prompt, delivery, admitted_at, promoted)
                    VALUES (?, ?, ?, ?, ?, 0)"#,
             )
@@ -225,9 +224,15 @@ impl SessionService {
             .bind(&req.prompt)
             .bind(delivery_str)
             .bind(chrono::Utc::now().to_rfc3339())
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                    return Err(deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()));
+                }
+            }
         };
 
         if inserted.rows_affected() == 0 {
@@ -238,18 +243,24 @@ impl SessionService {
             // intent and is compared via the caller's `resume` flag recorded
             // in the receipt path below.
             let row: Option<(String, String)> =
-                sqlx::query_as(r#"SELECT prompt, delivery FROM session_input WHERE id = ?"#)
+                match sqlx::query_as(r#"SELECT prompt, delivery FROM session_input WHERE id = ?"#)
                     .bind(message_id.to_string())
-                    .fetch_optional(&mut *tx)
+                    .fetch_optional(&mut *conn)
                     .await
-                    .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                        return Err(deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()));
+                    }
+                };
             // Idempotency covers prompt+delivery; `resume` is admission-time
             // intent recorded on the receipt event below. A retry with
             // `resume:true` wakes the session (handled at the match arm), so
             // it can never silently degrade to admit-only.
-            tx.commit()
-                .await
-                .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
+            if let Err(e) = sqlx::query("COMMIT").execute(&mut *conn).await {
+                return Err(deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()));
+            }
             match row {
                 Some((existing_prompt, existing_delivery))
                     if existing_prompt == req.prompt && existing_delivery == delivery_str =>
@@ -268,9 +279,10 @@ impl SessionService {
                 }
             }
         }
-        tx.commit()
-            .await
-            .map_err(|e| deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()))?;
+        if let Err(e) = sqlx::query("COMMIT").execute(&mut *conn).await {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            return Err(deepseekcode_types::DeepSeekCodeError::Storage(e.to_string()));
+        }
 
         self.events
             .append(
@@ -733,6 +745,15 @@ impl SessionService {
         self.execution.drop_runner(session_id).await;
         let new_directory = normalize_directory_path(&new_directory);
         use crate::system_context::ContextEpochStore;
+        // Validate destination BEFORE mutating: Rule 6 requires destination to
+        // initialize fresh. Previously clear(epoch) ran before validation and
+        // rollback only restored working_directory, permanently losing epoch.
+        let registry = SystemContextRegistry::with_config(&new_directory, &self.config);
+        if registry.render_baseline().is_none() {
+            return Err(deepseekcode_types::DeepSeekCodeError::ContextUnavailable(format!(
+                "cannot move session to {new_directory}: mandatory context unavailable (Rule 6)"
+            )));
+        }
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(r#"UPDATE sessions SET working_directory = ?, updated_at = ? WHERE id = ?"#)
             .bind(&new_directory)
@@ -744,27 +765,6 @@ impl SessionService {
 
         let epochs = ContextEpochStore::new(self.db.pool().clone());
         epochs.clear(session_id).await?;
-
-        // Spec Rule 6: destination initializes a fresh baseline. If the new
-        // directory has no mandatory context, fail loudly (rollback the move)
-        // instead of leaving the session epoch-less (P0-7).
-        let registry = SystemContextRegistry::with_config(&new_directory, &self.config);
-        if registry.render_baseline().is_none() {
-            // Roll back working_directory to the source location.
-            let source_dir = self.project_dir.clone();
-            let now_rb = chrono::Utc::now().to_rfc3339();
-            let _ = sqlx::query(
-                r#"UPDATE sessions SET working_directory = ?, updated_at = ? WHERE id = ?"#,
-            )
-            .bind(&source_dir)
-            .bind(&now_rb)
-            .bind(session_id.to_string())
-            .execute(self.db.pool())
-            .await;
-            return Err(deepseekcode_types::DeepSeekCodeError::ContextUnavailable(format!(
-                "cannot move session to {new_directory}: mandatory context unavailable (Rule 6); move rolled back"
-            )));
-        }
         registry
             .ensure_epoch(&epochs, &self.sessions, session_id)
             .await?;

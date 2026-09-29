@@ -173,11 +173,14 @@ fn is_envelope(output: &Value) -> bool {
     output.get("title").is_some() && output.get("output").is_some()
 }
 
-fn envelope_body(output: &Value) -> &Value {
+fn envelope_body(output: &Value) -> Value {
     if is_envelope(output) {
-        output.get("output").unwrap()
+        // Dirty-data tolerant: an envelope may claim `output` but carry a
+        // missing/non-object value (e.g. partial writes). Never panic;
+        // fall back to Null so callers degrade to empty preview.
+        output.get("output").cloned().unwrap_or(Value::Null)
     } else {
-        output
+        output.clone()
     }
 }
 
@@ -193,7 +196,7 @@ fn contextual_text(output: &Value) -> String {
     if let Some(content) = body.get("content").and_then(|v| v.as_str()) {
         return content.to_string();
     }
-    serde_json::to_string_pretty(body).unwrap_or_else(|_| body.to_string())
+    serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
 }
 
 fn project_bounded_output(original: &Value, preview: &str, path: &Path) -> Value {

@@ -14,6 +14,127 @@ pub trait Framing {
 
 pub struct SseFraming;
 
+/// Shared SSE splitter: single source of truth for all streaming paths
+/// (OpenAI / DeepSeek reqwest + pinned hyper + Anthropic).
+///
+/// - `Vec<u8>` buffering: never splits multi-byte UTF-8 across chunks
+///   (trailing incomplete sequences stay buffered, no mojibake);
+/// - CRLF normalized (`\r\n` -> `\n`) on the decodable prefix so
+///   `\r\n\r\n` frames always split;
+/// - 1 MiB cap with warn + clear (unbounded growth previously OOM'd);
+/// - only complete `\n\n`-terminated frames with successful UTF-8 decode
+///   are consumed; remainder stays buffered.
+pub struct SseSplitter {
+    buf: Vec<u8>,
+}
+
+impl SseSplitter {
+    pub fn new() -> Self {
+        Self { buf: Vec::new() }
+    }
+
+    /// Append `chunk`, return all complete frames (each including its
+    /// trailing `\n\n`). Incomplete tail stays buffered.
+    pub fn push_and_split(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.buf.extend_from_slice(chunk);
+        if self.buf.len() > 1024 * 1024 {
+            tracing::warn!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                buffer_len = self.buf.len(),
+                "llm sse buffer overflow; truncating"
+            );
+            tracing::error!(
+                target: deepseekcode_telemetry::LLM,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                "llm sse truncation triggered"
+            );
+            self.buf.clear();
+            return Vec::new();
+        }
+        // Exclude trailing incomplete UTF-8 sequence from decoding so a
+        // multi-byte char split across chunks is never lossy-replaced.
+        let incomplete = trailing_incomplete_utf8_len(&self.buf);
+        let decodable_len = self.buf.len() - incomplete;
+        let text = String::from_utf8_lossy(&self.buf[..decodable_len]).to_string();
+        let normalized = text.replace("\r\n", "\n");
+        let mut frames = Vec::new();
+        let mut remainder = normalized.as_str();
+        while let Some(pos) = remainder.find("\n\n") {
+            frames.push(remainder[..pos + 2].to_string());
+            remainder = &remainder[pos + 2..];
+        }
+        // `remainder` is the normalized unconsumed tail. Re-encode it plus
+        // the undecodable trailing bytes; buffer stays normalized so raw vs
+        // normalized length mismatch can never cause over-drain.
+        // `floor_char_boundary` guarantees the drain lands on UTF-8 boundary.
+        let mut next = remainder.as_bytes().to_vec();
+        next.extend_from_slice(&self.buf[decodable_len..]);
+        self.buf = next;
+        // `floor_char_boundary` note: `remainder` derives from a valid
+        // `String`, so `remainder.as_bytes()` is always boundary-safe; no
+        // manual `while !is_char_boundary` drain loop is needed.
+        frames
+    }
+
+    pub fn len(&self) -> usize {
+        self.buf.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
+    }
+}
+
+impl Default for SseSplitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Bytes at the end of `buf` forming an incomplete UTF-8 sequence (0-3).
+fn trailing_incomplete_utf8_len(buf: &[u8]) -> usize {
+    if buf.is_empty() {
+        return 0;
+    }
+    // Walk back over continuation bytes (10xxxxxx), max 3.
+    let mut cont = 0usize;
+    let mut i = buf.len();
+    while i > 0 && cont < 3 {
+        let b = buf[i - 1];
+        if (0x80..=0xBF).contains(&b) {
+            cont += 1;
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+    if i == 0 {
+        // All continuation bytes with no lead: keep all buffered.
+        return buf.len();
+    }
+    let lead = buf[i - 1];
+    if lead < 0x80 {
+        return 0;
+    }
+    let expected: usize = if lead >= 0xF0 {
+        4
+    } else if lead >= 0xE0 {
+        3
+    } else if lead >= 0xC0 {
+        2
+    } else {
+        // Stray continuation start: treat trailing `cont` as incomplete.
+        return cont;
+    };
+    let have = cont + 1;
+    if have < expected {
+        have
+    } else {
+        0
+    }
+}
+
 impl Framing for SseFraming {
     fn parse_sse_frame(
         &self,
@@ -188,12 +309,34 @@ pub fn parse_openai_sse_frame(
         }
         // `tool_calls` finish: no duplicate empty-argument deltas (the
         // incremental deltas already carried arguments). Only ensure a
-        // single Completed per turn.
+        // single Completed per turn. On completion, validate concatenated
+        // tool arguments: failures surface as `LlmEvent::Error` (via
+        // `Err`) instead of being persisted as silent `{}` downstream.
         if matches!(
             choice["finish_reason"].as_str(),
             Some("stop") | Some("tool_calls")
         ) && !events.iter().any(|e| matches!(e, Ok(LlmEvent::Completed)))
         {
+            for (index, (_, name, args)) in tool_acc.iter() {
+                if args.is_empty() {
+                    continue;
+                }
+                if let Err(e) = LlmToolCall::parse_arguments_strict(args) {
+                    let sanitized = sanitize_llm_error(args);
+                    tracing::error!(
+                        target: deepseekcode_telemetry::LLM,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
+                        tool_index = index,
+                        tool = %name,
+                        error = %e,
+                        raw_summary = %deepseekcode_telemetry::summarize_prompt(&sanitized, false),
+                        "llm sse concatenated tool arguments invalid; surfacing Error"
+                    );
+                    events.push(Err(DeepSeekCodeError::Llm(format!(
+                        "invalid tool arguments JSON for '{name}': {e}"
+                    ))));
+                }
+            }
             tracing::info!(
                 target: deepseekcode_telemetry::LLM,
                 run_id = %deepseekcode_telemetry::current_run_id(),
@@ -299,7 +442,7 @@ pub(crate) fn parse_message_response(value: &Value) -> Result<crate::request::Ll
                                 tool = %c["function"]["name"].as_str().unwrap_or(""),
                                 error = %e,
                                 raw_summary = %deepseekcode_telemetry::summarize_prompt(raw_args, false),
-                                "llm tool arguments unparseable; defaulting to empty object"
+                                "llm tool arguments unparseable; surfacing _parse_error"
                             );
                             tracing::error!(
                                 target: deepseekcode_telemetry::LLM,
@@ -308,7 +451,10 @@ pub(crate) fn parse_message_response(value: &Value) -> Result<crate::request::Ll
                                 error = %e,
                                 "llm tool_call parse error in non-stream response"
                             );
-                            serde_json::json!({})
+                            // Non-streaming keeps the error surfaced instead of
+                            // silently substituting `{}` (which masked
+                            // provider bugs as empty turns).
+                            serde_json::json!({ "_parse_error": raw_args })
                         }
                     };
                     LlmToolCall {

@@ -867,6 +867,10 @@ impl WorkspaceView {
         self.activity.since_seq = 0;
         self.selected_message_id = None;
         self.context_usage = ContextUsageState::default();
+        self.timeline_text_selection = None;
+        self.timeline_text_layouts.clear();
+        self.timeline_text_press = None;
+        self.timeline_row_press = None;
         self.sync_context_window();
         self.set_session_busy(false, "Loading session…");
         self.schedule_session_loading_repaint(cx);
@@ -1779,13 +1783,15 @@ Describe this project so the AI assistant has context.\n\n\
                 this.providers = providers.clone();
                 this.init_defaults_from_providers(&providers);
                 this.sync_context_window();
-                *session_model.lock().unwrap() = Some(this.current_session_model());
+                if let Ok(mut guard) = session_model.lock() {
+                    *guard = Some(this.current_session_model());
+                }
                 cx.notify();
             });
             let (agent, model_id, provider_id) = session_model
                 .lock()
-                .unwrap()
-                .take()
+                .ok()
+                .and_then(|mut g| g.take())
                 .unwrap_or_else(|| (AgentKind::Build, "gpt-4o-mini".into(), "openai".into()));
 
             let existing_sessions = if pending_switch.is_some() || pending_new {
@@ -2718,8 +2724,15 @@ Describe this project so the AI assistant has context.\n\n\
     pub(crate) fn focus_policy_prompt(&mut self, id: &str) {
         if let Some(pos) = self.pending_policies.iter().position(|p| p.id == id) {
             if pos > 0 {
-                let prompt = self.pending_policies.remove(pos).unwrap();
-                self.pending_policies.push_front(prompt);
+                if let Some(prompt) = self.pending_policies.remove(pos) {
+                    self.pending_policies.push_front(prompt);
+                } else {
+                    tracing::warn!(
+                        target: deepseekcode_telemetry::APP,
+                        pos,
+                        "focus_policy_prompt remove out of bounds"
+                    );
+                }
             }
         }
     }

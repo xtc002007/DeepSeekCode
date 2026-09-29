@@ -21,8 +21,6 @@ use serde_json::Value;
 use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-#[allow(dead_code)]
-const READ_TIMEOUT: Duration = Duration::from_secs(120);
 const NON_STREAM_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn base_builder() -> reqwest::ClientBuilder {
@@ -121,41 +119,100 @@ pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 ///
 /// Order: `HTTPS_PROXY`/`https_proxy` -> `HTTP_PROXY`/`http_proxy` ->
 /// `ALL_PROXY`/`all_proxy` -> Windows system proxy (registry).
-/// Returns `None` for direct. Results are cached 60s so the Windows
-/// `reg query` helper (which spawns a thread + 5s recv timeout) never runs
-/// on the hot path per request (P0-5).
+/// Returns `None` for direct.
+///
+/// Hot path never blocks: env vars are read synchronously (cheap); the
+/// Windows `reg query` helper runs only on a background/helper thread with
+/// results cached 60s. Inside async contexts callers should prefer
+/// [`resolve_proxy_url_async`], which uses `spawn_blocking` instead of
+/// stalling a worker.
 pub fn resolve_proxy_url() -> Option<String> {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    struct Cache {
-        at: Instant,
-        value: Option<String>,
+    // Cheap env path first: never blocks.
+    if let Some(env) = resolve_proxy_url_from_env() {
+        return Some(env);
     }
-    static CACHE: OnceLock<std::sync::Mutex<Cache>> = OnceLock::new();
-    let lock = CACHE.get_or_init(|| {
-        std::sync::Mutex::new(Cache {
+    let cached = proxy_cache_get();
+    if let Some((fresh, value)) = cached {
+        if fresh {
+            return value;
+        }
+        // Stale: return stale immediately, refresh in background.
+        trigger_proxy_refresh_background();
+        return value;
+    }
+    // Cold with no cache: trigger background refresh, do not block worker.
+    // Outside a runtime (tests/startup) do one blocking load so first
+    // call still resolves.
+    if tokio::runtime::Handle::try_current().is_err() {
+        let fresh = resolve_proxy_url_uncached();
+        proxy_cache_set(fresh.clone());
+        return fresh;
+    }
+    trigger_proxy_refresh_background();
+    None
+}
+
+/// Async variant for hot paths: never blocks a worker; system-proxy lookup
+/// goes through `spawn_blocking`.
+pub async fn resolve_proxy_url_async() -> Option<String> {
+    if let Some(env) = resolve_proxy_url_from_env() {
+        return Some(env);
+    }
+    if let Some((fresh, value)) = proxy_cache_get() {
+        if fresh {
+            return value;
+        }
+    }
+    let fresh = tokio::task::spawn_blocking(resolve_proxy_url_uncached)
+        .await
+        .unwrap_or(None);
+    proxy_cache_set(fresh.clone());
+    fresh
+}
+
+/// Fire-and-forget prewarm at startup: populates the 60s cache off-worker.
+pub fn prewarm_proxy_cache() {
+    trigger_proxy_refresh_background();
+}
+
+use std::sync::OnceLock;
+use std::time::Instant;
+struct ProxyCache {
+    at: Instant,
+    value: Option<String>,
+}
+fn proxy_cache_static() -> &'static std::sync::Mutex<ProxyCache> {
+    static CACHE: OnceLock<std::sync::Mutex<ProxyCache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        std::sync::Mutex::new(ProxyCache {
             at: Instant::now()
                 .checked_sub(Duration::from_secs(61))
                 .unwrap_or_else(Instant::now),
             value: None,
         })
-    });
-    if let Ok(guard) = lock.lock() {
-        if guard.at.elapsed().as_secs() < 60 {
-            return guard.value.clone();
-        }
-    }
-    let fresh = resolve_proxy_url_uncached();
-    if let Ok(mut guard) = lock.lock() {
-        *guard = Cache {
+    })
+}
+fn proxy_cache_get() -> Option<(bool, Option<String>)> {
+    let guard = proxy_cache_static().lock().ok()?;
+    let fresh = guard.at.elapsed().as_secs() < 60;
+    Some((fresh, guard.value.clone()))
+}
+fn proxy_cache_set(value: Option<String>) {
+    if let Ok(mut guard) = proxy_cache_static().lock() {
+        *guard = ProxyCache {
             at: Instant::now(),
-            value: fresh.clone(),
+            value,
         };
     }
-    fresh
+}
+fn trigger_proxy_refresh_background() {
+    std::thread::spawn(|| {
+        let fresh = resolve_proxy_url_uncached();
+        proxy_cache_set(fresh);
+    });
 }
 
-fn resolve_proxy_url_uncached() -> Option<String> {
+fn resolve_proxy_url_from_env() -> Option<String> {
     for key in [
         "HTTPS_PROXY",
         "https_proxy",
@@ -167,9 +224,18 @@ fn resolve_proxy_url_uncached() -> Option<String> {
         if let Ok(v) = std::env::var(key) {
             let v = v.trim().to_string();
             if !v.is_empty() {
-                return normalize_proxy_url(&v);
+                if let Some(norm) = normalize_proxy_url(&v) {
+                    return Some(norm);
+                }
             }
         }
+    }
+    None
+}
+
+fn resolve_proxy_url_uncached() -> Option<String> {
+    if let Some(env) = resolve_proxy_url_from_env() {
+        return Some(env);
     }
     #[cfg(target_os = "windows")]
     if let Some(sys) = read_windows_system_proxy() {
@@ -189,9 +255,12 @@ fn normalize_proxy_url(raw: &str) -> Option<String> {
         format!("http://{t}")
     };
     // Validate scheme + host shape; reject garbage that would misdial.
+    // `socks://` is passed through to reqwest (which handles SOCKS); the
+    // pinned-IP path only uses http/https and skips SOCKS with a log.
     let lower = candidate.to_ascii_lowercase();
     if !(lower.starts_with("http://")
         || lower.starts_with("https://")
+        || lower.starts_with("socks://")
         || lower.starts_with("socks5://")
         || lower.starts_with("socks5h://"))
     {
@@ -310,9 +379,14 @@ pub fn transport_debug(e: &reqwest::Error) -> String {
     parts.join(" | caused by: ")
 }
 
+/// Only connection-level failures (`connect`/`timeout`) trigger
+/// auto→direct→proxy fallback. Request-builder, mid-stream body/decode, and
+/// interruption errors are NOT retried here: re-sending a POST after partial
+/// SSE delivery is not idempotent, and silent replay would duplicate tool
+/// effects. Mid-stream interruptions are surfaced to the runner, which owns
+/// idempotent replay (see `Runner::stream_provider_turn`).
 pub fn is_transport_error(e: &reqwest::Error) -> bool {
-    // Include mid-stream body/decode breaks so SSE disconnects can retry.
-    e.is_connect() || e.is_timeout() || e.is_request() || e.is_body() || e.is_decode()
+    e.is_connect() || e.is_timeout()
 }
 
 fn is_retryable_status(status: reqwest::StatusCode) -> bool {
@@ -481,8 +555,15 @@ fn retry_after_delay(resp: &Response, attempt: u32) -> Duration {
             if let Ok(secs) = s.parse::<u64>() {
                 return Duration::from_secs(secs.min(60));
             }
-            // HTTP-date form: delay until that time (capped).
-            if let Ok(date) = chrono::DateTime::parse_from_rfc2822(s) {
+            // HTTP-date form (IMF-fixdate, RFC7231): delay until that time.
+            // `parse_from_rfc2822` fails on IMF-fixdate; try both.
+            let http_date = chrono::DateTime::parse_from_rfc2822(s).ok().or_else(|| {
+                chrono::NaiveDateTime::parse_from_str(s, "%a, %d %b %Y %H:%M:%S GMT")
+                    .ok()
+                    .and_then(|naive| naive.and_local_timezone(chrono::Utc).single())
+                    .map(|dt| dt.fixed_offset())
+            });
+            if let Some(date) = http_date {
                 let now = chrono::Utc::now();
                 let delta = date.with_timezone(&chrono::Utc) - now;
                 let secs = delta.num_seconds().clamp(0, 60) as u64;

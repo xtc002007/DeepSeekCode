@@ -36,7 +36,7 @@ pub struct SessionExecution {
         >,
     >,
     child_sessions: Mutex<HashMap<SessionId, Vec<SessionId>>>,
-    drain_handles: Mutex<HashMap<SessionId, tokio::task::JoinHandle<()>>>,
+    drain_handles: Mutex<HashMap<SessionId, (tokio::task::Id, tokio::task::JoinHandle<()>)>>,
     /// Sessions whose current run cycle was cancelled by the user. Unlike the
     /// per-runner flag (reset on every `drain()` entry), this survives runner
     /// recreation between drain-loop iterations, so an interrupt can never be
@@ -206,8 +206,14 @@ impl SessionExecution {
         }
         let handle = self.spawn_drain(session_id);
         // Abort any stale finished handle before overwriting so detached
-        // tasks do not leak (P0-4).
-        if let Some(old) = self.drain_handles.lock().await.insert(session_id, handle) {
+        // tasks do not leak (P0-4). Store task Id for still-ours cleanup.
+        let id = handle.id();
+        if let Some((_, old)) = self
+            .drain_handles
+            .lock()
+            .await
+            .insert(session_id, (id, handle))
+        {
             old.abort();
         }
         tracing::info!(
@@ -308,6 +314,16 @@ impl SessionExecution {
                 // Drain finished: remove our own handle entry if it is still ours
                 // so `drain_handles` does not grow unbounded (P0-4). `drop_runner`
                 // / `wait_children` remove+await the live entry when present.
+                // Identity via task Id: never remove a newer drain started after us.
+                {
+                    let my_id = tokio::task::id();
+                    let mut handles = execution.drain_handles.lock().await;
+                    if let Some((stored_id, _)) = handles.get(&session_id) {
+                        if *stored_id == my_id {
+                            handles.remove(&session_id);
+                        }
+                    }
+                }
             },
         ))
     }
@@ -473,7 +489,7 @@ impl SessionExecution {
         for child_id in children {
             // Child tasks are spawned via `wake()` and tracked in
             // `drain_handles` like any other drain; no second map exists.
-            if let Some(handle) = self.drain_handles.lock().await.remove(&child_id) {
+            if let Some((_, handle)) = self.drain_handles.lock().await.remove(&child_id) {
                 let _ = handle.await;
             }
         }
@@ -540,8 +556,21 @@ impl SessionExecution {
         // the drain to actually stop before mutating session state, and the
         // interrupt above guarantees the drain exits at its next boundary
         // instead of hanging. Aborting mid-DB-write could leave partial rows.
-        if let Some(handle) = self.drain_handles.lock().await.remove(&session_id) {
-            let _ = handle.await;
+        if let Some((_, handle)) = self.drain_handles.lock().await.remove(&session_id) {
+            // Bound the wait: interrupt guarantees prompt exit, but a stuck
+            // provider stream (90s idle timeout) must not block move/delete
+            // for the full timeout. Abort after 5s grace.
+            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+                Ok(_) => {}
+                Err(_) => {
+                    tracing::warn!(
+                        target: deepseekcode_telemetry::SESSION,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
+                        session_id = %session_id,
+                        "drop_runner drain did not exit in 5s; aborting"
+                    );
+                }
+            }
         }
     }
 

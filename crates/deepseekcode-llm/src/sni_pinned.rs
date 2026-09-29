@@ -475,7 +475,7 @@ pub async fn post_pinned(
                     endpoint_host = %crate::redact_endpoint_for_log(endpoint),
                     "llm pinned direct debug"
                 );
-                if status < 200 || status >= 300 {
+                if !(200..300).contains(&status) {
                     tracing::warn!(
                         target: deepseekcode_telemetry::LLM,
                         run_id = %deepseekcode_telemetry::current_run_id(),

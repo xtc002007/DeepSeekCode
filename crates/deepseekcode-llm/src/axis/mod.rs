@@ -5,7 +5,7 @@ pub mod protocol;
 
 pub use auth::{ApiKeyAuth, Auth, BearerAuth, OAuthAuth, SigV4Auth};
 pub use endpoint::{AnthropicMessagesEndpoint, Endpoint, OpenAiChatEndpoint};
-pub use framing::{Framing, SseFraming};
+pub use framing::{Framing, SseFraming, SseSplitter};
 pub use protocol::{merge_extra, OpenAiChatProtocol, Protocol};
 
 /// Axis-layer lifecycle log (endpoint/protocol/auth routing observability).

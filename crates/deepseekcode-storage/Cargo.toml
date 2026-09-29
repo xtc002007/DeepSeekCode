@@ -4,6 +4,7 @@ description = "SQLite persistence and event store for DeepSeekCode"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 # Containers/CI without D-Bus/Keychain/macOS keychain build with
 # `--no-default-features` (falls back to encrypted SQLite only).

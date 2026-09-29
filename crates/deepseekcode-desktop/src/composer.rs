@@ -696,16 +696,24 @@ impl Element for PromptTextElement {
             window.paint_quad(selection);
         }
 
-        let line = prepaint.line.take().unwrap();
-        line.paint(
+        let Some(line) = prepaint.line.take() else {
+            debug_assert!(false, "composer prepaint line missing");
+            return;
+        };
+        if let Err(e) = line.paint(
             bounds.origin,
             window.line_height(),
             TextAlign::Left,
             None,
             window,
             cx,
-        )
-        .unwrap();
+        ) {
+            tracing::warn!(
+                target: deepseekcode_telemetry::APP,
+                error = %e,
+                "composer line paint failed"
+            );
+        }
 
         let show_cursor = self.input.read(cx).caret_visible;
         if focus_handle.is_focused(window) && show_cursor {

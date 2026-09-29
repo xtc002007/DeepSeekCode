@@ -12,11 +12,24 @@ const SECRET_PATTERNS: &[&str] = &[
     "Bearer ",
     "bearer ",
     "sk-",
+    "sk-ant-",
+    "ghp_",
+    "xoxb-",
     "api_key",
     "api-key",
+    "apikey",
+    "client_secret",
+    "refresh_token",
+    "private_key",
+    "secret",
+    "token",
+    "passwd",
     "password",
     "authorization:",
+    "authorization",
+    "x-api-key",
     "x-subscription-token",
+    "x-deepseekcode-ticket",
     "DEEPSEEKCODE_SERVER_PASSWORD",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -51,15 +64,27 @@ fn redact_with_patterns(value: &str, patterns: &[&str]) -> String {
                 break;
             };
             let idx = pos + rel;
-            if pattern.eq_ignore_ascii_case("sk-") {
+            if pattern.eq_ignore_ascii_case("sk-")
+                || pattern.eq_ignore_ascii_case("sk-ant-")
+                || pattern.eq_ignore_ascii_case("ghp_")
+                || pattern.eq_ignore_ascii_case("xoxb-")
+            {
                 let end = out[idx..]
                     .char_indices()
                     .skip(1)
                     .find(|(_, c)| !c.is_ascii_alphanumeric() && *c != '-' && *c != '_')
                     .map(|(i, _)| idx + i)
                     .unwrap_or(out.len());
-                out.replace_range(idx..end, "sk-[REDACTED]");
-                break;
+                let marker = if pattern.eq_ignore_ascii_case("sk-") {
+                    "sk-[REDACTED]"
+                } else {
+                    "[REDACTED]"
+                };
+                out.replace_range(idx..end, marker);
+                // Continue scanning the whole line (not break): one line may
+                // hold multiple keys.
+                pos = idx + marker.len();
+                continue;
             }
             if pattern.eq_ignore_ascii_case("bearer ") {
                 // Replace only the token (up to quote/whitespace/comma/brace).

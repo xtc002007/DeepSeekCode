@@ -40,6 +40,10 @@ packaging/desktop/windows/dist/
 logs/
 *.log
 
+# Clippy / diagnostic dumps (local only, never commit)
+clippy-full.txt
+clippy-*.txt
+
 # OS
 .DS_Store
 Thumbs.db

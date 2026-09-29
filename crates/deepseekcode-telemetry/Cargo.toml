@@ -4,6 +4,7 @@ description = "Unified logging, redaction, and diagnostic export for DeepSeekCod
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 deepseekcode-config = { workspace = true }

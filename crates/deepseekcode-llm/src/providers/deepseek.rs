@@ -186,7 +186,7 @@ pub async fn generate(
 ) -> Result<crate::request::LlmResponse> {
     let start = std::time::Instant::now();
     let resolved_early = resolve_base_url(base_url);
-    let endpoint_early = openai::chat_endpoint(Some(resolved_early.as_str()));
+    let endpoint_early = openai::chat_endpoint(Some(resolved_early.as_str()))?;
     let endpoint_host_early = crate::redact_endpoint_for_log(&endpoint_early);
     tracing::info!(
         target: deepseekcode_telemetry::LLM,
@@ -232,7 +232,7 @@ pub async fn generate(
     );
 
     let resolved = resolve_base_url(base_url);
-    let endpoint = openai::chat_endpoint(Some(resolved.as_str()));
+    let endpoint = openai::chat_endpoint(Some(resolved.as_str()))?;
     let endpoint_host = crate::redact_endpoint_for_log(&endpoint);
     let response = match crate::http_client::post_json_with_fallback(
         http, &endpoint, &api_key, &body, true,
@@ -323,14 +323,14 @@ pub async fn generate(
             let plain = openai::build_chat_body(request, false, None);
             let retry = crate::http_client::post_json_with_fallback(
                 http,
-                &openai::chat_endpoint(Some(resolved.as_str())),
+                &endpoint,
                 &api_key,
                 &plain,
                 true,
             )
             .await
             .map_err(|combined| {
-                let ep = openai::chat_endpoint(Some(resolved.as_str()));
+                let ep = endpoint.clone();
                 tracing::error!(
                     target: deepseekcode_telemetry::LLM,
                     run_id = %deepseekcode_telemetry::current_run_id(),
@@ -473,7 +473,7 @@ async fn handle_pinned_generate_response(
         let text = String::from_utf8_lossy(bytes).to_string();
         if mentions_deepseek_only_field(&text) {
             let plain = openai::build_chat_body(request, false, None);
-            let endpoint = openai::chat_endpoint(Some(resolved));
+            let endpoint = openai::chat_endpoint(Some(resolved))?;
             let (st, bd) = crate::sni_pinned::post_pinned(http, &endpoint, api_key, &plain)
                 .await
                 .map_err(DeepSeekCodeError::Llm)?;
@@ -502,7 +502,7 @@ async fn try_pinned_stream_400_retry(
         return Ok(None);
     }
     let plain = openai::build_chat_body(request, true, None);
-    let endpoint = openai::chat_endpoint(Some(resolved));
+    let endpoint = openai::chat_endpoint(Some(resolved))?;
     match crate::sni_pinned::stream_pinned(http, &endpoint, api_key, &plain).await {
         Ok(events) => Ok(Some(events)),
         Err(e2) => match e2.strip_prefix("HTTP ") {
@@ -588,7 +588,7 @@ pub async fn stream(
 ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent>> + Send>>> {
     let start = std::time::Instant::now();
     let resolved_early = resolve_base_url(base_url);
-    let endpoint_early = openai::chat_endpoint(Some(resolved_early.as_str()));
+    let endpoint_early = openai::chat_endpoint(Some(resolved_early.as_str()))?;
     let endpoint_host_early = crate::redact_endpoint_for_log(&endpoint_early);
     tracing::info!(
         target: deepseekcode_telemetry::LLM,
@@ -637,7 +637,7 @@ pub async fn stream(
     );
 
     let resolved = resolve_base_url(base_url);
-    let endpoint = openai::chat_endpoint(Some(resolved.as_str()));
+    let endpoint = openai::chat_endpoint(Some(resolved.as_str()))?;
     let endpoint_host = crate::redact_endpoint_for_log(&endpoint);
     let response =
         match crate::http_client::post_json_with_fallback(http, &endpoint, &api_key, &body, false)
@@ -756,14 +756,14 @@ pub async fn stream(
             let plain = openai::build_chat_body(request, true, None);
             let retry = crate::http_client::post_json_with_fallback(
                 http,
-                &openai::chat_endpoint(Some(resolved.as_str())),
+                &endpoint,
                 &api_key,
                 &plain,
                 false,
             )
             .await
             .map_err(|combined| {
-                let ep = openai::chat_endpoint(Some(resolved.as_str()));
+                let ep = endpoint.clone();
                 tracing::error!(
                     target: deepseekcode_telemetry::LLM,
                     run_id = %deepseekcode_telemetry::current_run_id(),
@@ -889,7 +889,7 @@ mod tests {
     fn default_base_url_has_no_v1_suffix() {
         assert_eq!(DEFAULT_BASE_URL, "https://api.deepseek.com");
         assert_eq!(
-            crate::providers::openai::chat_endpoint(Some(DEFAULT_BASE_URL)),
+            crate::providers::openai::chat_endpoint(Some(DEFAULT_BASE_URL)).unwrap(),
             "https://api.deepseek.com/chat/completions"
         );
     }
@@ -907,7 +907,8 @@ mod tests {
         assert_eq!(
             crate::providers::openai::chat_endpoint(Some(
                 normalize_deepseek_base_url("https://api.deepseek.com/v1").as_str()
-            )),
+            ))
+            .unwrap(),
             "https://api.deepseek.com/chat/completions"
         );
         // Non-DeepSeek URLs are untouched.

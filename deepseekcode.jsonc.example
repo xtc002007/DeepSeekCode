@@ -55,11 +55,9 @@
   "policy_mode": "interactive",
 
   "policy": {
-    "rules": {
-      "read": { "*": "permit", "*.env": "block" },
-      "write": { "*": "prompt" },
-      "bash": { "*": "prompt" }
-    }
+    "read": { "*": "permit", "*.env": "block" },
+    "edit": { "*": "prompt" },
+    "bash": { "*": "prompt" }
   },
 
   // Product-grade logging: run-<ulid>/ holds app.log (+.1 when rotated),

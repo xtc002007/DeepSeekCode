@@ -150,52 +150,108 @@ fn load_instruction_glob(project_dir: &str, pattern: &str, texts: &mut Vec<Strin
     }
 }
 
-/// Async GET with 5s timeout that never parks the executor. Source loaders
-/// run inside async runner tasks; P1-9 removed the `blocking` reqwest
-/// feature (deadlock risk), so all fetches go through the async client via
-/// `block_in_place` when called from sync contexts.
+/// Sync instruction-URL fetch used by the (sync) context loaders.
+///
+/// Lock-order / runtime contract: loaders run inside async runner tasks on
+/// either runtime flavor. `Handle::block_on` on a `current_thread` runtime
+/// from within an async context panics ("Cannot block the current thread"),
+/// so that path is eliminated: `current_thread` always offloads to a
+/// dedicated OS thread with its own runtime (never `h.block_on`).
+/// `MultiThread` may use `block_in_place`; no runtime at all uses a fresh
+/// one directly. Results are cached 5min so repeated `drain` turns do not
+/// refetch; call [`prefetch_instruction_urls`] at startup/reload to warm the
+/// cache asynchronously (loaders then read cache only on hit).
 pub(crate) fn blocking_http_get(url: &str) -> Result<String, String> {
-    let build_client = || {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .map_err(|e| e.to_string())
-    };
+    if let Some(cached) = instruction_url_cache_get(url) {
+        return Ok(cached);
+    }
+    let fetched = blocking_http_get_uncached(url)?;
+    instruction_url_cache_insert(url, fetched.clone());
+    Ok(fetched)
+}
+
+fn build_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+async fn http_get_async(url: &str) -> Result<String, String> {
+    let client = build_http_client()?;
+    let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("http {}", resp.status()));
+    }
+    resp.text().await.map_err(|e| e.to_string())
+}
+
+fn blocking_http_get_uncached(url: &str) -> Result<String, String> {
     let rt_handle = tokio::runtime::Handle::try_current().ok();
     match rt_handle {
         Some(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| {
-                h.block_on(async {
-                    let client = build_client()?;
-                    let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
-                    if !resp.status().is_success() {
-                        return Err(format!("http {}", resp.status()));
-                    }
-                    resp.text().await.map_err(|e| e.to_string())
-                })
-            })
+            tokio::task::block_in_place(|| h.block_on(http_get_async(url)))
         }
-        Some(h) => h.block_on(async {
-            let client = build_client()?;
-            let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
-            if !resp.status().is_success() {
-                return Err(format!("http {}", resp.status()));
-            }
-            resp.text().await.map_err(|e| e.to_string())
-        }),
+        Some(_) => {
+            // current_thread runtime: NEVER `h.block_on` here (panics when
+            // called from async context). Run the fetch on a dedicated OS
+            // thread with its own current-thread runtime.
+            let url_owned = url.to_string();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                rt.block_on(http_get_async(&url_owned))
+            })
+            .join()
+            .map_err(|_| "instruction URL fetch thread panicked".to_string())?
+        }
         None => {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .map_err(|e| e.to_string())?;
-            rt.block_on(async {
-                let client = build_client()?;
-                let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
-                if !resp.status().is_success() {
-                    return Err(format!("http {}", resp.status()));
-                }
-                resp.text().await.map_err(|e| e.to_string())
-            })
+            rt.block_on(http_get_async(url))
+        }
+    }
+}
+
+type UrlCache = std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>;
+
+fn instruction_url_cache() -> &'static UrlCache {
+    static CACHE: std::sync::OnceLock<UrlCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn instruction_url_cache_get(url: &str) -> Option<String> {
+    let guard = instruction_url_cache().lock().ok()?;
+    let (at, body) = guard.get(url)?;
+    if at.elapsed() > std::time::Duration::from_secs(300) {
+        return None;
+    }
+    Some(body.clone())
+}
+
+fn instruction_url_cache_insert(url: &str, body: String) {
+    if let Ok(mut guard) = instruction_url_cache().lock() {
+        guard.insert(url.to_string(), (std::time::Instant::now(), body));
+    }
+}
+
+/// Async prefetch for startup/reload paths: warms the URL cache without
+/// blocking the executor. Sync loaders then hit the cache.
+pub async fn prefetch_instruction_urls(urls: &[String]) {
+    for url in urls {
+        if instruction_url_cache_get(url).is_some() {
+            continue;
+        }
+        if let Ok(body) = http_get_async(url).await {
+            const MAX_REMOTE_CHARS: usize = 8_000;
+            let bounded: String = body.chars().take(MAX_REMOTE_CHARS).collect();
+            if !bounded.is_empty() {
+                instruction_url_cache_insert(url, bounded);
+            }
         }
     }
 }

@@ -35,10 +35,12 @@ pub fn agent_default_ruleset(agent: &AgentKind) -> PolicyRuleset {
 
 fn base_defaults() -> PolicyRuleset {
     vec![
+        // Fail-closed default: unknown tools prompt (never silent permit).
+        // Previously `*|*=>permit` was fail-open.
         PolicyRule {
             scope: "*".into(),
             pattern: "*".into(),
-            action: PolicyAction::Permit,
+            action: PolicyAction::Prompt,
         },
         PolicyRule {
             scope: "loop_guard".into(),
@@ -50,18 +52,73 @@ fn base_defaults() -> PolicyRuleset {
             pattern: "*".into(),
             action: PolicyAction::Prompt,
         },
+        // Sensitive paths: keep `~/` canonical form AND expanded absolute
+        // form (dual evaluation in `pattern_matches` covers HOME drift and
+        // startup-absolute staleness). Trailing `*` matches children.
         PolicyRule {
             scope: "outside_workspace".into(),
-            pattern: expand_ssh_gnupg("~/.ssh"),
+            pattern: "~/.ssh*".into(),
             action: PolicyAction::Block,
         },
         PolicyRule {
             scope: "outside_workspace".into(),
-            pattern: expand_ssh_gnupg("~/.gnupg"),
+            pattern: expand_ssh_gnupg("~/.ssh*"),
             action: PolicyAction::Block,
         },
+        PolicyRule {
+            scope: "outside_workspace".into(),
+            pattern: "~/.gnupg*".into(),
+            action: PolicyAction::Block,
+        },
+        PolicyRule {
+            scope: "outside_workspace".into(),
+            pattern: expand_ssh_gnupg("~/.gnupg*"),
+            action: PolicyAction::Block,
+        },
+        // Mutating scopes default to prompt (fail-closed).
+        PolicyRule {
+            scope: "bash".into(),
+            pattern: "*".into(),
+            action: PolicyAction::Prompt,
+        },
+        PolicyRule {
+            scope: "edit".into(),
+            pattern: "*".into(),
+            action: PolicyAction::Prompt,
+        },
+        PolicyRule {
+            scope: "write".into(),
+            pattern: "*".into(),
+            action: PolicyAction::Prompt,
+        },
+        PolicyRule {
+            scope: "apply_patch".into(),
+            pattern: "*".into(),
+            action: PolicyAction::Prompt,
+        },
+        // Read-only whitelist: permit without prompting.
         PolicyRule {
             scope: "read".into(),
+            pattern: "*".into(),
+            action: PolicyAction::Permit,
+        },
+        PolicyRule {
+            scope: "list".into(),
+            pattern: "*".into(),
+            action: PolicyAction::Permit,
+        },
+        PolicyRule {
+            scope: "glob".into(),
+            pattern: "*".into(),
+            action: PolicyAction::Permit,
+        },
+        PolicyRule {
+            scope: "grep".into(),
+            pattern: "*".into(),
+            action: PolicyAction::Permit,
+        },
+        PolicyRule {
+            scope: "question".into(),
             pattern: "*".into(),
             action: PolicyAction::Permit,
         },
@@ -79,6 +136,12 @@ fn base_defaults() -> PolicyRuleset {
             scope: "read".into(),
             pattern: "*.env.example".into(),
             action: PolicyAction::Permit,
+        },
+        // Fail-closed sentinel: unparsable inputs never permit via `*`.
+        PolicyRule {
+            scope: "*".into(),
+            pattern: "<unparsable>".into(),
+            action: PolicyAction::Prompt,
         },
     ]
 }

@@ -4,6 +4,7 @@ description = "Shared types, IDs, and errors for DeepSeekCode"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 # P1-9: `uuid` removed (unused; all IDs are ULID). This also shrinks every
 # downstream crate's compile graph.

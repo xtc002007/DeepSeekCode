@@ -4,6 +4,7 @@ description = "Configuration loading for DeepSeekCode"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 deepseekcode-types = { workspace = true }

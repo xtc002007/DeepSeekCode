@@ -10,6 +10,7 @@ pub mod tool_call;
 
 pub use client::LlmClient;
 pub use event::LlmEvent;
+pub use http_client::STREAM_IDLE_TIMEOUT;
 pub use overflow::is_context_overflow;
 pub use providers::deepseek::DEFAULT_BASE_URL as DEEPSEEK_DEFAULT_BASE_URL;
 pub use request::{LlmMessage, LlmRequest, LlmResponse, LlmRole, TokenUsage};
@@ -44,11 +45,28 @@ pub fn redact_endpoint_for_log(endpoint: &str) -> String {
         .rsplit('@')
         .next()
         .unwrap_or("");
-    let host = host_port
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    // IPv6-safe: `[::1]:443` must yield `::1`, not `[` (bracket-aware).
+    let host = if let Some(stripped) = host_port.strip_prefix('[') {
+        stripped
+            .split(']')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+    } else {
+        host_port
+            .split(':')
+            .next()
+            .unwrap_or("")
+            // Single-colon host:port -> host; bare IPv6 without brackets
+            // contains multiple colons -> keep full (no port to strip).
+            .to_ascii_lowercase()
+    };
+    let host = if host_port.matches(':').count() > 1 && !host_port.starts_with('[') {
+        // Bare IPv6 literal without port (e.g. `::1`): split would truncate.
+        host_port.to_ascii_lowercase()
+    } else {
+        host
+    };
     let host = if host.is_empty() {
         "unknown"
     } else {
