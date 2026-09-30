@@ -53,13 +53,298 @@ fn parse_blocks(source: &str) -> Vec<ParsedBlock> {
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
 
-    let parser = Parser::new_ext(source, options);
+    // Re-join the model's own hard wrapping BEFORE parsing, so the wrap
+    // points chosen by the provider never survive into the UI.
+    let reflowed = reflow_hard_wrapped(source);
+    let parser = Parser::new_ext(&reflowed, options);
     let mut ctx = ParseContext::new();
 
     for event in parser {
         ctx.handle(event);
     }
     ctx.finish()
+}
+
+/// Column width above which a line break is treated as a model hard-wrap
+/// artifact rather than authored structure. Measured in display columns
+/// (CJK = 2) so a 20-char Chinese line and a 40-char English line carry the
+/// same "this was column-wrapped" signal. Short lines (`1.`, `-`, a short
+/// authored sentence) always stand alone.
+const WRAP_ARTIFACT_MIN_COLUMNS: usize = 40;
+
+/// Display width in "columns" (CJK/fullwidth = 2, everything else = 1).
+fn display_width(text: &str) -> usize {
+    text.chars()
+        .map(|ch| {
+            if crate::selectable_text::is_wide_char(ch) {
+                2
+            } else {
+                1
+            }
+        })
+        .sum()
+}
+
+/// Fence delimiter (```` ``` ```` / `~~~`) if the line opens or closes one.
+fn fence_marker(text: &str) -> Option<String> {
+    let trimmed = text.trim_start();
+    for ch in ['`', '~'] {
+        let count = trimmed.chars().take_while(|c| *c == ch).count();
+        if count >= 3 {
+            return Some(ch.to_string().repeat(count));
+        }
+    }
+    None
+}
+
+/// Does this line start a new block (list, heading, quote, table, fence)?
+///
+/// Used to protect authored structure from reflow: `- item`, `1. item`,
+/// `> quote`, `| a | b |`, `# title`, `---` and fences always stand alone.
+fn starts_block(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if fence_marker(trimmed).is_some() {
+        return true;
+    }
+    if trimmed.starts_with('#') {
+        return true;
+    }
+    if trimmed.starts_with('>') {
+        return true;
+    }
+    if trimmed.starts_with('|') {
+        return true;
+    }
+    // Ordered / bullet list markers (also task lists `- [ ]`).
+    let bullet = trimmed.starts_with("- ")
+        || trimmed.starts_with("* ")
+        || trimmed.starts_with("+ ")
+        || trimmed.starts_with("-\t")
+        || trimmed.starts_with("*\t")
+        || trimmed.starts_with("+\t");
+    if bullet {
+        return true;
+    }
+    let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+    if digits > 0 {
+        let rest = &trimmed[digits..];
+        if (rest.starts_with('.') || rest.starts_with(')')) && rest[1..].starts_with([' ', '\t']) {
+            return true;
+        }
+    }
+    // Thematic break / setext underline.
+    if trimmed.chars().all(|c| matches!(c, '-' | '=' | '*' | '_')) && trimmed.len() >= 3 {
+        return true;
+    }
+    false
+}
+
+/// Re-join provider hard wrapping in LLM output.
+///
+/// Models emit long paragraphs already wrapped at a fixed column. CommonMark
+/// reads a single `\n` as a soft break, but chat surfaces must also treat it
+/// as a hard break (LLM output uses `\n` for real line structure) — so the
+/// model's arbitrary column boundaries would otherwise reach the screen and
+/// split words mid-token, producing orphan lines such as `过` / `。`.
+///
+/// Rules (all conservative — a wrong join loses a line break, a wrong split
+/// shows a broken word):
+/// - never touch fenced code, tables, or 4-space indented code;
+/// - never join a line that starts a new block;
+/// - never join after an explicit hard break (two trailing spaces or `\\`);
+/// - never join when the next line is a continuation marker (`*`, `_`, `|`) or
+///   an HTML tag — inline markdown would break across the join point;
+/// - only join a break whose previous line is long enough to have been
+///   column-wrapped.
+fn reflow_hard_wrapped(source: &str) -> String {
+    if !source.contains('\n') {
+        return source.to_string();
+    }
+    // Cheap reject: a document with no long lines is already structured.
+    let had_crlf = source.contains("\r\n");
+    let normalized = if had_crlf {
+        source.replace("\r\n", "\n")
+    } else {
+        source.to_string()
+    };
+    let lines: Vec<&str> = normalized.split('\n').collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut fence: Option<String> = None;
+    let mut in_table = false;
+    for line in lines {
+        let trimmed = line.trim();
+        let trimmed_start = line.trim_start();
+        let indent = line.len() - trimmed_start.len();
+
+        // --- fenced code: byte-exact, never reflowed -------------------
+        if let Some(marker) = fence_marker(trimmed_start) {
+            match &fence {
+                Some(open) if open.starts_with(&marker) => fence = None,
+                Some(_) => {}
+                None => fence = Some(marker),
+            }
+            out.push(line.to_string());
+            continue;
+        }
+        if fence.is_some() || indent >= 4 {
+            out.push(line.to_string());
+            continue;
+        }
+
+        // --- table rows: structure, not prose ---------------------------
+        let is_table_row = trimmed_start.starts_with('|');
+        if is_table_row {
+            in_table = true;
+        } else if in_table && !trimmed.is_empty() {
+            in_table = false;
+        }
+        if in_table {
+            out.push(line.to_string());
+            continue;
+        }
+
+        // Blank line ends the current paragraph: flush and keep the break.
+        if trimmed.is_empty() {
+            out.push(line.to_string());
+            continue;
+        }
+
+        // Authored structure never joins.
+        if starts_block(line) {
+            out.push(line.to_string());
+            continue;
+        }
+
+        // Try to re-join with the previous output line.
+        let joined = out.last().and_then(|prev| {
+            // Explicit hard break (Markdown: two+ trailing spaces, or `\`).
+            if prev.ends_with("  ") || prev.ends_with('\\') {
+                return None;
+            }
+            let prev_trim_end = prev.trim_end();
+            if prev_trim_end.is_empty() {
+                return None;
+            }
+            // The wrap point was real only if the previous line was long
+            // enough to have been column-wrapped.
+            if display_width(prev_trim_end) < WRAP_ARTIFACT_MIN_COLUMNS {
+                return None;
+            }
+            // A leading inline-continuation marker means the author wrapped
+            // deliberately so the marker keeps its content on the same line.
+            if starts_inline_continuation(trimmed) {
+                return None;
+            }
+            // Joining across an inline-code/emphasis boundary would strand
+            // the closing marker on a new line.
+            if has_dangling_inline_marker(prev_trim_end) || has_dangling_inline_marker(trimmed) {
+                return None;
+            }
+            Some(join_wrapped_lines(prev_trim_end, trimmed))
+        });
+        match joined {
+            Some(merged) => {
+                let n = out.len();
+                out[n - 1] = merged;
+            }
+            None => out.push(line.to_string()),
+        }
+    }
+    let mut result = out.join("\n");
+    if had_crlf {
+        result = result.replace('\n', "\r\n");
+    }
+    result
+}
+
+/// Join two prose lines, inserting a space only when both sides are Latin.
+///
+/// `很可能编译不` + `过` must become `很可能编译不过` (no space in CJK);
+/// `only produce valid` + `output.` must keep one space.
+fn join_wrapped_lines(left: &str, right: &str) -> String {
+    let left_last = left.chars().next_back();
+    let right_first = right.chars().next();
+    let need_space = match (left_last, right_first) {
+        (Some(l), Some(r)) => {
+            let l_wide = crate::selectable_text::is_wide_char(l);
+            let r_wide = crate::selectable_text::is_wide_char(r);
+            // Mixed CJK/Latin adjacency reads better with a space.
+            !(l_wide && r_wide)
+        }
+        _ => false,
+    };
+    if need_space {
+        format!("{left} {right}")
+    } else {
+        format!("{left}{right}")
+    }
+}
+
+/// A leading `*`, `_`, `|`, or HTML tag: the author broke here on purpose so
+/// the marker keeps its content on the same line.
+fn starts_inline_continuation(trimmed: &str) -> bool {
+    if trimmed.starts_with('|') {
+        return true;
+    }
+    if trimmed.starts_with('>') || trimmed.starts_with('#') {
+        return true;
+    }
+    trimmed.starts_with('<')
+}
+
+/// An inline marker left dangling at the end of a line (`**粗体` / `` `code ``
+/// / `*em`), i.e. the emphasis/code span continues on the next line.
+///
+/// Counts *delimiter runs* (maximal same-character sequences), not raw
+/// characters: `**` is one run, so `**粗` (one run, unclosed) is dangling while
+/// `**bold**` (two runs, closed) is not. Intraword markers such as the `_` in
+/// `MAX_HISTORY_MESSAGES` are not delimiters in CommonMark and are ignored, so
+/// snake_case identifiers never block re-flow.
+fn has_dangling_inline_marker(line: &str) -> bool {
+    let chars: Vec<char> = line.chars().collect();
+    // Count qualifying delimiter runs per marker character.
+    for marker in ['`', '*', '_'] {
+        let mut runs = 0usize;
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] != marker {
+                i += 1;
+                continue;
+            }
+            let run_start = i;
+            while i < chars.len() && chars[i] == marker {
+                i += 1;
+            }
+            let before = if run_start == 0 {
+                None
+            } else {
+                Some(chars[run_start - 1])
+            };
+            let after = chars.get(i).copied();
+            let intraword = matches!(before, Some(b) if is_word_byte(b))
+                && matches!(after, Some(a) if is_word_byte(a));
+            if intraword {
+                continue;
+            }
+            // A run of one `*` is a list bullet, not emphasis.
+            if marker == '*' && i - run_start == 1 && before.is_none() {
+                continue;
+            }
+            runs += 1;
+        }
+        if runs % 2 == 1 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Word byte for intraword-delimiter detection (ASCII letters/digits/`_`).
+fn is_word_byte(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 /// Parsed markdown tree. Every variant carries raw runs/text; rendering
@@ -951,23 +1236,20 @@ mod tests {
     use crate::selectable_text::is_browsable_url;
     use crate::theme::themes::dark::dark_tokens;
     use crate::theme::ThemeTokens;
-    use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
+    use pulldown_cmark::{Alignment, Event, Tag, TagEnd};
 
     fn test_theme() -> ThemeTokens {
         dark_tokens()
     }
 
-    /// Drive the pure parser, returning the data tree (no theme/view needed).
+    /// Drive the REAL render entry point (including the hard-wrap reflow
+    /// pre-pass), returning the data tree (no theme/view needed).
+    ///
+    /// NOTE: this must call `parse_blocks`, not a re-implemented parser —
+    /// a local duplicate silently skipped `reflow_hard_wrapped`, so every
+    /// reflow test would have passed while the UI still broke words.
     fn parse(source: &str) -> Vec<ParsedBlock> {
-        let mut options = Options::empty();
-        options.insert(Options::ENABLE_TABLES);
-        options.insert(Options::ENABLE_STRIKETHROUGH);
-        options.insert(Options::ENABLE_TASKLISTS);
-        let mut ctx = ParseContext::new();
-        for event in Parser::new_ext(source, options) {
-            ctx.handle(event);
-        }
-        ctx.finish()
+        super::parse_blocks(source)
     }
 
     fn is_heading(block: &ParsedBlock) -> bool {
@@ -1319,6 +1601,165 @@ mod tests {
             }
             other => panic!("expected paragraph, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn reflow_joins_model_hard_wrap_mid_word() {
+        // 截图问题：模型按列硬换行，`编译不` / `过` / `。` 被拆成孤行。
+        let source = concat!(
+            "1. **无法验证编译**: tsc 和 jest 在本机全部超时（各自 300s+ 被阻塞）。",
+            "teaching-context.ts 的改动引入了 MAX_HISTORY_MESSAGES / KEEP_RECENT_MESSAGES ",
+            "常量和 addToolRound，但 Message\n",
+            "类型还没有 toolCallId 字段（packages/agent-core/src/types.ts 的 Message 接口）",
+            "—— 当前代码处于类型不一致状态，很可能编译不\n",
+            "过\n",
+            "。\n"
+        );
+        let out = super::reflow_hard_wrapped(source);
+        // 全部三行必须合回一段，且 CJK 之间不插空格。
+        assert!(
+            out.contains("很可能编译不过。"),
+            "mid-word wrap not rejoined: {out:?}"
+        );
+        assert!(!out.contains("编译不\n过"), "orphan line survived: {out:?}");
+        assert!(!out.contains("但 Message\n类型"), "wrap survived: {out:?}");
+    }
+
+    #[test]
+    fn reflow_keeps_short_authored_line_breaks() {
+        // 短行是作者真实换行（`1.` / `**粗体**` / 短句），不得合并。
+        let source = "我必须向你们坦白一个关键情况：\n本次修复未能完成。\n请重试。\n";
+        assert_eq!(super::reflow_hard_wrapped(source), source);
+    }
+
+    #[test]
+    fn reflow_keeps_fenced_code_byte_exact() {
+        let source = "说明文字很长很长很长很长很长很长很长很长很长很长很长很长\n\
+                     ```rust\nlet x = 1;\nlet y = 2;\n```\n";
+        let out = super::reflow_hard_wrapped(source);
+        assert!(out.contains("let x = 1;\nlet y = 2;"), "{out:?}");
+    }
+
+    #[test]
+    fn reflow_keeps_table_rows() {
+        let source = "这是一段很长的说明文字用于测试表格不被合并的逻辑路径分支\n\
+                     | a | b |\n|---|---|\n| 1 | 2 |\n";
+        let out = super::reflow_hard_wrapped(source);
+        assert!(out.contains("| a | b |\n|---|---|\n| 1 | 2 |"), "{out:?}");
+    }
+
+    #[test]
+    fn reflow_inserts_space_between_latin_words() {
+        let source = "the tool registry resolves every name by a hardcoded mapping table value\n\
+                     that never learns the new ones at runtime\n";
+        let out = super::reflow_hard_wrapped(source);
+        assert!(out.contains("value that never"), "{out:?}");
+    }
+
+    #[test]
+    fn reflow_never_splits_dangling_inline_markers() {
+        // `**粗体` / `` `code `` 的闭合标记在下一行：合并会让闭合标记落到行首，
+        // 破坏强调与行内代码。intraword `_`（MAX_HISTORY_MESSAGES）不算标记。
+        let source =
+            "这是一段足够长的说明文字用来触发硬换行合并逻辑的阈值条件判断 **粗\n体** 收尾\n";
+        let out = super::reflow_hard_wrapped(source);
+        assert!(
+            out.contains("**粗\n体**"),
+            "dangling marker joined: {out:?}"
+        );
+
+        let code = "这是一段足够长的说明文字用来触发硬换行合并逻辑的阈值条件判断 MAX_HISTORY 变量 `na\nme` 收尾\n";
+        let out = super::reflow_hard_wrapped(code);
+        assert!(out.contains("`na\nme`"), "dangling code joined: {out:?}");
+    }
+
+    #[test]
+    fn reflow_treats_balanced_markers_as_joinable() {
+        // 闭合完整的 `**bold**` 可以在行首，不是悬挂标记 → 允许合并。
+        let source = "这是一段足够长的说明文字用来触发硬换行合并逻辑的阈值条件判断\n**bold continuation here**\n";
+        let out = super::reflow_hard_wrapped(source);
+        assert!(out.contains("判断 **bold continuation here**"), "{out:?}");
+    }
+
+    /// 截图原文（逐字），走真实渲染入口 `parse_blocks`。
+    ///
+    /// 这是唯一能捕获「reflow 存在但没接进渲染路径」的测试 —— 上一轮的
+    /// reflow 测试全部直接调用函数，因此集成层的回归无人发现。
+    #[test]
+    fn screenshot_document_has_no_orphan_wrapped_lines() {
+        let source = concat!(
+            "## 为什么我停下来\n",
+            "\n",
+            "按照系统指令：「If you make a mistake, acknowledge it and move on. ",
+            "Only produce valid output.」[Never fabricate results.]\n",
+            "\n",
+            "我面临三个不能忽视的风险:\n",
+            "\n",
+            "1. **无法验证编译**: tsc 和 jest 在本机全部超时（各自 300s+ 被阻塞）。",
+            "teaching-context.ts 的改动引入了 MAX_HISTORY_MESSAGES / ",
+            "KEEP_RECENT_MESSAGES 常量和 addToolRound，但 Message\n",
+            "   类型还没有 toolCallId 字段（packages/agent-core/src/types.ts 的 ",
+            "Message 接口）—— 当前代码处于类型不一致状态，很可能编译不\n",
+            "过\n",
+            "。\n",
+            "\n",
+            "2. **不能假装完成**: 如果我继续将「剩余文件」但实际写入失败。\n",
+        );
+        let blocks = parse(source);
+        // 收集所有段落文本，断言不存在孤立的「过」/「。」行。
+        let mut texts: Vec<String> = Vec::new();
+        for block in &blocks {
+            match block {
+                ParsedBlock::Paragraph(runs) | ParsedBlock::Heading { runs, .. } => {
+                    texts.push(runs.iter().map(|r| r.text.as_str()).collect());
+                }
+                ParsedBlock::List { items, .. } => {
+                    for item in items {
+                        for sub in item {
+                            if let ParsedBlock::Paragraph(runs) = sub {
+                                texts.push(runs.iter().map(|r| r.text.as_str()).collect());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let all = texts.join("\n");
+        assert!(
+            all.contains("很可能编译不过。"),
+            "mid-word wrap survived into blocks: {all:?}"
+        );
+        // 不得出现「单独成行的过 / 。」——即行首即为该字且行长极短。
+        for text in &texts {
+            for line in text.split('\n') {
+                let trimmed = line.trim();
+                assert!(
+                    !(trimmed == "过" || trimmed == "。"),
+                    "orphan line survived: {text:?}"
+                );
+            }
+        }
+        // 列表结构与第 2 项必须完好。
+        assert!(all.contains("不能假装完成"), "{all:?}");
+        // heading + 2 paragraphs + 1 list。
+        assert_eq!(blocks.len(), 4, "heading + paras + list: {all:?}");
+    }
+
+    #[test]
+    fn reflow_preserves_explicit_hard_break() {
+        // 行尾两空格 = Markdown 显式硬换行，必须保留。
+        let source = "这是一段足够长的说明文字用来触发硬换行合并逻辑的阈值条件判断  \n下一行\n";
+        let out = super::reflow_hard_wrapped(source);
+        assert!(out.contains("  \n下一行"), "{out:?}");
+    }
+
+    #[test]
+    fn reflow_keeps_list_structure() {
+        let source = "这是一段足够长的说明文字用来触发硬换行合并逻辑的阈值条件判断\n\
+                     - 第一项\n- 第二项\n";
+        let out = super::reflow_hard_wrapped(source);
+        assert!(out.contains("\n- 第一项\n- 第二项"), "{out:?}");
     }
 
     #[test]

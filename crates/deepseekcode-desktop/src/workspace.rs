@@ -40,8 +40,8 @@ use crate::logic::{
     classify_git_porcelain, estimate_tokens, extract_tool_path, find_todo_leaf_id_for_index,
     first_user_message_text, git_unified_diff, git_worktree_file_content,
     implement_prompt_from_plan_path, pick_latest_by_timestamp, revert_files_preview,
-    sessions_for_project, toggle_activity_group_expansion, token_usage_from_payload,
-    truncate_preview, ACTIVITY_ROW_HEIGHT_PX,
+    sessions_for_project, summarize_permission_request, toggle_activity_group_expansion,
+    token_usage_from_payload, truncate_preview, ACTIVITY_ROW_HEIGHT_PX,
 };
 use crate::multi_window::{engine_client_for, shared_engine, WindowManager};
 use crate::panel_resize::PanelResizeEdge;
@@ -2715,7 +2715,7 @@ Describe this project so the AI assistant has context.\n\n\
                     this.pending_policies.clear();
                     let total = pending.len();
                     for (index, req) in pending.into_iter().enumerate() {
-                        let detail = format_tool_input(&req.tool_name, &req.input);
+                        let detail = summarize_permission_request(&req.tool_name, &req.input);
                         this.push_policy_prompt(PolicyPromptState {
                             id: req.id.to_string(),
                             scope: req.scope,
@@ -2798,7 +2798,9 @@ Describe this project so the AI assistant has context.\n\n\
             .to_string();
         let scope = event.payload["scope"].as_str().unwrap_or(&tool).to_string();
         let input = event.payload.get("input").cloned().unwrap_or_default();
-        let detail = format_tool_input(&tool, &input);
+        // Concise: the dock asks "may this run?", so only the decision-relevant
+        // facts belong here. Full payload stays in the detail panel.
+        let detail = summarize_permission_request(&tool, &input);
         let patterns = event.payload["patterns"]
             .as_array()
             .map(|arr| {
@@ -3242,6 +3244,12 @@ Describe this project so the AI assistant has context.\n\n\
                 let error = event.payload["error"].as_str().unwrap_or("").to_string();
                 self.pending_policies.clear();
                 self.policy_reject_expanded = false;
+                self.policy_patterns_expanded = false;
+                // Must also clear a pending QUESTION: `composer_blocked()`
+                // ORs both flags, so a surviving question pinned
+                // `composer_blocked()` to true forever and left the composer
+                // permanently unclickable with no way to recover but reloading.
+                self.pending_question = None;
                 if let Some(session_id) = event.session_id {
                     self.active_session_ids.remove(&session_id);
                 }
@@ -3539,32 +3547,70 @@ Describe this project so the AI assistant has context.\n\n\
         cx.notify();
     }
 
+    /// Abort the running task.
+    ///
+    /// The UI is unblocked **locally and immediately** — pending permission
+    /// prompts and questions are dropped and `session_busy` clears on the same
+    /// tick. Previously the handler only flipped a status string and relied
+    /// entirely on an SSE `SessionInterrupted` to finish the job, so any stop
+    /// the server answered with a bare `200` (session not in the active drain,
+    /// e.g. the `PromptAdmitted`→`wake()` admission window) left the composer
+    /// pinned to "Stopping…" with a stop button that re-issued the same no-op.
     pub(crate) fn interrupt_session(&mut self, cx: &mut Context<Self>) {
         let Some(session_id) = self.session_id else {
+            self.composer_error = Some("No active session to stop.".into());
+            self.set_session_busy(false, "Ready");
+            cx.notify();
             return;
         };
-        self.set_session_busy(true, "Stopping…");
+        tracing::info!(
+            target: deepseekcode_telemetry::DESKTOP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %session_id,
+            pending_policies = self.pending_policies.len(),
+            pending_question = self.pending_question.is_some(),
+            "interrupt requested"
+        );
+        // Local unblock — never leave the user staring at a dead composer.
+        self.pending_policies.clear();
+        self.policy_reject_expanded = false;
+        self.policy_patterns_expanded = false;
+        self.pending_question = None;
+        self.set_session_busy(false, "Stopping…");
+        cx.notify();
+
         let client_slot = Arc::clone(&self.client);
         cx.spawn(async move |view, cx| {
             let client = lock_sdk_client(&client_slot).await;
-            if let Some(client) = client {
-                if let Err(e) = client.interrupt(session_id).await {
-                    tracing::error!(
-                        target: deepseekcode_telemetry::DESKTOP,
-                            run_id = %deepseekcode_telemetry::current_run_id(),
-                        session_id = %session_id,
-                        error = %e,
-                        "interrupt failed"
+            let Some(client) = client else {
+                // Previously a silent no-op: no request, no status change.
+                let _ = view.update(cx, |this, cx| {
+                    this.composer_error = Some(
+                        "Could not reach the agent to stop the task. Check the server connection."
+                            .into(),
                     );
-                    let _ = view.update(cx, |this, cx| {
-                        this.set_session_busy(false, "Error");
-                        cx.notify();
-                    });
-                }
+                    this.set_session_busy(false, "Error");
+                    cx.notify();
+                });
+                return;
+            };
+            if let Err(e) = client.interrupt(session_id).await {
+                tracing::error!(
+                    target: deepseekcode_telemetry::DESKTOP,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    session_id = %session_id,
+                    error = %e,
+                    "interrupt failed"
+                );
+                let _ = view.update(cx, |this, cx| {
+                    // Surface the reason: the header alone said only "Error".
+                    this.composer_error = Some(format!("Stop failed: {e}"));
+                    this.set_session_busy(false, "Error");
+                    cx.notify();
+                });
             }
         })
         .detach();
-        cx.notify();
     }
 
     pub(crate) fn select_timeline_message(
@@ -4521,9 +4567,10 @@ Describe this project so the AI assistant has context.\n\n\
         if id.is_empty() {
             return;
         }
-        let known = self.providers.iter().any(|p| {
-            p.id == provider_id && p.models.iter().any(|m| m.id == id)
-        });
+        let known = self
+            .providers
+            .iter()
+            .any(|p| p.id == provider_id && p.models.iter().any(|m| m.id == id));
         if !known
             && !self
                 .custom_models
@@ -4537,7 +4584,8 @@ Describe this project so the AI assistant has context.\n\n\
             });
             self.persist_preferences();
             self.apply_custom_models();
-            self.custom_model_input.update(cx, |input, cx| input.clear(cx));
+            self.custom_model_input
+                .update(cx, |input, cx| input.clear(cx));
         }
         self.set_model(&id, &id, provider_id, cx);
     }

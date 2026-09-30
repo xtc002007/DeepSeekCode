@@ -251,9 +251,14 @@ fn text_hash(text: &str) -> u64 {
     hash
 }
 
-fn is_cjk(ch: char) -> bool {
+/// Fullwidth / wide character: occupies two terminal columns.
+///
+/// Drives both wrap breaking (`is_cjk`) and column-width measurement in
+/// [`crate::markdown`] when re-joining provider hard wrapping.
+pub(crate) fn is_wide_char(ch: char) -> bool {
     matches!(ch,
-        '\u{2000}'..='\u{206F}' // General punctuation: — … “ ” ‘ ’ · ～
+        '\u{1100}'..='\u{115F}' // Hangul Jamo
+        | '\u{2000}'..='\u{206F}' // General punctuation: — … “ ” ‘ ’ · ～
         | '\u{2190}'..='\u{21FF}' // Arrows: → ⇒
         | '\u{2600}'..='\u{27BF}' // Symbols/dingbats: ❌ ✅ ● ◆ … (emoji-safe breakable)
         | '\u{2E80}'..='\u{2EFF}' // CJK radicals supplement
@@ -261,14 +266,25 @@ fn is_cjk(ch: char) -> bool {
         | '\u{3000}'..='\u{303F}' // CJK symbols: 、 。 〈 〉 《 》 「 」 『 』 …
         | '\u{3040}'..='\u{30FF}' // Hiragana/Katakana
         | '\u{3100}'..='\u{312F}' // Bopomofo
+        | '\u{31A0}'..='\u{31BF}' // Bopomofo extended
         | '\u{3200}'..='\u{32FF}' // Enclosed CJK
         | '\u{3400}'..='\u{4DBF}' // Ext A
         | '\u{4E00}'..='\u{9FFF}' // Unified ideographs
+        | '\u{A000}'..='\u{A4CF}' // Yi
         | '\u{AC00}'..='\u{D7AF}' // Hangul syllables
         | '\u{F900}'..='\u{FAFF}' // Compatibility ideographs
+        | '\u{FE10}'..='\u{FE1F}' // Vertical forms
         | '\u{FE30}'..='\u{FE4F}' // Compatibility forms
         | '\u{FF00}'..='\u{FFEF}' // Fullwidth ASCII/punct
+        | '\u{1F300}'..='\u{1FAFF}' // Emoji & symbols
         | '\u{20000}'..='\u{2FA1F}') // Ext B–F + compat supplement
+}
+
+/// A wide character is also a legal line-break opportunity (CJK typography
+/// breaks between ideographs). ASCII breaks come from whitespace/punctuation
+/// rules in [`breakable_before`].
+fn is_cjk(ch: char) -> bool {
+    is_wide_char(ch)
 }
 
 fn is_word_char(ch: char) -> bool {
@@ -507,6 +523,9 @@ fn breakable_before(text: &str, at: usize) -> bool {
             if n.is_whitespace() {
                 return false;
             }
+            // 避头尾: closing punctuation must not begin a line; opening
+            // punctuation must not end one. Breaking here would strand `。`
+            // alone on its own line (the reported orphan).
             if is_closing_punct(n) || is_opening_punct(p) {
                 return false;
             }
@@ -525,6 +544,15 @@ fn breakable_before(text: &str, at: usize) -> bool {
 }
 
 /// Greedy wrap of one shaped source line into byte ranges (grapheme-safe).
+///
+/// Two invariants beyond plain greedy filling:
+/// 1. **No forbidden break** — a break is only taken where
+///    [`breakable_before`] allows it. Closing punctuation never starts a
+///    line and opening punctuation never ends one.
+/// 2. **No single-grapheme stall** — when the fitted range contains no legal
+///    break (an unbreakable token wider than the column), the line is split at
+///    the largest fitting boundary instead of collapsing to one grapheme per
+///    line, which rendered as a vertical single-character column.
 fn wrap_ranges(line: &ShapedLine, text: &str, width: Pixels) -> Vec<(usize, usize)> {
     if text.is_empty() {
         return Vec::new();
@@ -558,28 +586,39 @@ fn wrap_ranges(line: &ShapedLine, text: &str, width: Pixels) -> Vec<(usize, usiz
                 hi = mid - 1;
             }
         }
-        // Snap back to a break opportunity. When the fitted range holds
-        // no preferred break (overlong ASCII token like
-        // `(tool-registry.ts:34)` or `toolRegistry.resolveForStep()`),
-        // force-split at the largest fitting boundary (`best`) — never
-        // collapse to a single grapheme, which rendered as the vertical
-        // one-char-per-line column. Only when nothing fits at all
-        // (`best == si`) do we emit one grapheme to guarantee progress.
+        // Snap back to the nearest legal break inside the fitted range.
         let fitted = best.max(si + 1);
         let mut bi = fitted;
         while bi > si + 1 && !breakable_before(text, bounds[bi]) {
             bi -= 1;
         }
-        // No preferred break inside the fitted range: fall back to the
-        // full-width split instead of a single char.
+        // No legal break inside the fitted range (overlong unbreakable
+        // token): split at the full fitted width rather than stalling to a
+        // single grapheme per line.
         if bi == si + 1 && !breakable_before(text, bounds[bi]) {
             bi = fitted;
+        }
+        // Even then, a split that would strand closing punctuation on the
+        // next line is walked back one grapheme when the remainder allows.
+        if bi > si + 1 {
+            while bi > si + 1 && text[bounds[bi]..].starts_with(forbidden_line_leader()) {
+                bi -= 1;
+            }
         }
         let end = bounds[bi];
         out.push((start, end));
         si = bi;
     }
     out
+}
+
+/// Characters that must never begin a rendered line (避头尾 line-head rule).
+fn forbidden_line_leader() -> &'static [char] {
+    &[
+        '\u{3002}', '\u{FF0C}', '\u{3001}', '\u{FF1B}', '\u{FF1A}', '\u{FF1F}', '\u{FF01}',
+        '\u{FF09}', '\u{300D}', '\u{300F}', '\u{300B}', '\u{201D}', '\u{2019}', ')', ']', '}', ',',
+        '.', ';', ':', '?', '!',
+    ]
 }
 
 pub(crate) struct SelectableText {
@@ -1336,9 +1375,10 @@ mod tests {
     // NOTE: never `use super::*` here — the parent's `use gpui::*` would pull
     // gpui's `test` module into scope and break `#[test]` resolution.
     use super::{
-        breakable_before, collect_selection_text, is_break_after_punct, is_cjk, is_closing_punct,
-        is_opening_punct, normalize_range, selection_range_for_block, snap_to_grapheme,
-        word_bounds_at, TextBlockLayout, TimelineTextSelection,
+        breakable_before, collect_selection_text, forbidden_line_leader, is_break_after_punct,
+        is_cjk, is_closing_punct, is_opening_punct, is_wide_char, normalize_range,
+        selection_range_for_block, snap_to_grapheme, word_bounds_at, TextBlockLayout,
+        TimelineTextSelection,
     };
 
     #[test]
@@ -1519,5 +1559,33 @@ mod tests {
         let text = "过滤 → LLM";
         let l = text.find('L').unwrap();
         assert!(breakable_before(text, l));
+    }
+
+    #[test]
+    fn forbidden_line_leader_never_starts_a_rendered_line() {
+        // 避头尾: the wrap walk-back must refuse these as line leaders, which
+        // is what stranded a lone `。` on its own line in the report.
+        for ch in [
+            '。', '，', '、', '；', '：', '？', '！', '）', '》', '」', '’', '”', ')', ',', '.',
+        ] {
+            assert!(
+                forbidden_line_leader().contains(&ch),
+                "missing forbidden line leader: {ch}"
+            );
+        }
+        // A break before one of these is never legal.
+        let text = "编译不过。";
+        let at = text.find('。').unwrap();
+        assert!(!breakable_before(text, at));
+    }
+
+    #[test]
+    fn wide_char_detection_covers_cjk_and_emoji() {
+        for ch in ['中', '。', '，', 'あ', '한', '→', '❌', '，'] {
+            assert!(is_wide_char(ch), "expected wide: {ch}");
+        }
+        for ch in ['a', 'Z', '1', ' ', '-', '.'] {
+            assert!(!is_wide_char(ch), "expected narrow: {ch}");
+        }
     }
 }

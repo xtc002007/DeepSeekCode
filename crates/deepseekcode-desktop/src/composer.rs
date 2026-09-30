@@ -928,6 +928,13 @@ impl ComposerView {
         } else {
             crate::ui::icon::IconName::ArrowRight
         };
+        // Stop must NEVER be gated on `input_blocked`: a run waiting on a
+        // permission/question prompt is exactly when the user needs to abort.
+        // Gating it made the square inert (`opacity(0.45)`, click returned),
+        // which is the reported "stop does nothing" failure.
+        // `composer_button_action` owns the rule and is unit-tested.
+        let button_action = crate::logic::composer_button_action(session_busy, input_blocked);
+        let send_interactive = button_action != crate::logic::ComposerAction::None;
         let send_bg = if session_busy {
             theme.error
         } else if input_blocked {
@@ -950,7 +957,7 @@ impl ComposerView {
             .size(px(28.))
             .rounded_full()
             .bg(send_bg)
-            .when(!input_blocked, |el| {
+            .when(send_interactive, |el| {
                 el.cursor_pointer().hover(|s| {
                     s.bg(if session_busy {
                         theme.error
@@ -964,18 +971,13 @@ impl ComposerView {
                     })
                 })
             })
-            .when(input_blocked, |el| el.opacity(0.45))
+            .when(!send_interactive, |el| el.opacity(0.45))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    if input_blocked {
-                        return;
-                    }
-                    if this.session_busy {
-                        this.interrupt_session(cx);
-                    } else {
-                        this.submit_prompt(cx);
-                    }
+                cx.listener(move |this, _, _, cx| match button_action {
+                    crate::logic::ComposerAction::Stop => this.interrupt_session(cx),
+                    crate::logic::ComposerAction::Send => this.submit_prompt(cx),
+                    crate::logic::ComposerAction::None => {}
                 }),
             )
             .child(crate::ui::icon::render_icon_rgba(

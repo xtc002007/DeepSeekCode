@@ -713,6 +713,293 @@ pub fn find_latest_todo_leaf_id(
     last
 }
 
+/// Compact one-line preview of a text payload for a permission summary.
+///
+/// Keeps the first non-empty line so a multi-line file body collapses to
+/// something recognizable instead of dumping hundreds of characters.
+fn first_line_preview(text: &str, max_chars: usize) -> String {
+    let line = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    truncate_preview(line, max_chars)
+}
+
+/// Line/byte size of a text payload, e.g. `42 lines · 1.8 KB`.
+fn size_summary(text: &str) -> String {
+    let lines = if text.is_empty() {
+        0
+    } else {
+        text.lines().count()
+    };
+    let bytes = text.len();
+    format!("{lines} lines · {}", human_bytes(bytes))
+}
+
+fn human_bytes(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    if bytes < KB as usize {
+        format!("{bytes} B")
+    } else {
+        let value = (bytes as f64 / KB / 1024.0 * 10.0).round() / 10.0;
+        format!("{value:.1} KB")
+    }
+}
+
+/// Files touched by a unified diff, in order, de-duplicated.
+///
+/// A `--- a/x` / `+++ b/x` pair names ONE file, so the two header lines are
+/// paired: the new path wins, and the old path is used only for deletions
+/// (`+++ /dev/null`). Matching either side independently reported rename
+/// pairs as two files (`old.txt` and `new.txt`).
+fn patch_targets(patch: &str) -> Vec<String> {
+    fn clean(raw: &str) -> Option<String> {
+        let path = raw.split('\t').next().unwrap_or("").trim();
+        let path = path
+            .strip_prefix("b/")
+            .or_else(|| path.strip_prefix("a/"))
+            .unwrap_or(path);
+        if path.is_empty() || path == "/dev/null" {
+            None
+        } else {
+            Some(path.to_string())
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut pending_old: Option<String> = None;
+    let mut add = |out: &mut Vec<String>, path: String| {
+        if !out.iter().any(|p| *p == path) {
+            out.push(path);
+        }
+    };
+    for line in patch.lines() {
+        if let Some(raw) = line.strip_prefix("--- ") {
+            pending_old = clean(raw);
+        } else if let Some(raw) = line.strip_prefix("+++ ") {
+            // New path when present, else the old path (pure deletion).
+            let path = clean(raw).or_else(|| pending_old.clone());
+            if let Some(path) = path {
+                add(&mut out, path);
+            }
+            pending_old = None;
+        }
+    }
+    out
+}
+
+fn hunk_count(patch: &str) -> usize {
+    patch.lines().filter(|l| l.starts_with("@@")).count()
+}
+
+/// Concise, decision-relevant summary of a permission request.
+///
+/// The permission dock asks one question — "may this run?" — so it must show
+/// only the facts needed to answer: what action, on which target, changing
+/// what. It must NOT dump the tool payload: a `write`/`edit` of a real source
+/// file carries hundreds to thousands of characters of file content, which
+/// buried the actual request (and pushed the decision buttons off-screen).
+///
+/// Full tool input remains available in the activity detail panel
+/// ([`format_tool_input`]) for deliberate drill-down.
+pub fn summarize_permission_request(tool: &str, input: &Value) -> String {
+    let input = &deepseekcode_types::normalize_tool_arguments(input);
+    let str_field = |key: &str| input[key].as_str().unwrap_or("").to_string();
+    let path = str_field("path");
+    let mut lines: Vec<String> = Vec::new();
+    let mut push = |line: String| lines.push(line);
+
+    match tool {
+        "bash" => {
+            let command = str_field("command");
+            // The command IS the decision; show it in full but bounded.
+            push(truncate_preview(command.trim(), 400));
+        }
+        "read" | "list" => {
+            if !path.is_empty() {
+                push(format!("path: {path}"));
+            }
+        }
+        "write" => {
+            if !path.is_empty() {
+                push(format!("path: {path}"));
+            }
+            let content = str_field("content");
+            if !content.is_empty() {
+                push(format!("content: {}", size_summary(&content)));
+                push(format!("first line: {}", first_line_preview(&content, 80)));
+            }
+        }
+        "edit" => {
+            if !path.is_empty() {
+                push(format!("path: {path}"));
+            }
+            let old = str_field("old_string");
+            let new = str_field("new_string");
+            if !old.is_empty() || !new.is_empty() {
+                let old_lines = if old.is_empty() {
+                    0
+                } else {
+                    old.lines().count()
+                };
+                let new_lines = if new.is_empty() {
+                    0
+                } else {
+                    new.lines().count()
+                };
+                push(format!("replace {old_lines} line(s) with {new_lines}"));
+            }
+            if !old.is_empty() {
+                push(format!("match: {}", first_line_preview(&old, 80)));
+            }
+            if !new.is_empty() {
+                push(format!("insert: {}", first_line_preview(&new, 80)));
+            }
+        }
+        "apply_patch" => {
+            let patch = str_field("patch");
+            let targets = patch_targets(&patch);
+            let hunks = hunk_count(&patch);
+            if targets.is_empty() {
+                push(format!("patch: {hunks} hunk(s) · {}", size_summary(&patch)));
+            } else {
+                push(format!(
+                    "patch: {} file(s) · {hunks} hunk(s)",
+                    targets.len()
+                ));
+                for target in targets.iter().take(6) {
+                    push(format!("- {target}"));
+                }
+                if targets.len() > 6 {
+                    push(format!("- … {} more", targets.len() - 6));
+                }
+            }
+        }
+        "grep" => {
+            push(format!(
+                "pattern: {}",
+                truncate_preview(&str_field("pattern"), 120)
+            ));
+            let scope = if path.is_empty() {
+                ".".to_string()
+            } else {
+                path
+            };
+            push(format!("path: {scope}"));
+        }
+        "glob" => {
+            let pattern = input["pattern"]
+                .as_str()
+                .or_else(|| input["glob_pattern"].as_str())
+                .unwrap_or("*");
+            push(format!("pattern: {pattern}"));
+        }
+        "webfetch" => push(format!("url: {}", truncate_preview(&str_field("url"), 200))),
+        "websearch" => push(format!(
+            "query: {}",
+            truncate_preview(&str_field("query"), 120)
+        )),
+        "skill" => push(format!(
+            "skill: {}",
+            truncate_preview(&str_field("name"), 80)
+        )),
+        "task" => {
+            push(format!("agent: {}", str_field("agent")));
+            let prompt = str_field("prompt");
+            if !prompt.is_empty() {
+                push(format!("task: {}", first_line_preview(&prompt, 100)));
+            }
+        }
+        "question" => {
+            let question = input["question"]
+                .as_str()
+                .or_else(|| input["prompt"].as_str())
+                .unwrap_or("");
+            push(first_line_preview(question, 200));
+        }
+        "plan_complete" | "plan.complete" => {
+            push(format!(
+                "title: {}",
+                truncate_preview(&str_field("title"), 100)
+            ));
+        }
+        "todowrite" | "todo_write" => {
+            let todos = input["todos"].as_array().cloned().unwrap_or_default();
+            let total = todos.len();
+            let done = todos
+                .iter()
+                .filter(|t| {
+                    t.get("status")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.eq_ignore_ascii_case("completed") || s == "done")
+                        .unwrap_or(false)
+                })
+                .count();
+            push(format!("todos: {total} total · {done} done"));
+            if let Some(first) = todos
+                .first()
+                .and_then(|t| t.get("content"))
+                .and_then(|c| c.as_str())
+            {
+                push(format!("first: {}", truncate_preview(first, 80)));
+            }
+        }
+        "todoread" | "todo_read" => push("read todo list".into()),
+        "lsp" => push(format!(
+            "operation: {}",
+            truncate_preview(&str_field("operation"), 80)
+        )),
+        _ => {
+            // An empty payload carries no information; printing `{}` (or a
+            // long blob) would just add noise to the decision prompt.
+            let is_empty = match input {
+                Value::Null => true,
+                Value::Object(map) => map.is_empty(),
+                _ => false,
+            };
+            if !is_empty {
+                let pretty =
+                    serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
+                // Unknown tools stay inspectable, but never unbounded.
+                push(truncate_preview(pretty.trim(), 300));
+            }
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push("(no details)".into());
+    }
+    lines.join("\n")
+}
+
+/// What the composer's footer button does when clicked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComposerAction {
+    /// Abort the running task.
+    Stop,
+    /// Submit the prompt.
+    Send,
+    /// Nothing — a permission/question prompt owns the composer.
+    None,
+}
+
+/// Resolve the composer footer button action.
+///
+/// The invariant that matters: **stop is never gated on `input_blocked`.** A
+/// run parked on a permission or question prompt is precisely when the user
+/// needs to abort, yet the guard used to swallow the click first, leaving an
+/// inert square (greyed out, `on_mouse_down` returning immediately) while the
+/// task kept running. Gating applies to *send* only.
+pub fn composer_button_action(session_busy: bool, input_blocked: bool) -> ComposerAction {
+    if session_busy {
+        ComposerAction::Stop
+    } else if input_blocked {
+        ComposerAction::None
+    } else {
+        ComposerAction::Send
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -725,6 +1012,104 @@ mod tests {
         let out = truncate_preview(&long, 10);
         assert!(out.ends_with('…'));
         assert!(out.chars().count() <= 11);
+    }
+
+    #[test]
+    fn permission_summary_never_dumps_write_content() {
+        // 截图问题：edit/write 把整个文件内容（800+ 字符）倒进权限框，
+        // 把决策按钮挤出可视区。用户只需要知道「改哪个文件、改成什么」。
+        let long_body = format!("fn assess() {{\n{}\n}}", "x".repeat(2000));
+        let out = summarize_permission_request(
+            "edit",
+            &json!({
+                "path": "packages/agent-core/src/tools/assess-response.ts",
+                "old_string": "function normalizeWord(text: str",
+                "new_string": long_body,
+            }),
+        );
+        assert!(out.contains("path: packages/agent-core/src/tools/assess-response.ts"));
+        assert!(out.contains("replace 1 line(s)"));
+        assert!(!out.contains("xxxx"), "file body leaked into the prompt");
+        // 短小、几行内可读完。
+        assert!(out.lines().count() <= 5, "{out}");
+        assert!(out.chars().count() < 400, "summary too long: {}", out.len());
+    }
+
+    #[test]
+    fn permission_summary_write_reports_size_not_content() {
+        let content = "line one\nline two\nline three\n".repeat(50);
+        let out = summarize_permission_request(
+            "write",
+            &json!({ "path": "src/a.ts", "content": content }),
+        );
+        assert!(out.contains("path: src/a.ts"));
+        assert!(out.contains("lines ·"));
+        assert!(out.contains("first line: line one"));
+        assert!(!out.contains("line three\nline one"), "content leaked");
+    }
+
+    #[test]
+    fn permission_summary_apply_patch_lists_files_only() {
+        let patch = "--- a/old.txt\n+++ b/new.txt\n@@ -1,2 +1,3 @@\n a\n+b\n--- a/old.txt\n+++ b/second.txt\n@@ -5 +5 @@\n-c\n+d\n";
+        let out = summarize_permission_request("apply_patch", &json!({ "patch": patch }));
+        assert!(out.contains("2 file(s)"), "{out}");
+        assert!(out.contains("2 hunk(s)"), "{out}");
+        assert!(out.contains("- new.txt"), "{out}");
+        assert!(out.contains("- second.txt"), "{out}");
+        assert!(!out.contains("@@"), "diff body leaked: {out}");
+    }
+
+    #[test]
+    fn permission_summary_keeps_bash_command_visible() {
+        // 命令本身就是决策依据，必须完整可见。
+        let out = summarize_permission_request("bash", &json!({ "command": "cargo test -p core" }));
+        assert_eq!(out, "cargo test -p core");
+    }
+
+    #[test]
+    fn permission_summary_bounds_unknown_tools() {
+        let big = "y".repeat(5000);
+        let out = summarize_permission_request("mystery", &json!({ "blob": big }));
+        assert!(
+            out.chars().count() <= 301,
+            "unknown tool not bounded: {}",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn permission_summary_falls_back_when_no_details() {
+        let out = summarize_permission_request("noop", &json!({}));
+        assert_eq!(out, "(no details)");
+    }
+
+    #[test]
+    fn permission_summary_grep_and_glob_scope() {
+        let out = summarize_permission_request("grep", &json!({"pattern": "foo", "path": "src"}));
+        assert_eq!(out, "pattern: foo\npath: src");
+        let glob = summarize_permission_request("glob", &json!({"pattern": "**/*.ts"}));
+        assert_eq!(glob, "pattern: **/*.ts");
+    }
+
+    #[test]
+    fn stop_is_never_gated_by_a_pending_prompt() {
+        // 回归：等待权限/提问时点击结束按钮无效。stop 必须始终可用。
+        assert_eq!(composer_button_action(true, false), ComposerAction::Stop);
+        assert_eq!(
+            composer_button_action(true, true),
+            ComposerAction::Stop,
+            "stop must stay available while a permission/question prompt is pending"
+        );
+    }
+
+    #[test]
+    fn send_is_blocked_only_while_idle_and_prompted() {
+        assert_eq!(composer_button_action(false, false), ComposerAction::Send);
+        assert_eq!(
+            composer_button_action(false, true),
+            ComposerAction::None,
+            "an idle composer awaiting approval must not be able to send"
+        );
     }
 
     #[test]
