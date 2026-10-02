@@ -212,6 +212,37 @@ fn kill_pid(pid: u32) {
     }
 }
 
+/// Kill a child and its whole descendant tree, given only its PID.
+///
+/// Needed by the bash **timeout** path, which historically relied on
+/// `kill_on_drop` alone. That kills only the direct child (`cmd.exe` /
+/// `bash`), so `node`, `pnpm`, `npx`, `cargo` and any spawned language server
+/// kept running detached — still holding files, ports and console handles,
+/// which made subsequent commands in the same session time out as well.
+/// A no-op when the PID is unknown or already reaped.
+pub fn kill_process_tree(pid: Option<u32>) {
+    let Some(pid) = pid.filter(|p| *p != 0) else {
+        return;
+    };
+    #[cfg(windows)]
+    {
+        // `taskkill` is synchronous and can take a moment; keep it off the
+        // async runtime's critical path by just awaiting it inline — the
+        // timeout branch is already on its way out.
+        kill_pid(pid);
+    }
+    #[cfg(unix)]
+    {
+        kill_pid(pid);
+    }
+    tracing::debug!(
+        target: deepseekcode_telemetry::APP,
+        run_id = %deepseekcode_telemetry::current_run_id(),
+        pid,
+        "killed process tree"
+    );
+}
+
 #[cfg(unix)]
 fn configure_process_group(cmd: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;

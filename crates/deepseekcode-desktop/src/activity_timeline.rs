@@ -13,6 +13,13 @@ pub struct DetailPayload {
     pub title: Option<String>,
     pub url: Option<String>,
     pub web_preview: Option<String>,
+    /// The command line a bash-like tool was asked to run.
+    ///
+    /// Kept separate from `input`: `input` holds the raw tool arguments (shown
+    /// verbatim in the detail panel), and rendering it in the terminal printed
+    /// the whole `{"command": …, "timeout_ms": …}` JSON object as the `$ …`
+    /// prompt line instead of the command.
+    pub command: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -79,6 +86,7 @@ pub fn rebuild_detail_store(events: &[deepseekcode_schema::event::EventEnvelope]
                                 .map(String::from),
                             url: None,
                             web_preview: None,
+                            command: command_from_input(&input),
                         },
                     );
                 }
@@ -89,10 +97,14 @@ pub fn rebuild_detail_store(events: &[deepseekcode_schema::event::EventEnvelope]
                     let prev = store.get(id).cloned();
                     let tool_name = event.payload["tool_name"].as_str().unwrap_or("");
                     let (url, web_preview) = web_fields_from_tool(tool_name, &output);
+                    // Clone the fields we carry over BEFORE the payload moves.
+                    let prev_input = prev.as_ref().and_then(|d| d.input.clone());
+                    let prev_title = prev.as_ref().and_then(|d| d.title.clone());
+                    let prev_command = prev.and_then(|d| d.command);
                     store.insert(
                         id,
                         DetailPayload {
-                            input: prev.as_ref().and_then(|d| d.input.clone()),
+                            input: prev_input,
                             output: Some(
                                 serde_json::to_string_pretty(&output)
                                     .unwrap_or_else(|_| output.to_string()),
@@ -103,9 +115,11 @@ pub fn rebuild_detail_store(events: &[deepseekcode_schema::event::EventEnvelope]
                                 .get("title")
                                 .and_then(|v| v.as_str())
                                 .map(String::from)
-                                .or_else(|| prev.and_then(|d| d.title)),
+                                .or(prev_title),
                             url,
                             web_preview,
+                            // Preserve the command captured on ToolStarted.
+                            command: prev_command,
                         },
                     );
                 }
@@ -139,6 +153,7 @@ pub fn rebuild_detail_store(events: &[deepseekcode_schema::event::EventEnvelope]
                         title: Some("Updated todos".into()),
                         url: None,
                         web_preview: None,
+                        command: None,
                     },
                 );
             }
@@ -149,9 +164,9 @@ pub fn rebuild_detail_store(events: &[deepseekcode_schema::event::EventEnvelope]
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-struct BashStreamBody {
-    stdout: String,
-    stderr: String,
+pub(crate) struct BashStreamBody {
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 fn parse_or_init_bash_stream(existing: Option<&str>) -> BashStreamBody {
@@ -215,6 +230,23 @@ fn truncate_preview(text: &str, max: usize) -> String {
     } else {
         format!("{}…", text.chars().take(max).collect::<String>())
     }
+}
+
+/// Shell command carried in a tool input, if any.
+///
+/// `command` for bash, `script` for powershell-style tools. Kept separate
+/// from the rendered `input` so the terminal can echo the real command line
+/// instead of the serialized argument object.
+fn command_from_input(input: &serde_json::Value) -> Option<String> {
+    for key in ["command", "script"] {
+        if let Some(cmd) = input.get(key).and_then(|v| v.as_str()) {
+            let trimmed = cmd.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
 }
 
 pub struct ActivityTimelineView;
@@ -1313,6 +1345,33 @@ fn activity_kind_style(
 mod tests {
     use super::humanize_worked_label;
     use crate::activity_rows::FlattenedActivityRow;
+
+    /// 截图问题：hydrated 会话的 `DetailPayload.input` 是整个参数的
+    /// pretty JSON，终端把它当 `$` 行打印。命令必须能被单独取出。
+    #[test]
+    fn command_from_input_extracts_shell_command() {
+        assert_eq!(
+            super::command_from_input(&serde_json::json!({
+                "command": "cd /d D:\\Workspace\\Echo && pnpm install",
+                "timeout_ms": 300000
+            })),
+            Some("cd /d D:\\Workspace\\Echo && pnpm install".to_string())
+        );
+        // powershell-style alias.
+        assert_eq!(
+            super::command_from_input(&serde_json::json!({"script": "Get-ChildItem"})),
+            Some("Get-ChildItem".to_string())
+        );
+        // Non-shell tools and blanks must not yield a command.
+        assert_eq!(
+            super::command_from_input(&serde_json::json!({"path": "src/a.ts"})),
+            None
+        );
+        assert_eq!(
+            super::command_from_input(&serde_json::json!({"command": "   "})),
+            None
+        );
+    }
 
     #[test]
     fn humanize_keeps_short_durations() {

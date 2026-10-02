@@ -281,6 +281,13 @@ impl SessionExecution {
                             // Non-interrupt errors must not masquerade as
                             // SessionInterrupted; surface as a plain error event
                             // payload on SessionIdle path or just break.
+                            //
+                            // The run IS over, so announce idle exactly like the
+                            // success path does. Breaking without it left the UI
+                            // pinned on "Running tool: …" with no way to recover.
+                            let _ = events
+                                .append(EventKind::SessionIdle, Some(session_id), json!({}))
+                                .await;
                         }
                         break;
                     }

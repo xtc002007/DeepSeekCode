@@ -956,47 +956,21 @@ impl<'a> BlockRenderer<'a> {
         .into_any_element()
     }
 
+    /// One `SelectableText` per paragraph, hard breaks included.
+    ///
+    /// `SelectableText` splits on `\n` itself, because GPUI's `shape_line`
+    /// asserts its text has no newlines. Pre-splitting here left the newline
+    /// inside the run text of every OTHER path (blockquotes, the user message
+    /// card) and aborted the process.
     fn render_paragraph(&mut self, runs: Vec<InlineRun>) -> AnyElement {
-        let mut column = div().w_full().flex().flex_col().gap_0p5();
-        for line_runs in split_runs_on_newlines(runs) {
-            let body = self.body_style();
-            let el = self.inline_text(line_runs, body, true);
-            column = column.child(div().cursor(CursorStyle::IBeam).child(el));
-        }
-        column.into_any_element()
+        let body = self.body_style();
+        let el = self.inline_text(runs, body, true);
+        div()
+            .w_full()
+            .cursor(CursorStyle::IBeam)
+            .child(el)
+            .into_any_element()
     }
-}
-
-/// Split inline runs at hard line breaks while preserving style per segment.
-fn split_runs_on_newlines(runs: Vec<InlineRun>) -> Vec<Vec<InlineRun>> {
-    let mut lines: Vec<Vec<InlineRun>> = vec![Vec::new()];
-    for run in runs {
-        if run.text.is_empty() {
-            continue;
-        }
-        for (index, segment) in run.text.split('\n').enumerate() {
-            if index > 0 {
-                lines.push(Vec::new());
-            }
-            if segment.is_empty() {
-                continue;
-            }
-            // `lines` starts with one empty vec and only grows, but UI code
-            // must not crash on a future refactor — skip the segment instead.
-            if let Some(line) = lines.last_mut() {
-                line.push(InlineRun {
-                    text: segment.to_string(),
-                    styles: run.styles.clone(),
-                    url: run.url.clone(),
-                });
-            }
-        }
-    }
-    if lines.len() == 1 && lines[0].is_empty() {
-        return vec![];
-    }
-    lines.retain(|line| !line.is_empty());
-    lines
 }
 
 impl<'a> BlockRenderer<'a> {
@@ -1230,8 +1204,8 @@ mod tests {
     // NOTE: never `use super::*` here — the parent's `use gpui::*` would pull
     // gpui's `test` module into scope and break `#[test]` resolution.
     use super::{
-        is_line_break_html, push_run_into, split_runs_on_newlines, strip_html_tags, trim_cell_runs,
-        InlineRun, InlineStyle, ParseContext, ParsedBlock,
+        is_line_break_html, push_run_into, strip_html_tags, trim_cell_runs, InlineRun, InlineStyle,
+        ParseContext, ParsedBlock,
     };
     use crate::selectable_text::is_browsable_url;
     use crate::theme::themes::dark::dark_tokens;
@@ -1486,17 +1460,33 @@ mod tests {
 
     #[test]
     fn split_runs_preserves_styles_and_urls() {
+        // Run styling survives the hard-break split because `SelectableText`
+        // splits the assembled text, not the runs.
         let runs = vec![InlineRun {
             styles: vec![InlineStyle::Strong, InlineStyle::Link],
             text: "a\nb".into(),
             url: Some("https://x.test".into()),
         }];
-        let lines = split_runs_on_newlines(runs);
-        assert_eq!(lines.len(), 2);
-        for line in &lines {
-            assert_eq!(line[0].styles, vec![InlineStyle::Strong, InlineStyle::Link]);
-            assert_eq!(line[0].url.as_deref(), Some("https://x.test"));
-        }
+        let (text, shaped) = crate::selectable_text::build_runs(
+            &runs,
+            &test_theme(),
+            &crate::selectable_text::SelectableStyle {
+                size: test_theme().typography.text_xs,
+                line_height: crate::theme::leading_relaxed(&test_theme()),
+                color: test_theme().markdown.text,
+                weight: gpui::FontWeight::NORMAL,
+                italic: false,
+                family: gpui::SharedString::from("ui"),
+                align: gpui::TextAlign::Left,
+            },
+        );
+        assert_eq!(text, "a\nb");
+        assert_eq!(
+            shaped.len(),
+            1,
+            "one run tiles the whole text, newline included"
+        );
+        assert_eq!(shaped[0].len, text.len());
     }
 
     #[test]
@@ -1763,13 +1753,24 @@ mod tests {
     }
 
     #[test]
-    fn soft_break_lines_split_for_render() {
-        let runs = vec![InlineRun {
-            styles: vec![InlineStyle::Normal],
-            text: "a\nb".into(),
-            url: None,
-        }];
-        let lines = split_runs_on_newlines(runs);
-        assert_eq!(lines.len(), 2);
+    fn soft_break_reaches_render_text_as_a_real_break() {
+        // A soft break must stay a real `\n` in the assembled text: it is what
+        // `SelectableText::hard_line_ranges` splits on. It must NOT reach
+        // `shape_line`, which aborts the process on a newline.
+        let blocks = parse("第一行\n第二行\n");
+        let text = match &blocks[0] {
+            ParsedBlock::Paragraph(runs) => {
+                runs.iter().map(|r| r.text.as_str()).collect::<String>()
+            }
+            other => panic!("expected paragraph, got {other:?}"),
+        };
+        assert_eq!(text, "第一行\n第二行");
+        for (start, end) in crate::selectable_text::hard_line_ranges(&text) {
+            assert!(
+                !text[start..end].contains('\n'),
+                "line range {start}..{end} still holds a newline"
+            );
+        }
+        assert_eq!(crate::selectable_text::hard_line_ranges(&text).len(), 2);
     }
 }

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -534,14 +534,21 @@ impl Tool for BashTool {
         "bash"
     }
     fn description(&self) -> &str {
-        "Execute a shell command. On Windows commands run via cmd.exe (/c); use cmd syntax (e.g. dir, findstr, &&). On Unix, runs via bash -lc."
+        "Execute a shell command. On Windows commands run via cmd.exe (/c); use cmd syntax (e.g. dir, findstr, &&). On Unix, runs via bash -lc. \
+         IMPORTANT: the command is killed after `timeout_ms` (default 60000, max 600000). Build, install and test \
+         commands routinely exceed 60s, so ALWAYS pass an explicit larger `timeout_ms` for them \
+         (e.g. pnpm install / typecheck / tsc / jest / cargo build / cargo test →timeout_ms 600000) \
+         instead of retrying and reporting the tool as unusable."
     }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
                 "command": { "type": "string" },
-                "timeout_ms": { "type": "integer" }
+                "timeout_ms": {
+                    "type": "integer",
+                    "description": "Kill the command after this many milliseconds. Default 60000, clamped to 1000..600000. Pass a large value (e.g. 600000) for install/build/test commands."
+                }
             },
             "required": ["command"]
         })
@@ -603,7 +610,11 @@ impl Tool for BashTool {
             } else if is_posix_style_shell(shell) {
                 c.args(["-lc", &command]);
             } else if cfg!(windows) {
-                c.args(["/C", &command]);
+                // cmd.exe family: force UTF-8 here too, otherwise configuring
+                // a shell silently dropped the `chcp 65001` the default path
+                // applies and non-ASCII output turned into mojibake.
+                let wrapped = format!("chcp 65001 >nul && {command}");
+                c.args(["/C", &wrapped]);
             } else {
                 c.args(["-lc", &command]);
             }
@@ -629,16 +640,32 @@ impl Tool for BashTool {
         cmd.kill_on_drop(true);
         crate::process::hide_console_async(&mut cmd);
 
+        // Shared so the timeout branch can tear down the whole process tree:
+        // `kill_on_drop` only reaps the direct child.
+        let spawned_pid = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let output = match timeout(
             Duration::from_millis(timeout_ms),
-            run_command_streaming(cmd, ctx),
+            run_command_streaming(cmd, ctx, Arc::clone(&spawned_pid)),
         )
         .await
         {
             Ok(result) => result?,
             Err(_) => {
+                // The direct child is killed by `kill_on_drop`, but its
+                // grandchildren (`node`, `pnpm`, `cargo`, a spawned server)
+                // survive on Windows and keep holding files, ports and the
+                // console —which is what made every LATER command in the
+                // session time out too. Tear down the whole tree first.
+                crate::process::kill_process_tree(Some(
+                    spawned_pid.load(std::sync::atomic::Ordering::SeqCst),
+                ));
                 return Err(ToolFailure {
-                    message: format!("command timed out after {timeout_ms}ms"),
+                    message: format!(
+                        "command timed out after {timeout_ms}ms and was killed \
+                         (its process tree too). Re-run with a larger `timeout_ms` \
+                         (max 600000) if the command legitimately needs longer, \
+                         or split it into smaller steps."
+                    ),
                     retryable: true,
                 });
             }
@@ -649,9 +676,125 @@ impl Tool for BashTool {
     }
 }
 
+/// Reader over a child's output stream that yields decoded lines and NEVER
+/// fails on non-UTF-8 bytes.
+///
+/// `BufRead::lines()` is unusable here: it returns `Err` the moment a line is
+/// not valid UTF-8, and the caller then dropped the whole reader — so a single
+/// Chinese character in `dir` output silently discarded every remaining byte,
+/// including plain ASCII that followed it.
+///
+/// Windows consoles emit the active OEM/ANSI code page (GBK/CP936 on zh-CN)
+/// even after `chcp 65001`, because the code page is applied to the console
+/// buffer while redirected output keeps the program's own encoding. We
+/// therefore decode as UTF-8 first and fall back to the system code page.
+struct OutputLines<R> {
+    reader: tokio::io::BufReader<R>,
+    scratch: Vec<u8>,
+    /// Bytes buffered so far; a line may straddle two reads.
+    pending: Vec<u8>,
+    done: bool,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> OutputLines<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            reader: tokio::io::BufReader::new(inner),
+            scratch: vec![0u8; 16 * 1024],
+            pending: Vec::new(),
+            done: false,
+        }
+    }
+
+    /// Next decoded line, or `None` at EOF. Only genuine I/O errors are
+    /// reported; undecodable bytes are replaced, never fatal.
+    async fn next_decoded_line(&mut self) -> std::io::Result<Option<String>> {
+        loop {
+            if let Some(pos) = self.pending.iter().position(|&b| b == b'\n') {
+                // Take the line WITHOUT its terminator; the caller re-joins
+                // lines with `\n`, and keeping it here produced `\r\n\n`.
+                let line: Vec<u8> = self.pending.drain(..pos).collect();
+                self.pending.remove(0);
+                return Ok(Some(decode_console_bytes(trim_cr(&line))));
+            }
+            if self.done {
+                if self.pending.is_empty() {
+                    return Ok(None);
+                }
+                let line = std::mem::take(&mut self.pending);
+                return Ok(Some(decode_console_bytes(trim_cr(&line))));
+            }
+            let n = self.reader.read(&mut self.scratch).await?;
+            if n == 0 {
+                self.done = true;
+            } else {
+                self.pending.extend_from_slice(&self.scratch[..n]);
+            }
+        }
+    }
+}
+
+fn trim_cr(line: &[u8]) -> &[u8] {
+    match line.split_last() {
+        Some((b'\r', rest)) => rest,
+        _ => line,
+    }
+}
+
+/// Decode console output, tolerating a legacy code page.
+fn decode_console_bytes(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    // Not UTF-8. Fall back to the machine's legacy code page (GBK on zh-CN,
+    // CP1252 elsewhere) rather than dropping the line.
+    let (text, _, _) = console_encoding().decode(bytes);
+    text.into_owned()
+}
+
+/// Map a Windows code page number to an `encoding_rs` encoding.
+///
+/// `Encoding::for_label("cp936")` returns `None` — it only accepts WHATWG
+/// labels such as `gbk`/`gb18030`, so silently falling back to Windows-1252
+/// turned every Chinese character into mojibake.
+#[cfg(windows)]
+fn encoding_for_code_page(cp: u32) -> &'static encoding_rs::Encoding {
+    const CP_UTF8: u32 = 65001;
+    if cp == CP_UTF8 {
+        return encoding_rs::UTF_8;
+    }
+    // East Asian code pages all decode as GBK/GB18030 in encoding_rs.
+    let label: &[u8] = match cp {
+        936 | 950 | 54936 => b"gbk", // GBK, Big5, GB18030
+        932 => b"shift_jis",         // Japanese
+        949 => b"euc-kr",            // Korean
+        1252 => b"windows-1252",
+        1251 => b"windows-1251",
+        1250 => b"windows-1250",
+        _ => b"windows-1252",
+    };
+    encoding_rs::Encoding::for_label(label).unwrap_or(encoding_rs::WINDOWS_1252)
+}
+
+#[cfg(windows)]
+fn console_encoding() -> &'static encoding_rs::Encoding {
+    // cmd.exe emits redirected output in the machine's OEM code page (936 /
+    // GBK on zh-CN).
+    encoding_for_code_page(unsafe { windows_sys::Win32::Globalization::GetOEMCP() })
+}
+
+#[cfg(not(windows))]
+fn console_encoding() -> &'static encoding_rs::Encoding {
+    encoding_rs::UTF_8
+}
+
 async fn run_command_streaming(
     mut cmd: Command,
     ctx: &ToolContext,
+    spawned_pid: Arc<std::sync::atomic::AtomicU32>,
 ) -> std::result::Result<Value, ToolFailure> {
     cmd.kill_on_drop(true);
     crate::process::prepare_tracked_command_async(&mut cmd);
@@ -659,7 +802,10 @@ async fn run_command_streaming(
         message: e.to_string(),
         retryable: true,
     })?;
-    // RAII: unregisters on every exit path — including future cancellation by
+    if let Some(pid) = child.id() {
+        spawned_pid.store(pid, std::sync::atomic::Ordering::SeqCst);
+    }
+    // RAII: unregisters on every exit path —including future cancellation by
     // the timeout wrapper, which would otherwise leave a stale PID behind.
     let _pid_guard = child
         .id()
@@ -678,9 +824,10 @@ async fn run_command_streaming(
     // Read stdout and stderr CONCURRENTLY: draining them sequentially can
     // deadlock when the child fills the stderr pipe while we are still
     // waiting for stdout EOF.
-    let mut out_lines = child.stdout.take().map(|out| BufReader::new(out).lines());
-    let mut err_lines = child.stderr.take().map(|err| BufReader::new(err).lines());
+    let mut out_lines = child.stdout.take().map(OutputLines::new);
+    let mut err_lines = child.stderr.take().map(OutputLines::new);
     let mut killed = false;
+    let mut exited: Option<std::process::ExitStatus> = None;
 
     loop {
         tokio::select! {
@@ -696,7 +843,7 @@ async fn run_command_streaming(
             }
             line = async {
                 match out_lines.as_mut() {
-                    Some(lines) => lines.next_line().await,
+                    Some(lines) => lines.next_decoded_line().await,
                     None => Ok(None),
                 }
             }, if out_lines.is_some() => {
@@ -730,7 +877,7 @@ async fn run_command_streaming(
             }
             line = async {
                 match err_lines.as_mut() {
-                    Some(lines) => lines.next_line().await,
+                    Some(lines) => lines.next_decoded_line().await,
                     None => Ok(None),
                 }
             }, if err_lines.is_some() => {
@@ -761,14 +908,82 @@ async fn run_command_streaming(
                     _ => err_lines = None,
                 }
             }
+            // TERMINATION BRANCH — this must exist.
+            //
+            // The loop used to rely on `else => break`, which only fires when
+            // every ENABLED branch has completed. The cancel branch stays
+            // enabled whenever `cancel_token.is_some()` (always true in
+            // production) and its future never completes, so once both pipes
+            // reached EOF the select blocked forever: EVERY spawned command
+            // hit its timeout, `echo hello` included. `child.wait()` returning
+            // is the only reliable "the process is done" signal.
+            status = child.wait() => {
+                exited = Some(status.map_err(|e| ToolFailure {
+                    message: e.to_string(),
+                    retryable: true,
+                })?);
+                break;
+            }
             else => break,
         }
     }
 
-    let status = child.wait().await.map_err(|e| ToolFailure {
-        message: e.to_string(),
-        retryable: true,
-    })?;
+    // The process has exited: drain whatever the readers still hold. Bounded,
+    // because an orphaned grandchild can keep the write end of a pipe open
+    // (exactly what a timed-out `node`/`pnpm` leaves behind) and this drain
+    // must never become a second hang. Output still buffered in the readers is
+    // real output and must not be dropped.
+    if let Some(mut lines) = out_lines.take() {
+        let _ = timeout(Duration::from_millis(200), async {
+            while let Ok(Some(line)) = lines.next_decoded_line().await {
+                if stdout.len() < MAX_STREAM_BYTES {
+                    if !stdout.is_empty() {
+                        stdout.push('\n');
+                    }
+                    let room = MAX_STREAM_BYTES.saturating_sub(stdout.len());
+                    if line.len() + 1 > room {
+                        stdout.push_str(&line[..room.saturating_sub(1).min(line.len())]);
+                        stdout_truncated = true;
+                    } else {
+                        stdout.push_str(&line);
+                    }
+                } else {
+                    stdout_truncated = true;
+                }
+            }
+        })
+        .await;
+    }
+    if let Some(mut lines) = err_lines.take() {
+        let _ = timeout(Duration::from_millis(200), async {
+            while let Ok(Some(line)) = lines.next_decoded_line().await {
+                if stderr.len() < MAX_STREAM_BYTES {
+                    if !stderr.is_empty() {
+                        stderr.push('\n');
+                    }
+                    let room = MAX_STREAM_BYTES.saturating_sub(stderr.len());
+                    if line.len() + 1 > room {
+                        stderr.push_str(&line[..room.saturating_sub(1).min(line.len())]);
+                        stderr_truncated = true;
+                    } else {
+                        stderr.push_str(&line);
+                    }
+                } else {
+                    stderr_truncated = true;
+                }
+            }
+        })
+        .await;
+    }
+
+    let status = match exited {
+        Some(status) => status,
+        // Loop ended without observing the exit (e.g. streams closed first).
+        None => child.wait().await.map_err(|e| ToolFailure {
+            message: e.to_string(),
+            retryable: true,
+        })?,
+    };
     drop(_pid_guard);
     if stdout_truncated {
         stdout.push_str("\n…[stdout truncated at 1MiB during capture]");
@@ -1083,14 +1298,572 @@ impl Tool for WebfetchTool {
     }
 }
 
+/// A live language-server process shared by every LSP call for one project.
+struct LspSession {
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::io::BufReader<tokio::process::ChildStdout>,
+    next_id: i64,
+    /// Tail of `window/logMessage` output from the server, surfaced on the next
+    /// response so project-resolution failures are visible.
+    logs: Vec<String>,
+    /// Set once `initialize` + `initialized` completed for this session.
+    initialized: bool,
+}
+
+impl LspSession {
+    /// Spawn a language server, resolving project-local `.cmd` shims and
+    /// putting `node_modules/.bin` on PATH.
+    async fn spawn(
+        command: &[String],
+        working_directory: &str,
+        env: &HashMap<String, String>,
+    ) -> std::result::Result<Self, ToolFailure> {
+        let work_dir = std::path::PathBuf::from(working_directory);
+        let (program, argv) = shell_env::resolve_program(&command[0], &command[1..], &work_dir);
+        let mut child = Command::new(program);
+        child.args(argv);
+        child.env("PATH", shell_env::path_with_local_bins(&work_dir));
+        child
+            .current_dir(working_directory)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        shell_env::apply_to_command(&mut child, env);
+        crate::process::hide_console_async(&mut child);
+
+        let mut child = child.spawn().map_err(|e| ToolFailure {
+            message: format!(
+                "could not start lsp server `{}`: {e}. If it is a project devDependency it \
+                 must be installed (`npm i -D <server>`); otherwise use the file, grep and \
+                 glob tools instead of retrying.",
+                command.join(" ")
+            ),
+            retryable: false,
+        })?;
+        let stdin = child.stdin.take().ok_or_else(|| ToolFailure {
+            message: "failed to open lsp stdin".into(),
+            retryable: false,
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| ToolFailure {
+            message: "failed to open lsp stdout".into(),
+            retryable: false,
+        })?;
+        // Drain stderr continuously. Language servers log verbosely; leaving
+        // the pipe unread lets it fill and block the server mid-request, which
+        // presents as a dead session with empty results.
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut reader = tokio::io::BufReader::new(stderr);
+                let mut buf = vec![0u8; 8192];
+                while let Ok(n) = reader.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                }
+            });
+        }
+        Ok(Self {
+            child,
+            stdin,
+            stdout: tokio::io::BufReader::new(stdout),
+            next_id: 0,
+            logs: Vec::new(),
+            initialized: false,
+        })
+    }
+}
+
+/// Is this an LSP *notification* (no response by protocol design) rather than a
+/// request?
+///
+/// Sending a notification with an `id` makes the server treat it as a request;
+/// `typescript-language-server` then answers `-32601 Unhandled method` because
+/// it registered a notification handler. Waiting for a reply that never comes
+/// also stalls the call until timeout.
+fn is_notification(method: &str) -> bool {
+    if method.starts_with("$/") {
+        return true;
+    }
+    matches!(
+        method,
+        "initialized"
+            | "exit"
+            | "textDocument/didOpen"
+            | "textDocument/didChange"
+            | "textDocument/didClose"
+            | "textDocument/didSave"
+            | "textDocument/willSave"
+            | "notebookDocument/didOpen"
+            | "notebookDocument/didChange"
+            | "notebookDocument/didSave"
+            | "notebookDocument/didClose"
+            | "workspace/didChangeConfiguration"
+            | "workspace/didChangeWorkspaceFolders"
+            | "workspace/didChangeWatchedFiles"
+            | "workspace/didCreateFiles"
+            | "workspace/didRenameFiles"
+            | "workspace/didDeleteFiles"
+            | "window/workDoneProgress/cancel"
+    )
+}
+
+impl LspSession {
+    async fn write_message(
+        stdin: &mut tokio::process::ChildStdin,
+        message: &Value,
+    ) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let body = message.to_string();
+        let payload = format!("Content-Length: {}\r\n\r\n{body}", body.len());
+        stdin.write_all(payload.as_bytes()).await?;
+        stdin.flush().await
+    }
+
+    /// Read one framed JSON-RPC message.
+    async fn read_message(
+        stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    ) -> std::io::Result<Option<Value>> {
+        use tokio::io::AsyncBufReadExt;
+        let mut content_length: Option<usize> = None;
+        loop {
+            let mut line = String::new();
+            let read = stdout.read_line(&mut line).await?;
+            if read == 0 {
+                return Ok(None);
+            }
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((key, value)) = trimmed.split_once(':') {
+                if key.trim().eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse::<usize>().ok();
+                }
+            }
+        }
+        let Some(len) = content_length else {
+            return Ok(None);
+        };
+        let mut body = vec![0u8; len];
+        {
+            use tokio::io::AsyncReadExt;
+            stdout.read_exact(&mut body).await?;
+        }
+        Ok(serde_json::from_slice(&body).ok())
+    }
+
+    /// Answer a server→client request so the server never blocks on us.
+    async fn answer_server_request(&mut self, message: &Value) -> std::io::Result<()> {
+        let Some(id) = message.get("id").cloned() else {
+            return Ok(());
+        };
+        let method = message
+            .get("method")
+            .and_then(|m| m.as_str())
+            .unwrap_or_default();
+        // `workspace/configuration` expects one result per requested item, in
+        // order. Returning `[]` for a non-empty `items` list makes servers
+        // mis-read their own settings, which for TypeScript means the project
+        // never gets configured.
+        let result = if method == "workspace/configuration" {
+            let count = message
+                .get("params")
+                .and_then(|p| p.get("items"))
+                .and_then(|i| i.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            json!(vec![Value::Null; count])
+        } else {
+            Value::Null
+        };
+        let reply = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+        Self::write_message(&mut self.stdin, &reply).await
+    }
+
+    /// Send a request and return the matching response, servicing any
+    /// server→client traffic that arrives first.
+    ///
+    /// Server *notifications* (no `id`) are recorded rather than dropped:
+    /// `window/logMessage` is how tsserver reports `No Project.` and similar
+    /// project-resolution failures, and silently discarding it is what made
+    /// these look like unexplained empty results.
+    async fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        self.next_id += 1;
+        let id = self.next_id;
+        let message = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+        Self::write_message(&mut self.stdin, &message)
+            .await
+            .map_err(|e| e.to_string())?;
+        loop {
+            let Some(reply) = Self::read_message(&mut self.stdout)
+                .await
+                .map_err(|e| e.to_string())?
+            else {
+                return Err("language server closed its output".into());
+            };
+            // Server→client request: answer it and keep waiting for ours.
+            if reply.get("method").is_some() && reply.get("id").is_some() {
+                self.answer_server_request(&reply)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                continue;
+            }
+            // Server notification (no id): keep it for diagnostics.
+            if reply.get("method").is_some() {
+                self.record_notification(&reply);
+                continue;
+            }
+            if reply.get("id").and_then(|v| v.as_i64()) == Some(id) {
+                return Ok(self.attach_diagnostics(reply));
+            }
+            // Stale response from a timed-out request; ignore and keep reading.
+        }
+    }
+
+    /// Remember the tail of server log/error messages.
+    fn record_notification(&mut self, message: &Value) {
+        let method = message.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        if !matches!(
+            method,
+            "window/logMessage" | "textDocument/publishDiagnostics"
+        ) {
+            return;
+        }
+        let text = message
+            .get("params")
+            .and_then(|p| p.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if text.is_empty() {
+            return;
+        }
+        // Keep only the most recent few, and drop the routine startup banner.
+        if text.contains("Using Typescript version") {
+            return;
+        }
+        self.logs.push(text);
+        if self.logs.len() > 8 {
+            self.logs.remove(0);
+        }
+    }
+
+    /// Hand the collected logs back to the caller alongside the result.
+    fn attach_diagnostics(&mut self, mut response: Value) -> Value {
+        if self.logs.is_empty() {
+            return response;
+        }
+        let logs = std::mem::take(&mut self.logs);
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert("serverLog".into(), json!(logs));
+        }
+        response
+    }
+
+    async fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
+        let message = json!({ "jsonrpc": "2.0", "method": method, "params": params });
+        Self::write_message(&mut self.stdin, &message)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+impl Drop for LspSession {
+    fn drop(&mut self) {
+        // `kill_on_drop(true)` reaps the process; do not leave orphans.
+        let _ = self.child.start_kill();
+    }
+}
+
+/// Canonicalize a document reference so the server can map it to a tsconfig
+/// project.
+///
+/// `typescript-language-server` resolves `textDocument.uri` against the real
+/// filesystem. A hand-written URI with a lower-case drive, backslashes or a
+/// missing percent-encoding fails that lookup and tsserver reports
+/// `No Project.` — with every document feature then returning empty. The
+/// model cannot be trusted to get this byte-exact, so we normalize it here.
+///
+/// Accepts `{"path": "src/a.ts"}` (preferred, resolved against the project)
+/// or `{"uri": "file:///…"}` (normalized) and rewrites `params.textDocument`.
+fn normalize_document_params(params: &mut Value, working_directory: &str) {
+    let Some(td) = params.get_mut("textDocument") else {
+        return;
+    };
+    if !td.is_object() {
+        return;
+    }
+    let uri = td
+        .get("uri")
+        .and_then(|u| u.as_str())
+        .map(|u| u.to_string())
+        .or_else(|| {
+            td.get("path")
+                .and_then(|p| p.as_str())
+                .map(|p| p.to_string())
+        });
+    let Some(uri) = uri else { return };
+    let normalized = if let Some(rest) = uri.strip_prefix("file:") {
+        // Strip any scheme/authority, then re-normalize the path portion.
+        let path = rest.trim_start_matches("//").trim_start_matches('/');
+        let decoded = percent_decode(path);
+        canonical_file_uri(&decoded, working_directory)
+    } else {
+        // A bare path (relative or absolute).
+        canonical_file_uri(&uri, working_directory)
+    };
+    td["uri"] = Value::String(normalized);
+    if let Some(obj) = td.as_object_mut() {
+        obj.remove("path");
+    }
+}
+
+/// Absolute file URI for `path`, resolved against `working_directory` when
+/// relative. Drive letters are upper-cased and separators normalised so the
+/// URI matches how the server sees the filesystem.
+fn canonical_file_uri(path: &str, working_directory: &str) -> String {
+    let raw = path.trim();
+    let mut absolute = if raw.starts_with('/') || has_drive_prefix(raw) {
+        raw.to_string()
+    } else {
+        format!(
+            "{}\\{}",
+            working_directory.trim_end_matches(['\\', '/']),
+            raw
+        )
+    };
+    absolute = absolute.replace('/', "\\");
+    // Upper-case the drive letter so the URI matches the casing the server
+    // sees on disk; tsserver otherwise fails to match the file to its project.
+    if has_drive_prefix(&absolute) {
+        absolute.replace_range(0..1, &absolute[..1].to_ascii_uppercase());
+    }
+    // `C:` -> `C:/` so path_to_file_uri emits `file:///C:/…`.
+    if has_drive_prefix(&absolute) && !absolute[2..].starts_with('\\') {
+        absolute.insert(2, '\\');
+    }
+    path_to_file_uri(&absolute)
+}
+
+fn has_drive_prefix(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+/// Fill in `textDocument.text` from disk when the caller omitted it.
+///
+/// A notification gives no response, so a content-less `didOpen` reports
+/// success while leaving the server holding an empty buffer. Loading the file
+/// here is what makes `hover`/`definition`/`documentSymbol` work.
+fn hydrate_document_text(params: &mut Value) {
+    let Some(td) = params.get_mut("textDocument") else {
+        return;
+    };
+    let needs_text = td
+        .get("text")
+        .and_then(|t| t.as_str())
+        .map(|t| t.is_empty())
+        .unwrap_or(true);
+    if !needs_text {
+        return;
+    }
+    let Some(uri) = td.get("uri").and_then(|u| u.as_str()).map(String::from) else {
+        return;
+    };
+    let Some(path) = file_uri_to_path(&uri) else {
+        return;
+    };
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        td["text"] = Value::String(text);
+    }
+}
+
+/// Coerce `"line": "29"` into `"line": 29`.
+///
+/// Models routinely emit the integers in an LSP `Position` as JSON strings.
+/// The protocol requires numbers, and `typescript-language-server` answers a
+/// string position with `null` — so `hover`/`definition` silently returned
+/// nothing while `documentSymbol`, which takes no position, worked fine.
+fn normalize_position_params(params: &mut Value) {
+    if let Some(pos) = params.get_mut("position") {
+        coerce_position(pos);
+    }
+    if let Some(ranges) = params.get_mut("ranges").and_then(|r| r.as_array_mut()) {
+        for range in ranges {
+            for edge in ["start", "end"] {
+                if let Some(pos) = range.get_mut(edge) {
+                    coerce_position(pos);
+                }
+            }
+        }
+    }
+    if let Some(range) = params.get_mut("range") {
+        for edge in ["start", "end"] {
+            if let Some(pos) = range.get_mut(edge) {
+                coerce_position(pos);
+            }
+        }
+    }
+}
+
+fn coerce_position(pos: &mut Value) {
+    let Some(obj) = pos.as_object_mut() else {
+        return;
+    };
+    for key in ["line", "character"] {
+        let coerced = match obj.get(key) {
+            Some(Value::String(s)) => s.trim().parse::<i64>().ok().map(Value::from),
+            Some(Value::Number(n)) => n.as_i64().map(Value::from).or(Some(Value::from(0))),
+            _ => None,
+        };
+        if let Some(value) = coerced {
+            obj.insert(key.to_string(), value);
+        }
+    }
+}
+
+/// Supply a `languageId` when the caller omitted it.
+///
+/// The LSP spec makes `languageId` required and servers reject `"undefined"`,
+/// which shows up as a `serverLog` complaint and can make the server pick the
+/// wrong grammar. Deriving it from the extension is what the caller means.
+fn ensure_language_id(params: &mut Value, working_directory: &str) {
+    let Some(td) = params.get_mut("textDocument") else {
+        return;
+    };
+    let needs_id = td
+        .get("languageId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.is_empty() || s == "undefined")
+        .unwrap_or(true);
+    if !needs_id {
+        return;
+    }
+    let ext = td
+        .get("uri")
+        .and_then(|u| u.as_str())
+        .and_then(file_uri_to_path)
+        .and_then(|p| p.extension().map(|e| e.to_string_lossy().to_lowercase()))
+        .unwrap_or_default();
+    let id = match ext.as_str() {
+        "ts" | "mts" | "cts" => "typescript",
+        "tsx" => "typescriptreact",
+        "js" | "mjs" | "cjs" => "javascript",
+        "jsx" => "javascriptreact",
+        "json" => "json",
+        "py" | "pyi" => "python",
+        "rs" => "rust",
+        "go" => "go",
+        "java" => "java",
+        "c" | "h" => "c",
+        "cc" | "cpp" | "cxx" | "hpp" | "hh" => "cpp",
+        "cs" => "csharp",
+        "rb" => "ruby",
+        "php" => "php",
+        "sh" | "bash" | "zsh" => "shellscript",
+        "sql" => "sql",
+        "html" | "htm" => "html",
+        "css" => "css",
+        "scss" | "sass" => "scss",
+        "yaml" | "yml" => "yaml",
+        "toml" => "toml",
+        "md" | "markdown" => "markdown",
+        _ => {
+            let _ = working_directory;
+            "plaintext"
+        }
+    };
+    td["languageId"] = Value::String(id.into());
+}
+
+/// Inverse of [`path_to_file_uri`] for the local `file:` URIs we generate.
+fn file_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    let path = match rest.find('/') {
+        Some(0) => rest.to_string(),
+        Some(_) => return None, // non-empty authority: not a local file
+        None => return None,
+    };
+    let mut decoded = String::with_capacity(path.len());
+    let bytes = path.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+            if let Ok(b) = u8::from_str_radix(hex, 16) {
+                decoded.push(b as char);
+                i += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[i] as char);
+        i += 1;
+    }
+    // `file:///D:/…` keeps the leading slash; Windows wants it dropped.
+    let trimmed = decoded
+        .strip_prefix('/')
+        .filter(|rest| {
+            let b = rest.as_bytes();
+            b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+        })
+        .map(|rest| rest.to_string())
+        .unwrap_or(decoded);
+    Some(std::path::PathBuf::from(trimmed))
+}
+
+/// Public description text, kept out of the trait impl for testability.
+pub fn lsp_tool_description() -> &'static str {
+    "Talk to a language server over JSON-RPC stdio (e.g. \
+     [\"typescript-language-server\",\"--stdio\"]). One server process is kept alive per project \
+     and `initialize`/`initialized` are sent automatically on first use — never send them \
+     yourself. REQUIRED ORDER: send `textDocument/didOpen` BEFORE any query about the file; \
+     `typescript-language-server` only knows about files the client has opened, so this is what \
+     makes `hover`, `definition`, `documentSymbol` and even `workspace/symbol` work. For any \
+     `textDocument/*` method identify the file with `textDocument: {\"path\": \"src/a.ts\"}` \
+     (relative to the project root) or `{\"uri\": \"file:///…\"}`; both are canonicalised, and \
+     `didOpen` reads the file from disk for you when you omit `text`. Notifications (`$/…`, \
+     *didOpen, *didChange) return immediately with {\"sent\":true}; requests return the server's \
+     response, plus a `serverLog` array when the server reported anything."
+}
+
 pub struct LspTool {
     env: HashMap<String, String>,
+    sessions: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<LspSession>>>>>,
 }
 
 impl LspTool {
     pub fn new(configured_shell: Option<&str>) -> Self {
         Self {
             env: shell_env::capture_shell_env(configured_shell),
+            sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 }
@@ -1101,7 +1874,7 @@ impl Tool for LspTool {
         "lsp"
     }
     fn description(&self) -> &str {
-        "Send a JSON-RPC request to a language server over stdio"
+        lsp_tool_description()
     }
     fn input_schema(&self) -> Value {
         json!({
@@ -1110,12 +1883,19 @@ impl Tool for LspTool {
                 "command": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Command and args to spawn the language server"
+                    "description": "Command and args to spawn the language server, e.g. [\"typescript-language-server\",\"--stdio\"]. Only needed on the first call of a session."
                 },
-                "method": { "type": "string" },
-                "params": { "type": "object" }
+                "method": { "type": "string", "description": "LSP method, e.g. textDocument/didOpen, textDocument/hover, workspace/symbol" },
+                "params": {
+                    "type": "object",
+                    "description": "LSP params. For any textDocument/* method pass textDocument as {\"path\":\"src/a.ts\"} (relative to the project) or {\"uri\":\"file:///…\"}; both are canonicalised for you. Always didOpen a file before asking about it."
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "description": "Give up waiting for the server after this many milliseconds. Default 20000, clamped to 1000..120000."
+                }
             },
-            "required": ["command", "method"]
+            "required": ["method"]
         })
     }
     async fn execute(
@@ -1131,21 +1911,7 @@ impl Tool for LspTool {
             method = %input["method"].as_str().unwrap_or(""),
             "lsp started"
         );
-        let command: Vec<String> = input["command"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if command.is_empty() {
-            return Err(ToolFailure {
-                message: "command must be a non-empty array".into(),
-                retryable: false,
-            });
-        }
-        let method = input["method"].as_str().unwrap_or("");
+        let method = input["method"].as_str().unwrap_or("").to_string();
         if method.is_empty() {
             return Err(ToolFailure {
                 message: "method must not be empty".into(),
@@ -1153,93 +1919,203 @@ impl Tool for LspTool {
             });
         }
         let params = input.get("params").cloned().unwrap_or(json!({}));
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        });
+        let timeout_ms = input["timeout_ms"]
+            .as_u64()
+            .unwrap_or(20_000)
+            .clamp(1_000, 120_000);
 
-        let mut child = Command::new(&command[0]);
-        if command.len() > 1 {
-            child.args(&command[1..]);
-        }
-        child
-            .current_dir(&ctx.working_directory)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        shell_env::apply_to_command(&mut child, &self.env);
-        crate::process::hide_console_async(&mut child);
-
-        let mut child = child.spawn().map_err(|e| ToolFailure {
-            message: e.to_string(),
-            retryable: true,
-        })?;
-
-        let mut stdin = child.stdin.take().ok_or_else(|| ToolFailure {
-            message: "failed to open lsp stdin".into(),
-            retryable: false,
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| ToolFailure {
-            message: "failed to open lsp stdout".into(),
-            retryable: false,
-        })?;
-
-        let payload = format!(
-            "Content-Length: {}\r\n\r\n{}",
-            request.to_string().len(),
-            request
-        );
-        stdin
-            .write_all(payload.as_bytes())
-            .await
-            .map_err(|e| ToolFailure {
-                message: e.to_string(),
-                retryable: true,
-            })?;
-        stdin.shutdown().await.ok();
-
-        let mut reader = BufReader::new(stdout);
-        let mut header = String::new();
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.map_err(|e| ToolFailure {
-                message: e.to_string(),
-                retryable: true,
-            })?;
-            if line == "\r\n" || line.is_empty() {
-                break;
+        // One server per project, reused across calls. Spawning a fresh server
+        // per call discarded the index and any `didOpen` state, so document
+        // features failed with "Unexpected resource <uri>" and
+        // `workspace/symbol` always came back empty.
+        let session_key = format!("{}|{}", ctx.working_directory, method_is_shutdown(&method));
+        if method == "shutdown" || method == "exit" {
+            if let Ok(mut map) = self.sessions.lock() {
+                if let Some(session) = map.remove(&ctx.working_directory) {
+                    drop(session);
+                }
             }
-            header.push_str(&line);
+            return Ok(json!({ "stopped": true }));
         }
-        let content_length = header
-            .lines()
-            .find_map(|l| l.strip_prefix("Content-Length:").map(|v| v.trim()))
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(0);
-        let mut body = vec![0u8; content_length];
-        if content_length > 0 {
-            use tokio::io::AsyncReadExt;
-            reader
-                .read_exact(&mut body)
+
+        let existing = self
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&ctx.working_directory).cloned());
+        let session = match existing {
+            Some(session) => session,
+            None => {
+                let command = input["command"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if command.is_empty() {
+                    return Err(ToolFailure {
+                        message: "command must be a non-empty array on the first call of a \
+                                  session (e.g. [\"typescript-language-server\",\"--stdio\"])"
+                            .into(),
+                        retryable: false,
+                    });
+                }
+                let created = Arc::new(tokio::sync::Mutex::new(
+                    LspSession::spawn(&command, &ctx.working_directory, &self.env).await?,
+                ));
+                if let Ok(mut map) = self.sessions.lock() {
+                    map.insert(ctx.working_directory.clone(), Arc::clone(&created));
+                }
+                let _ = session_key;
+                created
+            }
+        };
+
+        let mut guard = session.lock().await;
+        // Canonicalize `textDocument` before it reaches the server. A
+        // hand-written URI (lower-case drive, backslashes, unencoded spaces)
+        // silently fails tsserver's project lookup and every document feature
+        // comes back empty. `path` is accepted as a friendlier alternative.
+        let mut params = params;
+        if method.contains("textDocument/") {
+            normalize_document_params(&mut params, &ctx.working_directory);
+            normalize_position_params(&mut params);
+        }
+        // A `didOpen` with no `text` registers an *empty* document, and every
+        // later query then quietly returns `[]`/`null` — the failure looks like
+        // a broken server rather than a missing parameter. Models routinely
+        // send only the URI, so read the file for them.
+        if method == "textDocument/didOpen" {
+            hydrate_document_text(&mut params);
+            ensure_language_id(&mut params, &ctx.working_directory);
+        }
+        // Handshake on first use so the workspace is indexed and the client
+        // capabilities are declared; without it `workspace/symbol` returns [].
+        if !guard.initialized {
+            let root_uri = path_to_file_uri(&ctx.working_directory);
+            let init = json!({
+                "processId": std::process::id(),
+                "rootUri": root_uri,
+                "rootPath": ctx.working_directory,
+                "workspaceFolders": [{
+                    "uri": path_to_file_uri(&ctx.working_directory),
+                    "name": "workspace"
+                }],
+                "capabilities": {
+                    "textDocument": {
+                        "synchronization": { "dynamicRegistration": false },
+                        "hover": { "contentFormat": ["plaintext", "markdown"] },
+                        "definition": { "linkSupport": true },
+                        "documentSymbol": { "hierarchicalDocumentSymbolSupport": true }
+                    },
+                    "workspace": { "symbol": {}, "workspaceFolders": true },
+                    "window": { "workDoneProgress": true }
+                },
+                "clientInfo": { "name": deepseekcode_types::PRODUCT_NAME, "version": env!("CARGO_PKG_VERSION") }
+            });
+            let initialized = timeout(
+                Duration::from_millis(timeout_ms),
+                guard.request("initialize", init),
+            )
+            .await
+            .map_err(|_| ToolFailure {
+                message: format!(
+                    "lsp server did not answer `initialize` within {timeout_ms}ms. \
+                         The command is probably not a language server."
+                ),
+                retryable: false,
+            })?
+            .map_err(|e| ToolFailure {
+                message: format!("lsp initialize failed: {e}"),
+                retryable: false,
+            })?;
+            if let Some(err) = initialized.get("error") {
+                return Err(ToolFailure {
+                    message: format!("lsp initialize rejected: {err}"),
+                    retryable: false,
+                });
+            }
+            // `initialized` is a notification: no id, no reply.
+            let _ = timeout(
+                Duration::from_millis(2_000),
+                guard.notify("initialized", json!({})),
+            )
+            .await;
+            guard.initialized = true;
+        }
+
+        if is_notification(&method) {
+            guard
+                .notify(&method, params)
                 .await
                 .map_err(|e| ToolFailure {
-                    message: e.to_string(),
-                    retryable: true,
+                    message: format!("lsp notification `{method}` failed: {e}"),
+                    retryable: false,
                 })?;
+            tracing::debug!(
+                target: deepseekcode_telemetry::TOOL,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                session_id = %ctx.session_id,
+                tool = "lsp",
+                method = %method,
+                "lsp notification sent"
+            );
+            return Ok(json!({ "sent": true, "notification": method }));
         }
-        let response: Value = serde_json::from_slice(&body).unwrap_or(json!({
-            "error": "invalid JSON-RPC response"
-        }));
 
-        let _ = child.kill().await;
-        Ok(json!({
-            "response": response,
-            "method": method,
-            "target": command.join(" "),
-        }))
+        let response = timeout(
+            Duration::from_millis(timeout_ms),
+            guard.request(&method, params),
+        )
+        .await
+        .map_err(|_| ToolFailure {
+            message: format!(
+                "lsp did not respond to `{method}` within {timeout_ms}ms. If no language \
+                 server is installed, do not retry — use the file/grep/glob tools."
+            ),
+            retryable: false,
+        })?
+        .map_err(|e| ToolFailure {
+            message: format!("lsp request `{method}` failed: {e}"),
+            retryable: false,
+        })?;
+        tracing::debug!(
+            target: deepseekcode_telemetry::TOOL,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            session_id = %ctx.session_id,
+            tool = "lsp",
+            method = %method,
+            "lsp completed"
+        );
+        Ok(response)
     }
+}
+
+/// `true` when the caller asked to stop the session (used only for logging).
+fn method_is_shutdown(method: &str) -> bool {
+    matches!(method, "shutdown" | "exit")
+}
+
+/// `D:\a\b` → `file:///D:/a/b` (LSP requires percent-encoded, forward-slash URIs).
+fn path_to_file_uri(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let trimmed = normalized.trim_start_matches('/');
+    let mut out = String::from("file:///");
+    for ch in trimmed.chars() {
+        match ch {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' | '/' | ':' => out.push(ch),
+            ' ' => out.push_str("%20"),
+            other => {
+                let mut buf = [0u8; 4];
+                for byte in other.encode_utf8(&mut buf).as_bytes() {
+                    out.push_str(&format!("%{byte:02X}"));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn resolve_todo_store(
@@ -1274,23 +2150,28 @@ pub(crate) fn resolve_path(
 
 fn shell_base_name(shell: &str) -> String {
     let lower = shell.to_lowercase();
-    lower
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(&lower)
+    let name = lower.rsplit(['/', '\\']).next().unwrap_or(&lower);
+    // Windows executables carry a `.exe` suffix. `C:\Program Files\Git\bin\
+    // bash.exe` must still be recognised as `bash`, otherwise the shell falls
+    // through to the cmd.exe `/C` branch and every command fails instantly
+    // with an invalid-option error —a fully broken bash tool on Windows.
+    name.strip_suffix(".exe")
+        .or_else(|| name.strip_suffix(".cmd"))
+        .or_else(|| name.strip_suffix(".bat"))
+        .unwrap_or(name)
         .to_string()
 }
 
 fn is_powershell(shell: &str) -> bool {
     let name = shell_base_name(shell);
-    name.contains("powershell") || name == "pwsh" || name == "pwsh.exe"
+    name.contains("powershell") || name == "pwsh" || name == "pwsh-preview"
 }
 
 /// Shells that accept `-lc` (login + command) argument style.
 fn is_posix_style_shell(shell: &str) -> bool {
     matches!(
         shell_base_name(shell).as_str(),
-        "bash" | "sh" | "zsh" | "dash" | "ksh"
+        "bash" | "sh" | "zsh" | "dash" | "ksh" | "ash"
     )
 }
 
@@ -1517,8 +2398,590 @@ fn prepare_background_bash_command(command: &str) -> String {
 }
 
 #[cfg(test)]
+mod lsp_protocol_tests {
+    use serde_json::json;
+
+    use super::{
+        file_uri_to_path, hydrate_document_text, is_notification, lsp_tool_description,
+        normalize_document_params, normalize_position_params, path_to_file_uri,
+    };
+
+    /// Regression: notifications were sent WITH an `id`, so
+    /// `typescript-language-server` treated `didOpen` as a request and replied
+    /// `-32601 Unhandled method` — which is why no document feature worked.
+    #[test]
+    fn notifications_are_classified_without_an_id() {
+        for method in [
+            "textDocument/didOpen",
+            "textDocument/didChange",
+            "textDocument/didClose",
+            "initialized",
+            "workspace/didChangeConfiguration",
+            "$/cancelRequest",
+        ] {
+            assert!(is_notification(method), "{method} must be a notification");
+        }
+    }
+
+    #[test]
+    fn requests_are_not_treated_as_notifications() {
+        for method in [
+            "initialize",
+            "textDocument/hover",
+            "textDocument/definition",
+            "textDocument/documentSymbol",
+            "workspace/symbol",
+            "workspace/executeCommand",
+        ] {
+            assert!(!is_notification(method), "{method} must be a request");
+        }
+    }
+
+    /// `rootUri` must be a valid file URI or the server indexes nothing and
+    /// `workspace/symbol` comes back empty.
+    #[test]
+    fn path_to_file_uri_handles_windows_and_spaces() {
+        assert_eq!(
+            path_to_file_uri(r"D:\Workspace\Echoo"),
+            "file:///D:/Workspace/Echoo"
+        );
+        assert_eq!(path_to_file_uri(r"C:\a b\c.ts"), "file:///C:/a%20b/c.ts");
+        assert!(path_to_file_uri("/home/u/p").starts_with("file:///home/u/p"));
+    }
+
+    /// The ordering requirement must be in the description the model reads,
+    /// otherwise it queries a document it never opened and reports LSP broken.
+    #[test]
+    fn description_states_the_didopen_precondition() {
+        let d = lsp_tool_description();
+        assert!(d.contains("didOpen"), "{d}");
+        assert!(d.contains("BEFORE"), "{d}");
+    }
+
+    /// A lower-case drive letter is enough for tsserver to fail the project
+    /// lookup and return `No Project.` with every document feature empty.
+    #[test]
+    fn document_uri_is_canonicalised_regardless_of_how_it_was_written() {
+        let dir = r"D:\Workspace\Echoo";
+
+        let mut p =
+            json!({"textDocument":{"uri":"file:///d:/workspace/echoo/apps/mobile/src/a.ts"}});
+        normalize_document_params(&mut p, dir);
+        assert_eq!(
+            p["textDocument"]["uri"],
+            json!("file:///D:/workspace/echoo/apps/mobile/src/a.ts")
+        );
+
+        // Backslashes instead of forward slashes.
+        let mut p = json!({"textDocument":{"uri":r"file:///D:\Workspace\Echoo\a.ts"}});
+        normalize_document_params(&mut p, dir);
+        assert_eq!(
+            p["textDocument"]["uri"],
+            json!("file:///D:/Workspace/Echoo/a.ts")
+        );
+
+        // Percent-encoded spaces survive a decode/re-encode round trip.
+        let mut p = json!({"textDocument":{"uri":"file:///D:/Work%20space/a.ts"}});
+        normalize_document_params(&mut p, dir);
+        assert_eq!(
+            p["textDocument"]["uri"],
+            json!("file:///D:/Work%20space/a.ts")
+        );
+    }
+
+    /// `path` is the safer input: the model cannot get a URI wrong.
+    #[test]
+    fn document_path_resolves_against_the_project() {
+        let dir = r"D:\Workspace\Echoo";
+
+        let mut p = json!({"textDocument":{"path":"apps/mobile/src/a.ts"}});
+        normalize_document_params(&mut p, dir);
+        assert_eq!(
+            p["textDocument"]["uri"],
+            json!("file:///D:/Workspace/Echoo/apps/mobile/src/a.ts")
+        );
+        assert!(p["textDocument"].get("path").is_none());
+
+        // Absolute paths and drive-relative roots keep working.
+        let mut p = json!({"textDocument":{"path":r"D:\other\a.ts"}});
+        normalize_document_params(&mut p, dir);
+        assert_eq!(p["textDocument"]["uri"], json!("file:///D:/other/a.ts"));
+
+        let mut p = json!({"textDocument":{"path":"/home/u/a.ts"}});
+        normalize_document_params(&mut p, dir);
+        assert_eq!(p["textDocument"]["uri"], json!("file:///home/u/a.ts"));
+    }
+
+    /// Params without a `textDocument` (workspace/*) must pass through
+    /// untouched rather than panic.
+    #[test]
+    fn normalization_leaves_other_params_alone() {
+        let dir = r"D:\Workspace\Echoo";
+
+        let mut p = json!({"query":"Foo"});
+        normalize_document_params(&mut p, dir);
+        assert_eq!(p, json!({"query":"Foo"}));
+
+        let mut p = json!({});
+        normalize_document_params(&mut p, dir);
+        assert_eq!(p, json!({}));
+    }
+
+    /// The regression that made LSP look broken: a `didOpen` with no `text`
+    /// registers an empty document and every later query returns nothing.
+    #[test]
+    fn didopen_without_text_is_loaded_from_disk() {
+        let dir = std::env::temp_dir().join(format!("lsp-hydrate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.ts");
+        std::fs::write(&file, "export const alpha = 1;\n").unwrap();
+        let uri = path_to_file_uri(file.to_str().unwrap());
+
+        let mut p = json!({"textDocument":{"uri":uri,"languageId":"typescript","version":1}});
+        hydrate_document_text(&mut p);
+        assert_eq!(
+            p["textDocument"]["text"],
+            json!("export const alpha = 1;\n")
+        );
+
+        // Caller-supplied content wins: never clobber unsaved buffers.
+        let mut p = json!({"textDocument":{"uri":uri,"text":"draft"}});
+        hydrate_document_text(&mut p);
+        assert_eq!(p["textDocument"]["text"], json!("draft"));
+
+        // An unreadable path must not invent content or panic.
+        let mut p = json!({"textDocument":{"uri":"file:///definitely/not/here.ts"}});
+        hydrate_document_text(&mut p);
+        assert!(p["textDocument"].get("text").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod bash_execution_tests {
+    use super::*;
+    use deepseekcode_schema::tool::ToolContextExtras;
+    use deepseekcode_types::{MessageId, SessionId, ToolCallId};
+
+    fn ctx(dir: &std::path::Path) -> ToolContext {
+        ToolContext {
+            session_id: SessionId::new(),
+            agent: "build".into(),
+            assistant_message_id: MessageId::new(),
+            tool_call_id: ToolCallId::new(),
+            working_directory: dir.to_string_lossy().to_string(),
+            extras: ToolContextExtras { todo_store: None },
+        }
+    }
+
+    /// End-to-end: the bash tool must actually run a trivial command and
+    /// return its stdout. `echo hello` is the smallest possible proof that
+    /// the shell works; everything the LLM concluded about "shell broken" was
+    /// downstream of this.
+    #[tokio::test]
+    async fn echo_hello_runs_and_returns_stdout() {
+        let dir = std::env::temp_dir();
+        let tool = BashTool::new(None, HashMap::new());
+        let out = tool
+            .execute(
+                json!({ "command": "echo hello", "timeout_ms": 30_000 }),
+                &ctx(&dir),
+            )
+            .await
+            .expect("bash must succeed");
+        let text = out.to_string();
+        assert!(
+            text.contains("hello"),
+            "stdout missing 'hello'; tool returned: {text}"
+        );
+    }
+
+    /// The default Windows path wraps the command in `chcp 65001 >nul && …`.
+    /// That wrapper must not swallow or corrupt the command's own output.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn echo_hello_survives_the_utf8_wrapper() {
+        let dir = std::env::temp_dir();
+        let tool = BashTool::new(None, HashMap::new());
+        let out = tool
+            .execute(
+                json!({ "command": "echo hello", "timeout_ms": 30_000 }),
+                &ctx(&dir),
+            )
+            .await
+            .expect("bash must succeed");
+        let text = out.to_string();
+        assert!(text.contains("hello"), "{text}");
+        // The wrapper's own `chcp` chatter must not appear in the result.
+        assert!(!text.contains("Active code page"), "{text}");
+    }
+
+    /// A configured Git Bash must receive `-lc`, not cmd's `/C`.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn configured_git_bash_executes_commands() {
+        let bash = [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+        ]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists());
+        let Some(bash) = bash else {
+            // Git Bash not installed on this machine; detection is covered by
+            // the pure unit tests.
+            return;
+        };
+        let dir = std::env::temp_dir();
+        let tool = BashTool::new(Some(bash.to_string()), HashMap::new());
+        let out = tool
+            .execute(
+                json!({ "command": "echo hello", "timeout_ms": 30_000 }),
+                &ctx(&dir),
+            )
+            .await
+            .expect("configured bash must succeed");
+        let text = out.to_string();
+        assert!(text.contains("hello"), "Git Bash returned: {text}");
+        assert!(!text.contains("invalid option"), "argv style wrong: {text}");
+    }
+
+    /// THE decisive regression: the read loop's `select!` had **no
+    /// `child.wait()` branch**, and its `else => break` only fires when every
+    /// enabled branch has completed. The cancel branch is enabled whenever
+    /// `cancel_token.is_some()` and its future never completes, so with
+    /// services installed (production) the select blocked forever once both
+    /// pipes hit EOF —EVERY spawned command hit the timeout, even
+    /// `echo hello`.
+    ///
+    /// The earlier tests all passed because `current_services()` is `None`
+    /// there, which disables the cancel branch and lets `else` break. This one
+    /// installs a real cancel token, i.e. the production condition.
+    #[tokio::test]
+    async fn bash_completes_with_a_cancel_token_installed() {
+        let dir = std::env::temp_dir();
+        let tool = BashTool::new(None, HashMap::new());
+        let cancel = Arc::new(crate::tools::services::CancelToken::new());
+        let services = crate::tools::services::ToolServices {
+            progress: None,
+            todo_store: None,
+            events: None,
+            question_tx: None,
+            task_spawner: None,
+            cancel: Some(cancel),
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            crate::tools::services::with_services_async(services, async {
+                tool.execute(
+                    json!({ "command": "echo hello", "timeout_ms": 15_000 }),
+                    &ctx(&dir),
+                )
+                .await
+            }),
+        )
+        .await;
+        let out = result
+            .expect("bash deadlocked: select! never observed the process exiting")
+            .expect("bash must succeed");
+        assert!(out.to_string().contains("hello"), "{}", out);
+    }
+
+    /// `BufRead::lines()` fails on the first non-UTF-8 byte, and the reader
+    /// then dropped the ENTIRE remaining stream. One Chinese character in
+    /// `dir` output therefore erased every later byte — including plain ASCII.
+    #[tokio::test]
+    async fn non_utf8_output_does_not_discard_the_stream() {
+        let dir = std::env::temp_dir();
+        let tool = BashTool::new(None, HashMap::new());
+        let out = tool
+            .execute(
+                json!({ "command": "echo \u{4e16}\u{754c} && echo MARKER_AFTER", "timeout_ms": 30_000 }),
+                &ctx(&dir),
+            )
+            .await
+            .expect("bash must succeed");
+        let stdout = out["stdout"].as_str().unwrap_or_default().to_string();
+        assert!(
+            stdout.contains("MARKER_AFTER"),
+            "ASCII following non-UTF-8 output was dropped; stdout={stdout:?}"
+        );
+        assert!(
+            stdout.contains('\u{4e16}'),
+            "non-ASCII text was mangled; stdout={stdout:?}"
+        );
+    }
+
+    /// A decoding problem must never be reported as a command failure: the
+    /// exit code has to be the child's real status.
+    #[tokio::test]
+    async fn exit_code_is_never_fabricated_for_undecodable_output() {
+        let dir = std::env::temp_dir();
+        let tool = BashTool::new(None, HashMap::new());
+        let out = tool
+            .execute(
+                json!({ "command": "echo \u{4e16}\u{754c} && exit 0", "timeout_ms": 30_000 }),
+                &ctx(&dir),
+            )
+            .await
+            .expect("bash must succeed");
+        assert_eq!(
+            out["exit_code"].as_i64(),
+            Some(0),
+            "decodable command reported a bogus exit code: {out}"
+        );
+    }
+
+    /// `Encoding::for_label("cp936")` returns `None`, so the code page must be
+    /// mapped by number or GBK output decodes as Windows-1252 mojibake.
+    #[cfg(windows)]
+    #[test]
+    fn code_page_936_decodes_gbk() {
+        // "当前代码页" encoded as GBK.
+        let gbk = [0xB5u8, 0xB1, 0xC7, 0xB0, 0xB4, 0xFA, 0xC2, 0xEB, 0xD2, 0xB3];
+        let (text, _, had_errors) = encoding_for_code_page(936).decode(&gbk);
+        assert!(!had_errors, "GBK bytes did not decode cleanly");
+        assert_eq!(text, "\u{5f53}\u{524d}\u{4ee3}\u{7801}\u{9875}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn code_page_65001_is_utf8() {
+        assert_eq!(encoding_for_code_page(65001).name(), "UTF-8");
+    }
+
+    /// A line may straddle two reads, and its bytes may be split mid
+    /// character — common for large `dir` output.
+    #[tokio::test]
+    async fn reader_handles_split_multibyte_sequences() {
+        let mut reader = OutputLines::new(std::io::Cursor::new(
+            "first\nsecond line\nlast".as_bytes().to_vec(),
+        ));
+        assert_eq!(
+            reader.next_decoded_line().await.unwrap().as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            reader.next_decoded_line().await.unwrap().as_deref(),
+            Some("second line")
+        );
+        assert_eq!(
+            reader.next_decoded_line().await.unwrap().as_deref(),
+            Some("last")
+        );
+        assert_eq!(reader.next_decoded_line().await.unwrap(), None);
+    }
+
+    /// Regression: a command whose output is only decodable through the OEM code
+    /// page reported a bogus exit code and lost its output.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn legacy_code_page_output_keeps_its_real_exit_code() {
+        let dir = std::env::temp_dir();
+        let tool = BashTool::new(None, HashMap::new());
+        let out = tool
+            .execute(
+                // `chcp 936` switches cmd to GBK for the rest of the line, so
+                // the Chinese banner and the ASCII after it exercise both paths.
+                json!({ "command": "chcp 936 && echo \u{4e16}\u{754c} && exit 0", "timeout_ms": 30_000 }),
+                &ctx(&dir),
+            )
+            .await
+            .expect("bash must succeed");
+        assert_eq!(
+            out["exit_code"].as_i64(),
+            Some(0),
+            "GBK command reported a bogus exit code: {out}"
+        );
+        let stdout = out["stdout"].as_str().unwrap_or_default().to_string();
+        assert!(
+            stdout.contains('\u{4e16}'),
+            "GBK output was dropped: {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn utf8_is_preferred_and_gbk_is_the_fallback() {
+        assert_eq!(
+            decode_console_bytes("\u{4e16}\u{754c}".as_bytes()),
+            "\u{4e16}\u{754c}"
+        );
+        // 世界 encoded as GBK.
+        assert_eq!(
+            decode_console_bytes(&[0xCAu8, 0xC0, 0xBD, 0xE7]),
+            "\u{4e16}\u{754c}"
+        );
+    }
+
+    /// The reader strips the line terminator; the caller re-joins with `\n`,
+    /// so keeping it produced `\r\n\n` in every captured stream.
+    #[tokio::test]
+    async fn lines_carry_no_trailing_terminator() {
+        let mut reader = OutputLines::new(std::io::Cursor::new(b"a\r\nb\r\n".to_vec()));
+        assert_eq!(
+            reader.next_decoded_line().await.unwrap().as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            reader.next_decoded_line().await.unwrap().as_deref(),
+            Some("b")
+        );
+        assert_eq!(reader.next_decoded_line().await.unwrap(), None);
+        assert_eq!(trim_cr(b"a\r"), b"a");
+        assert_eq!(trim_cr(b"a"), b"a");
+    }
+
+    /// Models emit LSP `Position` integers as JSON strings. The protocol
+    /// requires numbers and `typescript-language-server` answers a string
+    /// position with `null`, so `hover`/`definition` returned nothing while
+    /// `documentSymbol` (which takes no position) worked.
+    #[test]
+    fn string_positions_are_coerced_to_numbers() {
+        let mut p = json!({"position":{"character":"25","line":"29"}});
+        normalize_position_params(&mut p);
+        assert_eq!(p["position"]["line"], json!(29));
+        assert_eq!(p["position"]["character"], json!(25));
+
+        // Already-numeric positions are left alone.
+        let mut p = json!({"position":{"character":7,"line":3}});
+        normalize_position_params(&mut p);
+        assert_eq!(p["position"]["line"], json!(3));
+        assert_eq!(p["position"]["character"], json!(7));
+
+        // Nested range shapes used by definition/references/formatting.
+        let mut p = json!({"ranges":[{"start":{"line":"1","character":"2"},
+                                     "end":{"line":"3","character":"4"}}]});
+        normalize_position_params(&mut p);
+        assert_eq!(p["ranges"][0]["start"]["line"], json!(1));
+        assert_eq!(p["ranges"][0]["end"]["character"], json!(4));
+
+        let mut p = json!({"range":{"start":{"line":"5","character":"0"},
+                                    "end":{"line":"6","character":"0"}}});
+        normalize_position_params(&mut p);
+        assert_eq!(p["range"]["start"]["line"], json!(5));
+        assert_eq!(p["range"]["end"]["line"], json!(6));
+
+        // Params without a position must pass through untouched.
+        let mut p = json!({"textDocument":{"uri":"file:///a.ts"}});
+        normalize_position_params(&mut p);
+        assert_eq!(p, json!({"textDocument":{"uri":"file:///a.ts"}}));
+
+        // Non-numeric junk is left alone rather than silently zeroed.
+        let mut p = json!({"position":{"line":"abc"}});
+        normalize_position_params(&mut p);
+        assert_eq!(p["position"]["line"], json!("abc"));
+    }
+
+    /// `languageId` is required by the spec; servers log
+    /// `Invalid languageId "undefined"` and may pick the wrong grammar.
+    #[test]
+    fn didopen_infers_a_language_id() {
+        let dir = r"D:\Workspace\Echoo";
+
+        let mut p = json!({"textDocument":{"uri":"file:///D:/p/a.ts","text":"x"}});
+        ensure_language_id(&mut p, dir);
+        assert_eq!(p["textDocument"]["languageId"], json!("typescript"));
+
+        let mut p = json!({"textDocument":{"uri":"file:///D:/p/a.tsx","text":"x"}});
+        ensure_language_id(&mut p, dir);
+        assert_eq!(p["textDocument"]["languageId"], json!("typescriptreact"));
+
+        let mut p = json!({"textDocument":{"uri":"file:///D:/p/a.rs","text":"x"}});
+        ensure_language_id(&mut p, dir);
+        assert_eq!(p["textDocument"]["languageId"], json!("rust"));
+
+        // An explicit value is never overwritten.
+        let mut p = json!({"textDocument":{"uri":"file:///D:/p/a.ts","languageId":"vue"}});
+        ensure_language_id(&mut p, dir);
+        assert_eq!(p["textDocument"]["languageId"], json!("vue"));
+
+        // `"undefined"` is what an absent value serialises to.
+        let mut p = json!({"textDocument":{"uri":"file:///D:/p/a.py","languageId":"undefined"}});
+        ensure_language_id(&mut p, dir);
+        assert_eq!(p["textDocument"]["languageId"], json!("python"));
+
+        let mut p = json!({"textDocument":{"uri":"file:///D:/p/README","text":"x"}});
+        ensure_language_id(&mut p, dir);
+        assert_eq!(p["textDocument"]["languageId"], json!("plaintext"));
+    }
+
+    #[test]
+    fn file_uri_round_trips_through_path() {
+        for raw in [r"D:\Workspace\Echoo\a.ts", r"C:\a b\c.ts", "/home/u/p.ts"] {
+            let uri = path_to_file_uri(raw);
+            let back = file_uri_to_path(&uri).expect("local file uri");
+            assert_eq!(
+                back.to_str().unwrap().replace('/', "\\"),
+                raw.replace('/', "\\"),
+                "{raw} -> {uri}"
+            );
+        }
+        assert!(file_uri_to_path("http://example.com/a").is_none());
+    }
+}
+
+#[cfg(test)]
+mod shell_detection_tests {
+    use super::{is_posix_style_shell, is_powershell, shell_base_name};
+
+    /// Regression: `C:\Program Files\Git\bin\bash.exe` used to fail every
+    /// predicate, fall through to the cmd.exe branch and be invoked as
+    /// `bash.exe /C "<command>"`. `-C` is not a bash flag, so EVERY command
+    /// failed instantly —the whole shell appeared broken on Windows.
+    #[test]
+    fn windows_git_bash_is_posix_style() {
+        for shell in [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"D:\tools\Git\bin\bash.EXE",
+        ] {
+            assert_eq!(shell_base_name(shell), "bash", "for {shell}");
+            assert!(is_posix_style_shell(shell), "{shell} must use -lc");
+            assert!(!is_powershell(shell), "{shell} is not powershell");
+        }
+    }
+
+    #[test]
+    fn powershell_variants_still_detected() {
+        for shell in [
+            "pwsh",
+            "pwsh.exe",
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+        ] {
+            assert!(is_powershell(shell), "{shell}");
+        }
+        assert!(!is_posix_style_shell("pwsh.exe"));
+    }
+
+    #[test]
+    fn other_shells_and_extensions_normalize() {
+        assert!(is_posix_style_shell("/bin/bash"));
+        assert!(is_posix_style_shell("zsh"));
+        assert!(is_posix_style_shell("sh.exe"));
+        // A cmd-family shell must NOT be treated as posix (no `-lc`).
+        assert!(!is_posix_style_shell("cmd.exe"));
+        assert!(!is_posix_style_shell("C:\\Windows\\System32\\cmd.exe"));
+    }
+}
+
+#[cfg(test)]
 mod patch_tests {
     use super::*;
+
+    #[test]
+    fn bash_description_tells_model_to_raise_the_timeout() {
+        // The single biggest cause of "bash is unusable": a 60s default with a
+        // schema that never mentioned `timeout_ms`, so the model never raised
+        // it and concluded the shell was broken.
+        let tool = super::BashTool::new(None, Default::default());
+        let description = tool.description();
+        assert!(
+            description.contains("timeout_ms"),
+            "description must mention timeout_ms: {description}"
+        );
+        let schema = tool.input_schema().to_string();
+        assert!(schema.contains("timeout_ms"), "{schema}");
+    }
 
     #[test]
     fn parse_unified_patch_keeps_last_hunk_of_each_file() {

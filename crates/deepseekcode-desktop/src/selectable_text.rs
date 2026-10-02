@@ -676,25 +676,82 @@ impl SelectableText {
             return Vec::new();
         }
         let text_system = window.text_system();
-        let full_runs = self.to_text_runs(0..text.len());
-        if full_runs.is_empty() {
-            return Vec::new();
-        }
-        let full = text_system.shape_line(self.text.clone(), self.font_size, &full_runs, None);
-        let ranges = match wrap_width {
-            Some(width) => wrap_ranges(&full, text, width),
-            None => vec![(0, text.len())],
-        };
-        ranges
-            .into_iter()
-            .map(|(start, end)| {
+        let mut out = Vec::new();
+        // Split on hard breaks FIRST: GPUI's `shape_line` asserts that its
+        // text argument contains no newline, so a `\n` must never reach it.
+        // LLM output legitimately carries newlines (soft breaks rendered as
+        // line breaks, user prompts typed across several lines), and handing
+        // one over aborted the whole process via
+        // `text_system.rs: text argument should not contain newlines`.
+        for (line_start, line_end) in hard_line_ranges(text) {
+            let line_runs = self.to_text_runs(line_start..line_end);
+            if line_runs.is_empty() {
+                continue;
+            }
+            let line_text: SharedString = text[line_start..line_end].into();
+            let full = text_system.shape_line(line_text.clone(), self.font_size, &line_runs, None);
+            let ranges = match wrap_width {
+                Some(width) => wrap_ranges(&full, &line_text, width),
+                None => vec![(0, line_text.len())],
+            };
+            for (rel_start, rel_end) in ranges {
+                let start = line_start + rel_start;
+                let end = line_start + rel_end;
                 let runs = self.to_text_runs(start..end);
                 let fragment_text: SharedString = text[start..end].into();
                 let line = text_system.shape_line(fragment_text, self.font_size, &runs, None);
-                TextFragment { start, end, line }
-            })
-            .collect()
+                out.push(TextFragment { start, end, line });
+            }
+        }
+        out
     }
+
+    /// First-paint line-count estimate, computed per hard line so a
+    /// multi-line block is not measured as one very wide line.
+    fn estimate_line_count(&self, window: &mut Window) -> usize {
+        let text = self.text.as_ref();
+        if text.is_empty() {
+            return 1;
+        }
+        let text_system = window.text_system();
+        let mut total = 0usize;
+        for (start, end) in hard_line_ranges(text) {
+            let runs = self.to_text_runs(start..end);
+            if runs.is_empty() {
+                // Blank line: still occupies one row.
+                total += 1;
+                continue;
+            }
+            let line_text: SharedString = text[start..end].into();
+            let shaped = text_system.shape_line(line_text, self.font_size, &runs, None);
+            let width: f32 = shaped.width().into();
+            total += ((width / FIRST_ESTIMATE_WIDTH).ceil() as usize).max(1);
+        }
+        total.max(1)
+    }
+}
+
+/// Byte ranges of the hard lines in `text`, excluding the `\n` separators.
+///
+/// Returns one range per line; a trailing separator does not produce a
+/// trailing empty range. Ranges are always `start < end` on char boundaries,
+/// and never contain a `\n`, so callers can hand them straight to
+/// `shape_line` and byte-range slicing.
+pub(crate) fn hard_line_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for (offset, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            if offset > start {
+                out.push((start, offset));
+            }
+            start = offset + 1;
+        }
+    }
+    if start < text.len() {
+        out.push((start, text.len()));
+    }
+    out
 }
 
 impl Element for SelectableText {
@@ -724,16 +781,7 @@ impl Element for SelectableText {
             .timeline_text_layouts
             .get(self.block.as_ref())
             .map(|layout| layout.fragments.len().max(1))
-            .unwrap_or_else(|| {
-                let full = window.text_system().shape_line(
-                    self.text.clone(),
-                    self.font_size,
-                    &self.to_text_runs(0..self.text.len()),
-                    None,
-                );
-                let width: f32 = full.width().into();
-                ((width / FIRST_ESTIMATE_WIDTH).ceil() as usize).max(1)
-            });
+            .unwrap_or_else(|| self.estimate_line_count(window));
         let mut style = Style::default();
         style.size.width = relative(1.).into();
         style.size.height = (self.line_height * lines as f32).into();
@@ -1375,10 +1423,10 @@ mod tests {
     // NOTE: never `use super::*` here — the parent's `use gpui::*` would pull
     // gpui's `test` module into scope and break `#[test]` resolution.
     use super::{
-        breakable_before, collect_selection_text, forbidden_line_leader, is_break_after_punct,
-        is_cjk, is_closing_punct, is_opening_punct, is_wide_char, normalize_range,
-        selection_range_for_block, snap_to_grapheme, word_bounds_at, TextBlockLayout,
-        TimelineTextSelection,
+        breakable_before, collect_selection_text, forbidden_line_leader, hard_line_ranges,
+        is_break_after_punct, is_cjk, is_closing_punct, is_opening_punct, is_wide_char,
+        normalize_range, selection_range_for_block, snap_to_grapheme, word_bounds_at,
+        TextBlockLayout, TimelineTextSelection,
     };
 
     #[test]
@@ -1587,5 +1635,48 @@ mod tests {
         for ch in ['a', 'Z', '1', ' ', '-', '.'] {
             assert!(!is_wide_char(ch), "expected narrow: {ch}");
         }
+    }
+
+    /// Regression for the hard process abort:
+    /// `panic: text argument should not contain newlines` (gpui
+    /// `text_system.rs`), exit code `0xC0000409`. A `\n` reached `shape_line`
+    /// from a blockquote with a soft break and from the user message card.
+    #[test]
+    fn hard_line_ranges_never_yield_a_newline() {
+        for text in [
+            "a\nb",
+            "第一行\n第二行",
+            "a\n\nb",
+            "trailing\n",
+            "\nleading",
+            "a\nb\nc",
+            "",
+            "\n",
+        ] {
+            for (start, end) in hard_line_ranges(text) {
+                assert!(start < end, "empty range in {text:?}: {start}..{end}");
+                assert!(
+                    !text[start..end].contains('\n'),
+                    "range {start}..{end} of {text:?} contains a newline"
+                );
+                assert!(text.is_char_boundary(start) && text.is_char_boundary(end));
+            }
+        }
+    }
+
+    #[test]
+    fn hard_line_ranges_split_on_every_breaker() {
+        assert_eq!(hard_line_ranges("a\nb"), vec![(0, 1), (2, 3)]);
+        assert_eq!(hard_line_ranges("a\n\nb"), vec![(0, 1), (3, 4)]);
+        assert_eq!(hard_line_ranges("a\n"), vec![(0, 1)]);
+        assert_eq!(hard_line_ranges("\na"), vec![(1, 2)]);
+        assert_eq!(hard_line_ranges("abc"), vec![(0, 3)]);
+        assert!(hard_line_ranges("").is_empty());
+        // Multibyte lines must land on char boundaries.
+        let text = "中文\n测试";
+        for (start, end) in hard_line_ranges(text) {
+            assert!(text.is_char_boundary(start) && text.is_char_boundary(end));
+        }
+        assert_eq!(hard_line_ranges(text), vec![(0, 6), (7, 13)]);
     }
 }

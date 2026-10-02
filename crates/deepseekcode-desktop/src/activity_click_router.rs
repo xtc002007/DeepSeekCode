@@ -221,21 +221,14 @@ impl WorkspaceView {
         detail_key: &str,
         cx: &mut Context<Self>,
     ) {
-        let display = self
-            .activity
-            .detail_store
-            .get(detail_key)
-            .and_then(|d| d.output.as_deref())
-            .map(extract_bash_display_text)
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                self.activity
-                    .detail_store
-                    .get(detail_key)
-                    .and_then(|d| d.input.as_deref())
-                    .map(bash_running_terminal_text)
-                    .unwrap_or_else(|| "◐ Running…".to_string())
-            });
+        let detail = self.activity.detail_store.get(detail_key);
+        let command = detail.and_then(|d| d.command.clone());
+        // Tri-state: real output present, real-but-empty, or still pending.
+        let (display, received) = match detail.and_then(|d| d.output.as_deref()) {
+            Some(raw) => (extract_bash_display_text(raw), true),
+            None => (String::new(), false),
+        };
+        let _ = command;
 
         if !self
             .terminals
@@ -251,6 +244,7 @@ impl WorkspaceView {
         {
             if let Some(tab) = self.terminals.get_mut(tab_idx) {
                 tab.state.output = display.clone().into();
+                tab.state.output_received = received;
                 if let Ok(mut buf) = tab.buffer.try_lock() {
                     *buf = display;
                 }
@@ -267,23 +261,20 @@ impl WorkspaceView {
         _cx: &mut Context<Self>,
     ) {
         self.bash_output_detail_ref = Some(detail_key.to_string());
-        let command = self
-            .activity
-            .detail_store
-            .get(detail_key)
-            .and_then(|d| d.input.as_deref())
-            .unwrap_or("(unknown command)");
-        let output = self
-            .activity
-            .detail_store
-            .get(detail_key)
-            .and_then(|d| d.output.clone())
-            .unwrap_or_default();
-        let display = extract_bash_display_text(&output);
-        let display = if display.is_empty() {
-            bash_running_terminal_text(command)
-        } else {
-            display
+        let detail = self.activity.detail_store.get(detail_key);
+        // Use the captured command, NOT the raw input object: the latter is
+        // the pretty-printed `{"command": …}` JSON and printing it as the `$`
+        // prompt line showed the user a JSON blob instead of their command.
+        let command = detail
+            .and_then(|d| d.command.clone())
+            .or_else(|| detail.and_then(|d| d.input.as_deref()).map(str::to_string))
+            .unwrap_or_else(|| "(unknown command)".into());
+        let (display, received) = match detail.and_then(|d| d.output.as_deref()) {
+            Some(raw) => {
+                let text = extract_bash_display_text(raw);
+                (bash_output_body(&command, &text), true)
+            }
+            None => (bash_pending_body(&command), false),
         };
         let tab_idx = self
             .terminals
@@ -306,6 +297,7 @@ impl WorkspaceView {
             tab.state.pty_id = None;
             tab.state.input_tx = None;
             tab.state.output = display.clone().into();
+            tab.state.output_received = received;
             if let Ok(mut buf) = tab.buffer.try_lock() {
                 *buf = display;
             }
@@ -427,8 +419,19 @@ pub(crate) fn merge_bash_completed_display(
     display
 }
 
-pub(crate) fn bash_running_terminal_text(command: &str) -> String {
-    format!("$ {command}\n\n◐ Running… (output streams here)")
+/// Shell shown before any output has arrived.
+pub(crate) fn bash_pending_body(command: &str) -> String {
+    format!("$ {command}\n\n◐ Running… (waiting for output)")
+}
+
+/// Shell body once output is known: the echoed command, then the output.
+/// An empty result is stated explicitly instead of implying it is still running.
+pub(crate) fn bash_output_body(command: &str, output: &str) -> String {
+    if output.trim().is_empty() {
+        format!("$ {command}\n\n(command completed with no output)")
+    } else {
+        format!("$ {command}\n\n{output}")
+    }
 }
 
 pub(crate) fn extract_bash_display_text(output: &str) -> String {
@@ -467,9 +470,33 @@ pub(crate) fn extract_bash_display_text(output: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_bash_display_text, glob_list_fallback_path, grep_fallback_path};
+    use super::{
+        bash_output_body, bash_pending_body, extract_bash_display_text, glob_list_fallback_path,
+        grep_fallback_path,
+    };
     use crate::logic::{plan_activity_click_route, ActivityClickRoute};
     use deepseekcode_schema::activity::{ActivityKind, ActivityMeta, ActivityTargetKind};
+
+    /// 截图问题：终端把 `{"command": …, "timeout_ms": …}` 整个 JSON 当成
+    /// `$` 提示行打印。命令必须单独取出，JSON 只留在详情面板。
+    #[test]
+    fn terminal_body_echoes_command_not_input_json() {
+        let command = "cd /d D:\\Workspace\\Echo && pnpm install";
+        let body = bash_output_body(command, "added 412 packages");
+        let first = body.lines().next().unwrap();
+        assert_eq!(first, format!("$ {command}"));
+        assert!(!body.contains("timeout_ms"), "json leaked: {body}");
+        assert!(body.contains("added 412 packages"), "{body}");
+    }
+
+    #[test]
+    fn terminal_body_distinguishes_empty_result_from_pending() {
+        // 空输出 = 已完成且无输出；pending = 还没收到任何输出。二者必须可区分，
+        // 否则永远停在 "Running…" 会让人以为命令还在跑。
+        assert!(bash_output_body("echo hi", "").contains("no output"));
+        assert!(bash_pending_body("echo hi").contains("Running"));
+        assert!(!bash_pending_body("echo hi").contains("no output"));
+    }
 
     #[test]
     fn merge_bash_completed_display_preserves_stream_and_error() {

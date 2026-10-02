@@ -1813,6 +1813,7 @@ dependencies = [
  "deepseekcode-storage",
  "deepseekcode-telemetry",
  "deepseekcode-types",
+ "encoding_rs",
  "futures",
  "glob",
  "ignore",
@@ -1829,6 +1830,7 @@ dependencies = [
  "tracing",
  "ulid",
  "walkdir",
+ "windows-sys 0.59.0",
  "wiremock",
 ]
 

@@ -411,7 +411,14 @@ pub(crate) fn agent_step_limit(config: &DeepSeekCodeConfig, agent: &AgentKind) -
     }
     match agent {
         AgentKind::Plan => Some(50),
-        _ => None,
+        // A step limit is NOT optional. Returning `None` for build/general
+        // left the provider-turn loop unbounded, so a model that kept
+        // retrying a failing tool never settled: the observed run reached
+        // turn 3 with 711 messages / 4499 events and no final answer, and the
+        // session grew without limit. The loop guard only blocks *identical*
+        // consecutive calls, so a model varying its commands never tripped it.
+        // 100 is generous for real work while still guaranteeing termination.
+        _ => Some(100),
     }
 }
 
@@ -419,6 +426,29 @@ pub(crate) fn agent_step_limit(config: &DeepSeekCodeConfig, agent: &AgentKind) -
 mod tests {
     use super::*;
     use deepseekcode_llm::tool_call::LlmToolCall;
+
+    /// Regression: build/general agents got `None` (no limit), so the
+    /// provider-turn loop never terminated. Observed: turn 3 with 711
+    /// messages / 4499 events, model retrying a failing tool forever, no
+    /// final answer. Every agent must have a finite step budget.
+    #[test]
+    fn every_agent_has_a_finite_step_limit() {
+        let config = DeepSeekCodeConfig::default();
+        for agent in [AgentKind::Plan, AgentKind::Build, AgentKind::General] {
+            let limit = agent_step_limit(&config, &agent);
+            assert!(limit.is_some(), "{agent:?} has no step limit");
+            assert!(limit.unwrap() > 0, "{agent:?} step limit must be positive");
+        }
+    }
+
+    /// An explicit config value must still win over the default.
+    #[test]
+    fn configured_step_limit_overrides_default() {
+        let config: DeepSeekCodeConfig =
+            serde_json::from_str(r#"{ "agents": { "build": { "steps": 7 } } }"#)
+                .expect("config parses");
+        assert_eq!(agent_step_limit(&config, &AgentKind::Build), Some(7));
+    }
 
     #[test]
     fn tool_prefix_truncation_stays_bounded_and_stable() {

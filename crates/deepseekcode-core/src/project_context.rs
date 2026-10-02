@@ -883,6 +883,21 @@ fn resolve_relative_path(cwd: &Path, target: &str) -> PathBuf {
     }
 }
 
+/// Is `byte` a shell token boundary, i.e. can a `/` right after it begin a
+/// NEW token rather than continue the current word?
+///
+/// This is the difference between the absolute path `/etc/passwd` and the
+/// tail of the relative path `packages/app/index.ts`. Slicing at any `/`
+/// turned the latter into the former, so on Windows — where `/x` resolves to
+/// the drive root — every ordinary relative path was reported as an escape.
+fn is_token_boundary(byte: u8) -> bool {
+    byte.is_ascii_whitespace()
+        || matches!(
+            byte,
+            b'"' | b'\'' | b'=' | b'>' | b'<' | b'|' | b'&' | b'(' | b')' | b',' | b';' | b'^'
+        )
+}
+
 fn extract_filesystem_path_literals(segment: &str) -> Vec<String> {
     let mut paths = Vec::new();
     let bytes = segment.as_bytes();
@@ -901,6 +916,14 @@ fn extract_filesystem_path_literals(segment: &str) -> Vec<String> {
                     .trim_matches('\'')
                     .to_string(),
             );
+            continue;
+        }
+
+        // A `/` only starts an absolute path at a token boundary. Mid-word
+        // (`packages/app`, `--format=%h/%s`, `@scope/pkg`) it is a separator
+        // inside a relative path and must never be lifted to `/…`.
+        if bytes[i] == b'/' && i > 0 && !is_token_boundary(bytes[i - 1]) {
+            i += 1;
             continue;
         }
 
@@ -944,6 +967,16 @@ fn extract_filesystem_path_literals(segment: &str) -> Vec<String> {
                 i += 1;
             }
             let token = segment[start..i].trim_matches('"').trim_matches('\'');
+            // `/c:…` is a Windows CLI *flag* whose value is a search string
+            // (`findstr /c:needle`, `wmic /namespace:…`). Treating it as a
+            // POSIX absolute path made `findstr /c:"package.json"` resolve to
+            // `<project>/c:package.json` and get rejected as an escape.
+            // Switches that take a PATH (`robocopy /LOG:`) must still be
+            // checked, so only flag-only commands are exempted.
+            if looks_like_windows_switch_argument(token) && !segment_writes_files(segment) {
+                i += 1;
+                continue;
+            }
             if looks_like_filesystem_path(token) {
                 paths.push(token.to_string());
             }
@@ -953,6 +986,40 @@ fn extract_filesystem_path_literals(segment: &str) -> Vec<String> {
         i += 1;
     }
     paths
+}
+
+/// `true` for `/x:value` style Windows CLI switches that start with a slash.
+///
+/// `findstr /c:needle`, `robocopy /LOG:out.txt` and `wmic /namespace:…` are
+/// ubiquitous; mistaking them for absolute paths broke ordinary commands.
+fn looks_like_windows_switch_argument(token: &str) -> bool {
+    let token = token.trim_matches('"').trim_matches('\'');
+    let Some(rest) = token.strip_prefix('/') else {
+        return false;
+    };
+    let Some((flag, _value)) = rest.split_once(':') else {
+        return false;
+    };
+    // A real absolute path continues with a path separator after the colon
+    // (`/c:/foo`); a switch argument does not.
+    !flag.is_empty() && flag.len() <= 2 && flag.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// `true` when the command can create or modify files, so its switch values
+/// are plausible paths and must stay subject to the containment check.
+fn segment_writes_files(segment: &str) -> bool {
+    let head = segment
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    // Read-only commands (`findstr`, `type`) are excluded: their switches carry
+    // search strings, not output paths.
+    const WRITERS: [&str; 11] = [
+        "robocopy", "xcopy", "copy", "move", "ren", "rename", "del", "erase", "mkdir", "md",
+        "forfiles",
+    ];
+    WRITERS.contains(&head.as_str())
 }
 
 fn is_windows_drive_prefix(bytes: &[u8], i: usize) -> bool {
@@ -1257,5 +1324,90 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         let cmd = format!("type {}", outside.join("secret.txt").display());
         assert!(command_escapes_project_directory(&cmd, &project.to_string_lossy()).is_some());
+    }
+
+    /// A relative path that merely CONTAINS a `/` must not be mistaken for an
+    /// absolute POSIX path. The extractor used to slice from the first `/` to
+    /// the next whitespace, so `packages/agent-core/src/index.ts` became the
+    /// absolute literal `/agent-core/src/index.ts`, which is outside every
+    /// Windows project root — refusing every ordinary pnpm/npm/git command
+    /// with a bogus "outside the project root" error.
+    #[test]
+    fn allows_relative_paths_containing_slash() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("sample-app");
+        std::fs::create_dir_all(&project).unwrap();
+        let project = project.to_string_lossy().to_string();
+        for cmd in [
+            "type packages/agent-core/src/index.ts",
+            "pnpm --filter @echo/agent-core run build",
+            "node scripts/build.js",
+            "git log --format=%h/%s",
+            "pnpm --filter packages/agent-core typecheck",
+            "echo a/b",
+        ] {
+            assert!(
+                command_escapes_project_directory(cmd, &project).is_none(),
+                "false positive for {cmd:?}: {:?}",
+                command_escapes_project_directory(cmd, &project)
+            );
+        }
+    }
+
+    /// The escape check must still catch a RELATIVE path that walks out via
+    /// `..`, and must still catch a genuine absolute path.
+    #[test]
+    fn still_blocks_relative_and_absolute_escapes() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("sample-app");
+        std::fs::create_dir_all(&project).unwrap();
+        let project = project.to_string_lossy().to_string();
+        for cmd in [
+            "type ../../outside/secret.txt",
+            "type ..\\..\\outside\\secret.txt",
+            "type packages/../../outside/secret.txt",
+        ] {
+            assert!(
+                command_escapes_project_directory(cmd, &project).is_some(),
+                "escape not blocked for {cmd:?}"
+            );
+        }
+    }
+
+    /// `findstr /c:"needle"` is a flag, not a POSIX absolute path. The
+    /// extractor used to lift it to `<project>/c:package.json` and reject an
+    /// ordinary search as a path escape.
+    #[test]
+    fn windows_switch_arguments_are_not_paths() {
+        let project = std::env::temp_dir().to_string_lossy().to_string();
+        for cmd in [
+            "findstr /c:\"package.json\" a.txt",
+            "dir | findstr /c:package.json",
+            "dir | findstr \"package.json\"",
+        ] {
+            assert_eq!(
+                command_escapes_project_directory(cmd, &project),
+                None,
+                "false-positive path escape for {cmd:?}"
+            );
+        }
+    }
+
+    /// Relaxing the switch heuristic must not reopen real escapes, and a
+    /// switch that genuinely names an output file stays checked.
+    #[test]
+    fn path_escapes_are_still_blocked() {
+        let project = std::env::temp_dir().to_string_lossy().to_string();
+        for cmd in [
+            "type ../secret.txt",
+            "echo x > ../out.txt",
+            "findstr /c:x ../secret.txt",
+            "robocopy a b /LOG:c:log.txt",
+        ] {
+            assert!(
+                command_escapes_project_directory(cmd, &project).is_some(),
+                "escape not blocked: {cmd:?}"
+            );
+        }
     }
 }

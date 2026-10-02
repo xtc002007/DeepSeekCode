@@ -11,7 +11,66 @@ use crate::permission::PolicyOutcome;
 use crate::policy::patterns::tool_fingerprint;
 use crate::tools::registry::preview_tool_start;
 
+/// Point at the closest real tool when a model hallucinates or mistypes a name.
+///
+/// `lpos` for `lsp` is a one-character slip that a bare "not found" leaves the
+/// model to guess at; naming the intended tool lets it retry immediately.
+fn suggest_tool_name(requested: &str, available: &[String]) -> String {
+    let requested = requested.to_ascii_lowercase();
+    let mut best: Option<(usize, &str)> = None;
+    for candidate in available {
+        let candidate_lower = candidate.to_ascii_lowercase();
+        let distance = edit_distance(&requested, &candidate_lower);
+        // Generous enough to catch an inserted/transposed character
+        // (`lpos` → `lsp` costs 3 edits), never so loose that a wild guess
+        // gets a misleading hint.
+        let limit = requested.chars().count() / 2 + 1;
+        if distance <= limit && best.is_none_or(|(d, _)| distance < d) {
+            best = Some((distance, candidate));
+        }
+    }
+    match best {
+        Some((_, name)) => format!(" Did you mean `{name}`?"),
+        None => String::new(),
+    }
+}
+
+/// Levenshtein distance, iterative with a single row.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(curr[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
+}
+
 impl SessionRunner {
+    /// Names of every tool this run can dispatch, so an unknown-tool error can
+    /// tell the model exactly what to use instead.
+    fn available_tool_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .tools
+            .try_read()
+            .map(|tools| tools.definitions().into_iter().map(|d| d.name).collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
     pub(super) async fn execute_tool(
         &self,
         session: &deepseekcode_schema::session::Session,
@@ -183,6 +242,35 @@ impl SessionRunner {
                 ToolResultEnvelope::new(
                     format!("{} failed", tool_call.name),
                     json!({ "error": msg, "success": false }),
+                )
+                .with_duration_ms(start.elapsed().as_millis() as u64)
+            }
+            // An unknown tool name must NOT abort the run. Models hallucinate
+            // names (and mistype real ones); propagating `NotFound` killed the
+            // session drain, which left the UI spinning on "Running tool: …"
+            // forever with no way to recover. Return the error to the model as
+            // a normal tool result so it can retry with the right name.
+            Err(DeepSeekCodeError::NotFound(msg)) => {
+                tracing::warn!(
+                    target: deepseekcode_telemetry::TOOL,
+                    run_id = %deepseekcode_telemetry::current_run_id(),
+                    session_id = %self.session_id,
+                    tool = %tool_call.name,
+                    tool_call_id = %tool_call_id,
+                    error = %msg,
+                    "unknown tool name returned to model"
+                );
+                ToolResultEnvelope::new(
+                    format!("{} not found", tool_call.name),
+                    json!({
+                        "error": format!(
+                            "There is no tool named `{}`.{} Available tools: {}.",
+                            tool_call.name,
+                            suggest_tool_name(&tool_call.name, &self.available_tool_names()),
+                            self.available_tool_names().join(", ")
+                        ),
+                        "success": false,
+                    }),
                 )
                 .with_duration_ms(start.elapsed().as_millis() as u64)
             }
@@ -471,5 +559,49 @@ impl SessionRunner {
 
         let _ = crate::activity::emit_activity_updated(&self.events, self.session_id, 0).await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod unknown_tool_tests {
+    use super::{edit_distance, suggest_tool_name};
+
+    fn names() -> Vec<String> {
+        ["bash", "read", "grep", "lsp", "apply_patch"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// The typo that actually froze a session: the model wrote `lpos` for
+    /// `lsp`. A bare "not found" left it with nothing to act on.
+    #[test]
+    fn suggests_lsp_for_the_lpos_typo() {
+        assert_eq!(suggest_tool_name("lpos", &names()), " Did you mean `lsp`?");
+    }
+
+    #[test]
+    fn suggests_near_misses() {
+        assert!(suggest_tool_name("bosh", &names()).contains("`bash`"));
+        assert!(suggest_tool_name("Grep", &names()).contains("`grep`"));
+    }
+
+    /// A wild guess must not be paired with a misleading suggestion.
+    #[test]
+    fn does_not_suggest_for_unrelated_names() {
+        assert_eq!(suggest_tool_name("zzzzzzzz", &names()), "");
+        assert_eq!(suggest_tool_name("", &names()), "");
+    }
+
+    #[test]
+    fn edit_distance_basics() {
+        // `lpos` → `lsp` is 3 plain edits: the `o` is spurious AND the
+        // `p`/`s` order is wrong, which is exactly why the suggestion
+        // threshold allows for that much.
+        assert_eq!(edit_distance("lpos", "lsp"), 3);
+        assert_eq!(edit_distance("abc", "abc"), 0);
+        assert_eq!(edit_distance("bosh", "bash"), 1);
+        assert_eq!(edit_distance("", "abc"), 3);
+        assert_eq!(edit_distance("abc", ""), 3);
     }
 }

@@ -151,6 +151,10 @@ aes-gcm = "0.10"
 base64 = "0.22"
 sha2 = "0.10"
 
+# Windows console output arrives in the OEM/ANSI code page (GBK on zh-CN
+# systems), not UTF-8. Needed to decode it instead of dropping the stream.
+encoding_rs = { version = "0.8.35", features = ["alloc"] }
+
 # Markdown
 pulldown-cmark = "0.13"
 

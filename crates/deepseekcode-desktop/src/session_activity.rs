@@ -318,6 +318,48 @@ mod tests {
     use deepseekcode_schema::event::EventKind;
     use deepseekcode_types::SessionId;
 
+    /// Regression: `apply_event` used to call `apply_session_event` (which
+    /// appends the chunk) AND append the same chunk again in its own
+    /// `ToolProgress` arm, so every streamed line appeared TWICE in the
+    /// terminal. The store write must have exactly one owner.
+    ///
+    /// This asserts the single-writer contract: one event → one append.
+    #[test]
+    fn tool_progress_appends_each_chunk_exactly_once() {
+        let mut store = SessionActivityStore::default();
+        store.session_events_enabled = true;
+        let session_id = SessionId::new();
+        let event = EventEnvelope {
+            seq: 1,
+            kind: EventKind::ToolProgress,
+            session_id: Some(session_id),
+            payload: serde_json::json!({
+                "tool_call_id": "tc-1",
+                "tool_name": "bash",
+                "chunk": "hello\n",
+                "stream": "stdout"
+            }),
+            created_at: chrono::Utc::now(),
+        };
+        let _ = store.apply_session_event(&event);
+        let raw = store
+            .detail_store
+            .get("tc-1")
+            .and_then(|d| d.output.clone())
+            .expect("output stored");
+        let body: crate::activity_timeline::BashStreamBody =
+            serde_json::from_str(&raw).expect("stream body");
+        assert_eq!(body.stdout, "hello\n");
+        assert_eq!(
+            body.stdout.matches("hello").count(),
+            1,
+            "chunk duplicated: {:?}",
+            body.stdout
+        );
+        // ToolProgress must not be retained as a session event.
+        assert!(store.session_events.is_empty());
+    }
+
     #[test]
     fn apply_message_delta_bumps_generation_without_full_rebuild() {
         let mut store = SessionActivityStore::default();

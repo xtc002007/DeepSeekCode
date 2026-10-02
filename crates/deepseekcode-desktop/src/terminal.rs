@@ -8,6 +8,13 @@ use tokio::sync::Mutex;
 #[derive(Clone, Debug)]
 pub struct TerminalState {
     pub output: SharedString,
+    /// True once real command output has been observed for this tab.
+    ///
+    /// Distinguishes "still running, nothing yet" from "finished and printed
+    /// nothing". Without it an empty `output` was indistinguishable from a
+    /// pending one, so a command that legitimately produced no output kept
+    /// rendering `◐ Running…` forever.
+    pub output_received: bool,
     pub connected: bool,
     /// True while a PTY WebSocket handshake is in progress.
     pub pty_connecting: bool,
@@ -20,6 +27,7 @@ impl Default for TerminalState {
     fn default() -> Self {
         Self {
             output: SharedString::default(),
+            output_received: false,
             connected: false,
             pty_connecting: false,
             connect_error: None,
@@ -52,10 +60,14 @@ fn terminal_status_text(tab: Option<&TerminalTab>) -> &'static str {
 
 fn placeholder_for_tab(tab: &TerminalTab) -> String {
     if tab.bash_detail_key.is_some() {
-        if !tab.state.output.is_empty() {
+        if tab.state.output_received {
+            if tab.state.output.is_empty() {
+                // Ran to completion and genuinely printed nothing.
+                return "(command produced no output)".to_string();
+            }
             return tab.state.output.to_string();
         }
-        return "◐ Running…".to_string();
+        return "◐ Running… (waiting for output)".to_string();
     }
 
     if let Some(err) = &tab.state.connect_error {

@@ -3060,6 +3060,7 @@ Describe this project so the AI assistant has context.\n\n\
                     .to_string();
                 let input = event.payload.get("input").cloned().unwrap_or_default();
                 let detail = format_tool_input(&name, &input);
+                let command = command_from_tool_input(&input);
                 if let Some(path) = extract_tool_path(&name, &input) {
                     self.mark_file_changed(&path);
                 }
@@ -3078,6 +3079,7 @@ Describe this project so the AI assistant has context.\n\n\
                                 .map(String::from),
                             url: None,
                             web_preview: None,
+                            command,
                         },
                     );
                 }
@@ -3130,6 +3132,12 @@ Describe this project so the AI assistant has context.\n\n\
                                 .map(String::from),
                             url: None,
                             web_preview: None,
+                            // Keep the command captured on ToolStarted.
+                            command: self
+                                .activity
+                                .detail_store
+                                .get(id)
+                                .and_then(|d| d.command.clone()),
                         },
                     );
                     if name == "bash" {
@@ -3170,16 +3178,17 @@ Describe this project so the AI assistant has context.\n\n\
                         title: Some("Updated todos".into()),
                         url: None,
                         web_preview: None,
+                        command: None,
                     },
                 );
             }
             EventKind::ToolProgress => {
-                if let (Some(id), Some(chunk)) = (
-                    event.payload["tool_call_id"].as_str(),
-                    event.payload["chunk"].as_str(),
-                ) {
-                    let stream = event.payload["stream"].as_str().unwrap_or("stdout");
-                    self.activity.detail_store.append_output(id, chunk, stream);
+                if let Some(id) = event.payload["tool_call_id"].as_str() {
+                    // NOTE: `apply_session_event` (called above) ALREADY
+                    // appended this chunk to `detail_store`. Appending again
+                    // here duplicated every streamed line, so the terminal
+                    // showed each output line twice. Only the live tab refresh
+                    // belongs in this crate-level handler.
                     if self.bash_output_detail_ref.as_deref() == Some(id)
                         || self
                             .terminals
@@ -6798,6 +6807,22 @@ fn format_tool_input(tool: &str, input: &serde_json::Value) -> String {
         }
         _ => serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string()),
     }
+}
+
+/// Shell command carried in a tool input, for the terminal's `$ …` line.
+///
+/// Kept out of the rendered `input` string so the terminal echoes the real
+/// command instead of the serialized argument object.
+fn command_from_tool_input(input: &serde_json::Value) -> Option<String> {
+    for key in ["command", "script"] {
+        if let Some(cmd) = input.get(key).and_then(|v| v.as_str()) {
+            let trimmed = cmd.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn truncate_text(text: &str, max_chars: usize) -> String {

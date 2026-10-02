@@ -37,6 +37,49 @@ fn urlencoding_encode(s: &str) -> String {
 // definitions, so SDK/server can never drift.
 pub use deepseekcode_schema::api::{PluginInfo, SkillInfo};
 
+/// Does this base URL point at the local machine?
+///
+/// `127.0.0.0/8`, `::1`, and `localhost` (any scheme/port) qualify. Such
+/// traffic must bypass any system proxy — see [`DeepSeekCodeClient::new`].
+pub fn is_loopback_base_url(base_url: &str) -> bool {
+    let rest = base_url
+        .split_once("://")
+        .map(|(_, r)| r)
+        .unwrap_or(base_url);
+    // Strip credentials, then anything from the path/query.
+    let authority = rest
+        .rsplit('@')
+        .next()
+        .unwrap_or(rest)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    if authority.is_empty() {
+        return false;
+    }
+    // IPv6 literal: `[::1]:53146`
+    if let Some(inner) = authority.strip_prefix('[') {
+        let host = inner.split(']').next().unwrap_or("");
+        return host == "::1" || host == "0:0:0:0:0:0:0:1";
+    }
+    let host = match authority.rsplit_once(':') {
+        // `host:port`
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => h,
+        // No port, or a bare IPv6 without brackets.
+        _ => authority,
+    };
+    let host = host
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase();
+    host == "localhost"
+        || host == "::1"
+        || host.ends_with(".localhost")
+        || host
+            .split('.')
+            .next()
+            .is_some_and(|first| first.parse::<u8>().is_ok() && first == "127")
+}
+
 #[derive(Clone)]
 pub struct DeepSeekCodeClient {
     http: Client,
@@ -47,12 +90,28 @@ pub struct DeepSeekCodeClient {
 
 impl DeepSeekCodeClient {
     pub fn new(base_url: impl Into<String>, directory: impl Into<String>) -> Self {
-        // Proxy-aware client (system+env) with stream-safe timeouts, matching
-        // the server-side LlmClient. Previously `Client::new()` ignored VPN
-        // proxies and diverged from `http_client::build_auto_client`.
+        let base_url = base_url.into().trim_end_matches('/').to_string();
+        // CRITICAL: never proxy traffic to our OWN server.
+        //
+        // The proxy-aware client honours the Windows system proxy, so with a
+        // VPN/proxy tool active (e.g. Clash Verge at 127.0.0.1:10001) every
+        // loopback API call was tunnelled through it. A busy/reloading proxy
+        // then answered `502/503/504` with an empty body after 7–18s, and the
+        // request never reached the embedded server at all (no
+        // `request completed` log). Effect: the permission reply POST and the
+        // policy poll both failed, so clicking "Allow" silently did nothing and
+        // the tool never ran — reported as "the shell is broken".
+        //
+        // Loopback is always direct. Remote servers keep the proxy-aware client
+        // so a VPN still works for genuinely remote deployments.
+        let http = if is_loopback_base_url(&base_url) {
+            deepseekcode_llm::http_client::build_direct_client()
+        } else {
+            deepseekcode_llm::http_client::build_auto_client()
+        };
         Self {
-            http: deepseekcode_llm::http_client::build_auto_client(),
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            http,
+            base_url,
             directory: directory.into(),
             auth: None,
         }
@@ -1468,6 +1527,46 @@ impl DeepSeekCodeClient {
                 );
                 Err(e)
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_loopback_base_url;
+
+    /// Regression: with a system proxy active (Clash Verge on
+    /// 127.0.0.1:10001), the SDK tunnelled its own loopback API calls through
+    /// it, so the permission reply POST and the policy poll failed with empty
+    /// 502/503/504 after 7-18s and the tool never ran.
+    #[test]
+    fn loopback_urls_bypass_the_proxy() {
+        for url in [
+            "http://127.0.0.1:53146",
+            "https://127.0.0.1:4096",
+            "http://localhost:1234",
+            "https://localhost",
+            "http://127.1.2.3:8080",
+            "http://[::1]:53146",
+            "http://app.localhost:3000",
+            "http://user:pass@127.0.0.1:9000",
+        ] {
+            assert!(is_loopback_base_url(url), "should be loopback: {url}");
+        }
+    }
+
+    /// A genuinely remote server must keep the proxy-aware client so a VPN
+    /// still works for remote deployments.
+    #[test]
+    fn remote_urls_are_not_loopback() {
+        for url in [
+            "http://10.0.0.5:4096",
+            "https://example.com",
+            "http://192.168.1.10:4096",
+            "http://[2001:db8::1]:4096",
+            "http://deepseek.example.cn",
+        ] {
+            assert!(!is_loopback_base_url(url), "should NOT be loopback: {url}");
         }
     }
 }
