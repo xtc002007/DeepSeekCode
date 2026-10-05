@@ -34,11 +34,11 @@ impl RevertDock {
         } else if let Some(warning) = &state.warning {
             warning.clone()
         } else if let Some(staged) = &state.staged_message_id {
-            format!("Staged at {staged} — review diff then commit or clear.")
+            deepseekcode_i18n::tr!("revert.staged", "staged" => staged.as_str())
         } else if let Some(id) = selected_message_id {
-            format!("Selected {id} — click Stage to preview file changes.")
+            deepseekcode_i18n::tr!("revert.selected", "id" => id.to_string())
         } else {
-            "Select a user or assistant message in the timeline, then Stage.".to_string()
+            deepseekcode_i18n::t("revert.pick_message")
         };
 
         div()
@@ -61,7 +61,7 @@ impl RevertDock {
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_primary)
-                    .child("Revert changes"),
+                    .child(deepseekcode_i18n::t("revert.title")),
             )
             .child(
                 div()
@@ -82,10 +82,10 @@ impl RevertDock {
                     .max_h(px(120.))
                     .overflow_hidden()
                     .text_xs()
-                    .font_family("Consolas")
+                    .font_family(crate::theme::font_mono(&theme))
                     .text_color(theme.text_secondary)
                     .child(if state.diff_preview.is_empty() {
-                        "No diff preview".to_string()
+                        deepseekcode_i18n::t("revert.no_preview")
                     } else {
                         state.diff_preview.clone()
                     }),
@@ -96,21 +96,21 @@ impl RevertDock {
                     .gap_2()
                     .child(revert_button(
                         cx,
-                        "Stage",
+                        deepseekcode_i18n::t("revert.stage"),
                         RevertAction::Stage,
                         stage_enabled,
                         &theme,
                     ))
                     .child(revert_button(
                         cx,
-                        "Clear",
+                        deepseekcode_i18n::t("revert.clear"),
                         RevertAction::Clear,
                         clear_enabled,
                         &theme,
                     ))
                     .child(revert_button(
                         cx,
-                        "Commit",
+                        deepseekcode_i18n::t("revert.commit"),
                         RevertAction::Commit,
                         commit_enabled,
                         &theme,
@@ -129,7 +129,7 @@ impl RevertDock {
                                     this.close_revert_dock(cx);
                                 }),
                             )
-                            .child("Close"),
+                            .child(deepseekcode_i18n::t("common.close")),
                     ),
             )
             .into_any_element()
@@ -145,7 +145,7 @@ pub enum RevertAction {
 
 fn revert_button(
     cx: &Context<crate::workspace::WorkspaceView>,
-    label: &'static str,
+    label: String,
     action: RevertAction,
     enabled: bool,
     theme: &crate::theme::ThemeTokens,

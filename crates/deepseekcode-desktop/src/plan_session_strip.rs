@@ -18,11 +18,7 @@ impl PlanSessionStrip {
         }
         let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
         let count = plans.len();
-        let label = if count == 1 {
-            "1 plan ready".to_string()
-        } else {
-            format!("{count} plans ready")
-        };
+        let label = deepseekcode_i18n::tr!("plan.ready_count", "count" => count as u64);
         let muted = !agent_is_plan;
 
         Some(
@@ -65,7 +61,11 @@ impl PlanSessionStrip {
                             div()
                                 .text_xs()
                                 .text_color(theme.text_muted)
-                                .child(if expanded { "Hide" } else { "Show" }),
+                                .child(if expanded {
+                                    deepseekcode_i18n::t("common.hide")
+                                } else {
+                                    deepseekcode_i18n::t("common.show")
+                                }),
                         ),
                 )
                 .when(expanded, |el| {
@@ -90,7 +90,7 @@ impl PlanSessionStrip {
                                     .child(
                                         div()
                                             .text_xs()
-                                            .font_family("Consolas")
+                                            .font_family(crate::theme::font_mono(&theme))
                                             .text_color(theme.text_muted)
                                             .child(plan_path.clone()),
                                     ),
@@ -99,14 +99,26 @@ impl PlanSessionStrip {
                                 div()
                                     .flex()
                                     .gap_2()
-                                    .child(strip_button(cx, "View", {
-                                        let plan_path = plan_path.clone();
-                                        move |this, _, _, cx| this.open_plan_file(&plan_path, cx)
-                                    }))
-                                    .child(strip_button(cx, "Implement", {
-                                        let plan_id = plan_id.clone();
-                                        move |this, _, _, cx| this.implement_from_plan(&plan_id, cx)
-                                    })),
+                                    .child(strip_button(
+                                        cx,
+                                        deepseekcode_i18n::t("plan.view_short"),
+                                        {
+                                            let plan_path = plan_path.clone();
+                                            move |this, _, _, cx| {
+                                                this.open_plan_file(&plan_path, cx)
+                                            }
+                                        },
+                                    ))
+                                    .child(strip_button(
+                                        cx,
+                                        deepseekcode_i18n::t("plan.implement_short"),
+                                        {
+                                            let plan_id = plan_id.clone();
+                                            move |this, _, _, cx| {
+                                                this.implement_from_plan(&plan_id, cx)
+                                            }
+                                        },
+                                    )),
                             )
                     }))
                 }),
@@ -116,7 +128,7 @@ impl PlanSessionStrip {
 
 fn strip_button(
     cx: &mut Context<crate::workspace::WorkspaceView>,
-    label: &'static str,
+    label: String,
     handler: impl Fn(
             &mut crate::workspace::WorkspaceView,
             &MouseDownEvent,

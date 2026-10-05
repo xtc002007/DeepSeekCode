@@ -24,6 +24,9 @@ pub struct ActivityProjectionState {
     pub events: Vec<EventEnvelope>,
     pub messages: Vec<Message>,
     pub children: HashMap<String, ChildSessionProjection>,
+    /// `internal_tool_call_id → tool_call_id`, recorded from `ToolStarted`
+    /// so streaming progress (internal id) patches the right leaf.
+    pub tool_aliases: HashMap<String, String>,
 }
 
 impl ActivityProjectionState {
@@ -68,10 +71,15 @@ impl ActivityProjectionState {
         self.push_event(event.clone());
 
         if event.kind == EventKind::ToolProgress {
-            if let (Some(id), Some(chunk)) = (
+            if let (Some(raw_id), Some(chunk)) = (
                 event.payload["tool_call_id"].as_str(),
                 event.payload["chunk"].as_str(),
             ) {
+                let id = self
+                    .tool_aliases
+                    .get(raw_id)
+                    .map(String::as_str)
+                    .unwrap_or(raw_id);
                 let stream = event.payload["stream"].as_str().unwrap_or("stdout");
                 let preview = format!("[{stream}] {chunk}");
                 if patch_running_tool_leaf_preview(&mut self.tree, id, &preview) {
@@ -107,6 +115,12 @@ impl ActivityProjectionState {
             }
         } else if event.kind == EventKind::ToolStarted {
             let tool_call_id = event.payload["tool_call_id"].as_str().unwrap_or("");
+            if let Some(internal) = event.payload["internal_tool_call_id"].as_str() {
+                if !internal.is_empty() && internal != tool_call_id {
+                    self.tool_aliases
+                        .insert(internal.to_string(), tool_call_id.to_string());
+                }
+            }
             let tool_name = event.payload["tool_name"].as_str().unwrap_or("tool");
             let title = event.payload.get("title").and_then(|v| v.as_str());
             if patch_tool_started(&mut self.tree, tool_call_id, tool_name, title) {
@@ -415,6 +429,40 @@ mod tests {
             payload,
             created_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn progress_internal_id_patches_outer_leaf() {
+        let mut state = ActivityProjectionState::new();
+        state.apply_event(&ev(
+            EventKind::ToolStarted,
+            serde_json::json!({
+                "tool_call_id": "outer-2",
+                "internal_tool_call_id": "inner-2",
+                "tool_name": "bash",
+                "input": { "command": "echo hi" },
+            }),
+        ));
+        let outcome = state.apply_event(&ev(
+            EventKind::ToolProgress,
+            serde_json::json!({
+                "tool_call_id": "inner-2",
+                "chunk": "hi",
+                "stream": "stdout",
+            }),
+        ));
+        assert!(outcome.bumped, "progress must hit the running leaf");
+        let text = state
+            .tree
+            .roots
+            .iter()
+            .filter_map(|n| match n {
+                ActivityNode::Leaf(l) if l.id == "outer-2" => l.text.clone(),
+                _ => None,
+            })
+            .next()
+            .unwrap_or_default();
+        assert!(text.contains("hi"), "preview missing: {text}");
     }
 
     #[test]

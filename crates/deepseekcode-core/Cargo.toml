@@ -18,6 +18,7 @@ wasm-plugins = ["deepseekcode-plugin/wasm"]
 deepseekcode-types = { workspace = true }
 deepseekcode-schema = { workspace = true }
 deepseekcode-config = { workspace = true }
+deepseekcode-i18n = { workspace = true }
 deepseekcode-telemetry = { workspace = true }
 deepseekcode-storage = { workspace = true }
 deepseekcode-llm = { workspace = true }
@@ -44,6 +45,7 @@ reqwest = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
 encoding_rs = { workspace = true }
+portable-pty = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

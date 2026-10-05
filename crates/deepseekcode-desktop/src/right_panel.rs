@@ -28,8 +28,13 @@ impl RightPanelView {
         editor_read_only: bool,
         terminals: &[TerminalTab],
         active_terminal: usize,
+        terminal_session: Option<deepseekcode_types::SessionId>,
         terminal_focus: &FocusHandle,
         terminal_scroll: &ScrollHandle,
+        terminal_details: &std::collections::HashMap<
+            String,
+            crate::activity_timeline::BashTranscript,
+        >,
         search_query: &str,
         has_project: bool,
         git_staged: &[GitStatusEntry],
@@ -84,8 +89,10 @@ impl RightPanelView {
                             editor_read_only,
                             terminals,
                             active_terminal,
+                            terminal_session,
                             terminal_focus,
                             terminal_scroll,
+                            terminal_details,
                             search_query,
                             git_staged,
                             git_unstaged,
@@ -135,7 +142,7 @@ fn render_tab_bar(
         let tab_val = *tab;
         let tab_item = crate::ui::tab_bar::TabItem {
             id: tab.label(),
-            label: tab.label(),
+            label: tab.localized_label(),
             icon,
         };
 
@@ -160,12 +167,17 @@ fn render_tab_content(
     editor_tabs: &[String],
     active_editor_tab: usize,
     editor_read_only: bool,
-    terminals: &[TerminalTab],
-    active_terminal: usize,
-    terminal_focus: &FocusHandle,
-    terminal_scroll: &ScrollHandle,
-    search_query: &str,
-    git_staged: &[GitStatusEntry],
+        terminals: &[TerminalTab],
+        active_terminal: usize,
+        terminal_session: Option<deepseekcode_types::SessionId>,
+        terminal_focus: &FocusHandle,
+        terminal_scroll: &ScrollHandle,
+        terminal_details: &std::collections::HashMap<
+            String,
+            crate::activity_timeline::BashTranscript,
+        >,
+        search_query: &str,
+        git_staged: &[GitStatusEntry],
     git_unstaged: &[GitStatusEntry],
     git_untracked: &[GitStatusEntry],
     git_diff_summary: Option<&str>,
@@ -189,8 +201,10 @@ fn render_tab_content(
             cx,
             terminals,
             active_terminal,
+            terminal_session,
             terminal_focus,
             terminal_scroll,
+            terminal_details,
         )
         .into_any_element(),
         RightPanelTab::Git => GitPanel::render(

@@ -16,6 +16,8 @@ param(
 
     [string]$TargetDir = "target",
     [string]$RustTarget = "x86_64-pc-windows-msvc",
+    [ValidateSet("auto", "en", "zh-Hans", "zh-Hant", "ja", "ko", "es", "fr", "de", "pt-BR", "ru")]
+    [string]$InstallerLanguage = "auto",
     [switch]$SkipSign
 )
 
@@ -114,6 +116,7 @@ $nsisArgs = @(
     "/DAPP_VERSION=$Version",
     "/DSTAGING_DIR=$stagingDir",
     "/DOUT_DIR=$distDir",
+    "/DINSTALLER_LANGUAGE=$InstallerLanguage",
     (Join-Path $packagingRoot "installer.nsi")
 )
 Write-Host "[*] Running makensis..." -ForegroundColor Cyan

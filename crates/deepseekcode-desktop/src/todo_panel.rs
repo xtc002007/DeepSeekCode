@@ -32,11 +32,16 @@ fn next_todo_status(status: &str) -> &'static str {
 }
 
 fn todo_progress_label(todos: &[TodoItem]) -> String {
-    let completed = todos.iter().filter(|t| t.status == "completed").count();
-    let in_progress = todos.iter().filter(|t| t.status == "in_progress").count();
-    let total = todos.len();
+    let completed = todos.iter().filter(|t| t.status == "completed").count() as u64;
+    let in_progress = todos.iter().filter(|t| t.status == "in_progress").count() as u64;
+    let total = todos.len() as u64;
     if in_progress > 0 {
-        format!("{completed}/{total} · {in_progress} in progress")
+        deepseekcode_i18n::tr!(
+            "todo.progress",
+            "done" => completed,
+            "total" => total,
+            "active" => in_progress
+        )
     } else {
         format!("{completed}/{total}")
     }
@@ -83,7 +88,7 @@ impl TodoPanel {
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_secondary)
-                    .child("Tasks"),
+                    .child(deepseekcode_i18n::t("todo.heading")),
             )
             .child(div().text_xs().text_color(theme.text_muted).child(summary));
 
@@ -131,7 +136,7 @@ impl TodoPanel {
                 div()
                     .text_sm()
                     .text_color(theme.text_muted)
-                    .child("No tasks yet."),
+                    .child(deepseekcode_i18n::t("todo.empty")),
             );
         } else {
             for (idx, item) in todos.iter().enumerate() {

@@ -5,5 +5,5 @@
 //! "server". This crate re-exports the full surface for the `serve` command
 //! and existing `deepseekcode_server::` import paths.
 
-pub use deepseekcode_embed::{app, auth, openapi, pty, request_id, routes, state};
+pub use deepseekcode_embed::{app, auth, language, openapi, pty, request_id, routes, state};
 pub use deepseekcode_embed::{build_router, serve, AppState, PtyManager};

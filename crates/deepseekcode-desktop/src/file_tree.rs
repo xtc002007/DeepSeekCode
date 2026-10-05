@@ -108,7 +108,7 @@ impl FileTreeView {
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.text_muted)
-                            .child("FILES"),
+                            .child(deepseekcode_i18n::t("files.heading")),
                     )
                     .child(
                         div()
@@ -168,7 +168,7 @@ impl FileTreeView {
                     .py_2()
                     .text_xs()
                     .text_color(theme.text_disabled)
-                    .child("Loading…"),
+                    .child(deepseekcode_i18n::t("common.loading")),
             );
         } else {
             let total = state
@@ -197,9 +197,10 @@ impl FileTreeView {
                                 this.load_more_directory(&dir, cx);
                             })
                         })
-                        .child(format!(
-                            "Load more ({}/{total})",
-                            offset + root_entries.len()
+                        .child(deepseekcode_i18n::tr!(
+                            "files.load_more",
+                            "shown" => (offset + root_entries.len()) as u64,
+                            "total" => total as u64
                         )),
                 );
             }
@@ -306,7 +307,7 @@ fn render_entries(
                             cx.stop_propagation();
                         })
                     })
-                    .child("diff"),
+                    .child(deepseekcode_i18n::t("files.diff")),
             );
         }
 
@@ -319,7 +320,7 @@ fn render_entries(
                         .pl(indent + px(12.))
                         .text_xs()
                         .text_color(theme.text_disabled)
-                        .child("Loading…"),
+                        .child(deepseekcode_i18n::t("common.loading")),
                 );
             } else if let Some(children) = state.entries.get(&path) {
                 col = col.child(render_entries(

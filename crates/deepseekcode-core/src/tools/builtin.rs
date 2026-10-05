@@ -11,6 +11,7 @@ use tokio::time::timeout;
 
 use crate::shell_env;
 
+use super::agent_pty::{global_agent_pty_registry, strip_ansi_escapes};
 use super::display::compute_text_diff_stats;
 use super::registry::Tool;
 use super::services::{
@@ -462,6 +463,11 @@ impl PowershellTool {
             bash: BashTool::new(shell, env),
         }
     }
+
+    pub fn with_pty(mut self, pty: bool) -> Self {
+        self.bash = self.bash.with_pty(pty);
+        self
+    }
 }
 
 #[async_trait]
@@ -520,11 +526,69 @@ impl Tool for PowershellTool {
 pub struct BashTool {
     shell: Option<String>,
     env: HashMap<String, String>,
+    /// Run the command under a real PTY (the agent-visible terminal) instead
+    /// of pipes. Default `false`; the registry enables it from
+    /// `DEEPSEEKCODE_BASH_PTY=1`, tests opt in per instance (never via env,
+    /// which would race parallel tests).
+    pty: bool,
 }
 
 impl BashTool {
     pub fn new(shell: Option<String>, env: HashMap<String, String>) -> Self {
-        Self { shell, env }
+        Self {
+            shell,
+            env,
+            pty: false,
+        }
+    }
+
+    pub fn with_pty(mut self, pty: bool) -> Self {
+        self.pty = pty;
+        self
+    }
+}
+
+/// Build `(program, argv)` for a shell command, shared by the pipe and PTY
+/// backends so both execute byte-identical command lines (including the
+/// Windows `chcp 65001` prefix and the PowerShell non-interactive flags).
+fn build_shell_argv(shell: Option<&str>, command: &str) -> (String, Vec<String>) {
+    if let Some(shell) = shell {
+        if is_powershell(shell) {
+            (
+                shell.to_string(),
+                vec![
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-Command".to_string(),
+                    command.to_string(),
+                ],
+            )
+        } else if is_posix_style_shell(shell) {
+            (shell.to_string(), vec!["-lc".to_string(), command.to_string()])
+        } else if cfg!(windows) {
+            // cmd.exe family: force UTF-8 here too, otherwise configuring
+            // a shell silently dropped the `chcp 65001` the default path
+            // applies and non-ASCII output turned into mojibake.
+            (
+                shell.to_string(),
+                vec![
+                    "/C".to_string(),
+                    format!("chcp 65001 >nul && {command}"),
+                ],
+            )
+        } else {
+            (shell.to_string(), vec!["-lc".to_string(), command.to_string()])
+        }
+    } else if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec!["/C".to_string(), format!("chcp 65001 >nul && {command}")],
+        )
+    } else {
+        (
+            "bash".to_string(),
+            vec!["-lc".to_string(), command.to_string()],
+        )
     }
 }
 
@@ -603,38 +667,24 @@ impl Tool for BashTool {
             .unwrap_or(60_000)
             .clamp(1_000, 600_000);
 
-        let mut cmd = if let Some(shell) = &self.shell {
-            let mut c = Command::new(shell);
-            if is_powershell(shell) {
-                c.args(["-NoProfile", "-NonInteractive", "-Command", &command]);
-            } else if is_posix_style_shell(shell) {
-                c.args(["-lc", &command]);
-            } else if cfg!(windows) {
-                // cmd.exe family: force UTF-8 here too, otherwise configuring
-                // a shell silently dropped the `chcp 65001` the default path
-                // applies and non-ASCII output turned into mojibake.
-                let wrapped = format!("chcp 65001 >nul && {command}");
-                c.args(["/C", &wrapped]);
-            } else {
-                c.args(["-lc", &command]);
+        // PTY backend first: the terminal IS the execution site (single run,
+        // visible + interactive). Falls back to pipes when ConPTY is
+        // unavailable so a degraded host never loses command execution.
+        if self.pty {
+            match run_command_in_pty(self, &command, timeout_ms, ctx).await {
+                PtyRunOutcome::Ok(value) => {
+                    let _ = crate::project_context::ensure_agents_md(&ctx.working_directory);
+                    return Ok(value);
+                }
+                PtyRunOutcome::Err(failure) => return Err(failure),
+                PtyRunOutcome::Unavailable(_) => {}
             }
-            c.current_dir(&ctx.working_directory);
-            shell_env::apply_to_command(&mut c, &self.env);
-            c
-        } else if cfg!(windows) {
-            let wrapped = format!("chcp 65001 >nul && {command}");
-            let mut c = Command::new("cmd");
-            c.args(["/C", &wrapped]);
-            c.current_dir(&ctx.working_directory);
-            shell_env::apply_to_command(&mut c, &self.env);
-            c
-        } else {
-            let mut c = Command::new("bash");
-            c.args(["-lc", &command]);
-            c.current_dir(&ctx.working_directory);
-            shell_env::apply_to_command(&mut c, &self.env);
-            c
-        };
+        }
+        let (program, argv) = build_shell_argv(self.shell.as_deref(), &command);
+        let mut cmd = Command::new(&program);
+        cmd.args(&argv);
+        cmd.current_dir(&ctx.working_directory);
+        shell_env::apply_to_command(&mut cmd, &self.env);
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         cmd.kill_on_drop(true);
@@ -996,6 +1046,281 @@ async fn run_command_streaming(
         "stdout": stdout,
         "stderr": stderr,
         "truncated": stdout_truncated || stderr_truncated,
+    }))
+}
+
+/// Outcome of a PTY-backed run: either a finished value, a fatal tool error,
+/// or `Unavailable` (ConPTY missing, spawn failed) telling the caller to fall
+/// back to the pipe backend instead of failing the command.
+enum PtyRunOutcome {
+    Ok(Value),
+    Unavailable(String),
+    Err(ToolFailure),
+}
+
+/// Run `command` as the SOLE execution inside a fresh agent PTY.
+///
+/// Same argv the pipe backend would use (via `build_shell_argv`), spawned
+/// non-interactively under the slave: no textual wrapping, no marker
+/// protocol, exit status straight from `child.wait()`. Raw master bytes feed
+/// the desktop display via broadcast; the LLM result accumulates decoded,
+/// ANSI-stripped lines (the terminal merges stdout/stderr by design, so the
+/// result carries the merged text in `stdout`).
+async fn run_command_in_pty(
+    tool: &BashTool,
+    command: &str,
+    timeout_ms: u64,
+    ctx: &ToolContext,
+) -> PtyRunOutcome {
+    const MAX_STREAM_BYTES: usize = 1024 * 1024;
+    let (program, argv) = build_shell_argv(tool.shell.as_deref(), command);
+    let envs: Vec<(String, String)> = tool
+        .env
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let registry = global_agent_pty_registry();
+    let (session, mut child, mut rx) = match registry.spawn(
+        &program,
+        &argv,
+        &ctx.working_directory,
+        &envs,
+    ) {
+        Ok(tuple) => tuple,
+        Err(message) => return PtyRunOutcome::Unavailable(message),
+    };
+    let pty_id = session.id.clone();
+
+    let spawned_pid = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    if let Some(pid) = child.process_id() {
+        spawned_pid.store(pid, std::sync::atomic::Ordering::SeqCst);
+    }
+    let services = current_services();
+    if let Some(services) = &services {
+        if let Some(sink) = services.progress.as_ref() {
+            // Desktop attach handshake: a `stream == "pty"` progress chunk
+            // carries the live session id. It is NEVER appended to any output
+            // buffer (see `DetailStore::append_output`).
+            let _ = sink
+                .progress(
+                    ctx.session_id,
+                    &ctx.tool_call_id,
+                    "bash",
+                    &serde_json::json!({ "pty_id": pty_id }).to_string(),
+                    "pty",
+                )
+                .await;
+        }
+    }
+    let cancel_token = services.as_ref().and_then(|s| s.cancel.clone());
+    let session_id = ctx.session_id;
+    let tool_call_id = ctx.tool_call_id.clone();
+
+    let output = match timeout(
+        Duration::from_millis(timeout_ms),
+        run_pty_loop(
+            child,
+            &mut rx,
+            session_id,
+            &tool_call_id,
+            services.as_ref(),
+            cancel_token.as_ref(),
+        ),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            crate::process::kill_process_tree(Some(
+                spawned_pid.load(std::sync::atomic::Ordering::SeqCst),
+            ));
+            registry.remove(&pty_id);
+            return PtyRunOutcome::Err(ToolFailure {
+                message: format!(
+                    "command timed out after {timeout_ms}ms and was killed \
+                     (its process tree too). Re-run with a larger `timeout_ms` \
+                     (max 600000) if the command legitimately needs longer, \
+                     or split it into smaller steps."
+                ),
+                retryable: true,
+            });
+        }
+    };
+    registry.remove(&pty_id);
+    match output {
+        Ok(value) => PtyRunOutcome::Ok(value),
+        Err(failure) => PtyRunOutcome::Err(failure),
+    }
+}
+
+/// Read loop for one agent PTY: decode incremental lines from raw master
+/// bytes (ConPTY emits UTF-8), stream + accumulate them, exit on child end.
+/// Mirrors `run_command_streaming`'s structure (cancel branch, termination
+/// branch) so timeout/cancel semantics stay identical.
+async fn run_pty_loop(
+    mut child: Box<dyn portable_pty::Child + Send + Sync>,
+    rx: &mut tokio::sync::broadcast::Receiver<Vec<u8>>,
+    session_id: deepseekcode_types::SessionId,
+    tool_call_id: &deepseekcode_types::ToolCallId,
+    services: Option<&super::services::ToolServices>,
+    cancel_token: Option<&std::sync::Arc<super::services::CancelToken>>,
+) -> std::result::Result<Value, ToolFailure> {
+    const MAX_STREAM_BYTES: usize = 1024 * 1024;
+    let mut merged = String::new();
+    let mut truncated = false;
+    // Carry-over for chunk splits mid-line / mid-rune.
+    let mut pending: Vec<u8> = Vec::new();
+    let mut killed = false;
+    let mut exited: Option<portable_pty::ExitStatus> = None;
+
+    // Decode one master chunk into result lines (ANSI-stripped) and report
+    // each as `stdout` progress, exactly like the pipe backend reports lines.
+    // Returns on broadcast lag (marks truncation, keeps going).
+    async fn feed_chunk(
+        data: Vec<u8>,
+        pending: &mut Vec<u8>,
+        merged: &mut String,
+        truncated: &mut bool,
+        session_id: deepseekcode_types::SessionId,
+        tool_call_id: &deepseekcode_types::ToolCallId,
+        services: Option<&super::services::ToolServices>,
+    ) {
+        pending.extend_from_slice(&data);
+        let mut start = 0usize;
+        let mut lines: Vec<String> = Vec::new();
+        for (index, byte) in pending.iter().enumerate() {
+            if *byte == b'\n' {
+                let raw = pending[start..index].to_vec();
+                start = index + 1;
+                let text = String::from_utf8_lossy(&raw);
+                let text = text.trim_end_matches('\r').to_string();
+                lines.push(strip_ansi_escapes(&text));
+            }
+        }
+        pending.drain(..start);
+        for line in lines {
+            if merged.len() < MAX_STREAM_BYTES {
+                if !merged.is_empty() {
+                    merged.push('\n');
+                }
+                let room = MAX_STREAM_BYTES.saturating_sub(merged.len());
+                if line.len() + 1 > room {
+                    merged.push_str(&line[..room.saturating_sub(1).min(line.len())]);
+                    *truncated = true;
+                } else {
+                    merged.push_str(&line);
+                }
+            } else {
+                *truncated = true;
+            }
+            if let Some(services) = &services {
+                if let Some(sink) = services.progress.as_ref() {
+                    let _ = sink
+                        .progress(session_id, tool_call_id, "bash", &line, "stdout")
+                        .await;
+                }
+            }
+        }
+    }
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = async {
+                    match &cancel_token {
+                        Some(token) => token.cancelled().await,
+                        None => std::future::pending::<()>().await,
+                    }
+                }, if !killed && cancel_token.is_some() => {
+                let _ = child.kill();
+                killed = true;
+            }
+            bytes = rx.recv() => {
+                match bytes {
+                    Ok(data) => {
+                        feed_chunk(data, &mut pending, &mut merged, &mut truncated, session_id, tool_call_id, services).await;
+                    }
+                    // Lagged: reader outran us; mark truncation, keep going.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        truncated = true;
+                    }
+                    // Reader thread ended (EOF): the child is done or dying;
+                    // keep polling it below instead of hanging here.
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        match child.try_wait() {
+                            Ok(Some(status)) => {
+                                exited = Some(status);
+                                break;
+                            }
+                            _ => {
+                                tokio::time::sleep(Duration::from_millis(20)).await;
+                            }
+                        }
+                    }
+                }
+            }
+            // `child.wait()` blocks a thread: poll instead so cancel/kill and
+            // output draining stay responsive, same as the pipe backend.
+            _ = tokio::time::sleep(Duration::from_millis(20)), if exited.is_none() => {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        exited = Some(status);
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        break;
+                    }
+                }
+            }
+            else => break,
+        }
+    }
+
+    // Drain whatever the reader still holds (bounded like the pipe drain).
+    if !pending.is_empty() {
+        let text = String::from_utf8_lossy(&pending);
+        let text = text.trim_end_matches('\r').to_string();
+        let line = strip_ansi_escapes(&text);
+        if !line.is_empty() && merged.len() < MAX_STREAM_BYTES {
+            if !merged.is_empty() {
+                merged.push('\n');
+            }
+            merged.push_str(&line);
+        }
+        pending.clear();
+    }
+    let _ = rx;
+    let status = match exited {
+        Some(status) => status,
+        None => {
+            // Loop ended without observing the exit; reap on the blocking
+            // pool so the async runtime is never stalled by a raw wait.
+            // `child` is owned here (the loop released it), so moving it
+            // into the closure is safe.
+            match child.try_wait() {
+                Ok(Some(status)) => status,
+                _ => tokio::task::spawn_blocking(move || child.wait())
+                    .await
+                    .map_err(|e| ToolFailure {
+                        message: e.to_string(),
+                        retryable: true,
+                    })?
+                    .map_err(|e| ToolFailure {
+                        message: e.to_string(),
+                        retryable: true,
+                    })?,
+            }
+        }
+    };
+    if truncated {
+        merged.push_str("\n…[stdout truncated at 1MiB during capture]");
+    }
+    Ok(serde_json::json!({
+        "exit_code": status.exit_code() as i64,
+        "stdout": merged,
+        "stderr": "",
+        "truncated": truncated,
     }))
 }
 
@@ -2685,6 +3010,130 @@ mod bash_execution_tests {
             .expect("bash deadlocked: select! never observed the process exiting")
             .expect("bash must succeed");
         assert!(out.to_string().contains("hello"), "{}", out);
+    }
+
+    /// PTY backend: trivial echo through a REAL terminal. The merged stream
+    /// lands in `stdout` with exit 0 — the contract the desktop live tab
+    /// relies on. (Opt-in per instance via `.with_pty(true)`; the registry
+    /// enables it from `DEEPSEEKCODE_BASH_PTY=1`. Never via env here: env is
+    /// process-global and would race parallel tests.)
+    #[tokio::test]
+    async fn pty_echo_returns_merged_stdout_and_zero() {
+        let dir = std::env::temp_dir();
+        let tool = BashTool::new(None, HashMap::new()).with_pty(true);
+        let out = tool
+            .execute(
+                json!({ "command": "echo hello-pty", "timeout_ms": 30_000 }),
+                &ctx(&dir),
+            )
+            .await
+            .expect("pty bash must succeed");
+        let stdout = out["stdout"].as_str().unwrap_or_default().to_string();
+        assert!(stdout.contains("hello-pty"), "{out}");
+        assert_eq!(out["exit_code"].as_i64(), Some(0), "{out}");
+        assert_eq!(out["stderr"].as_str().unwrap_or("?"), "", "{out}");
+    }
+
+    /// PTY backend propagates non-zero exit codes without any marker
+    /// protocol: the status comes straight from `child.wait()`.
+    #[tokio::test]
+    async fn pty_exit_code_propagates() {
+        let dir = std::env::temp_dir();
+        let tool = BashTool::new(None, HashMap::new()).with_pty(true);
+        let out = tool
+            .execute(json!({ "command": "exit 3", "timeout_ms": 30_000 }), &ctx(&dir))
+            .await
+            .expect("pty run itself must resolve");
+        assert_eq!(out["exit_code"].as_i64(), Some(3), "{out}");
+    }
+
+    /// PTY merges stderr into the single terminal stream BY DESIGN (a
+    /// console has one screen): `1>&2` output shows up inside `stdout`.
+    #[tokio::test]
+    async fn pty_stderr_merges_into_stdout() {
+        let dir = std::env::temp_dir();
+        let tool = BashTool::new(None, HashMap::new()).with_pty(true);
+        let out = tool
+            .execute(
+                json!({ "command": "echo oops-pty 1>&2", "timeout_ms": 30_000 }),
+                &ctx(&dir),
+            )
+            .await
+            .expect("pty bash must succeed");
+        let stdout = out["stdout"].as_str().unwrap_or_default().to_string();
+        assert!(stdout.contains("oops-pty"), "{out}");
+    }
+
+    /// PTY result text is ANSI-stripped even when the program colorizes for
+    /// TTYs (the live display keeps raw bytes; only the result is cleaned).
+    #[tokio::test]
+    async fn pty_result_strips_ansi_colors() {
+        let dir = std::env::temp_dir();
+        let command = if cfg!(windows) {
+            "echo \u{1b}[31mred-pty\u{1b}[0m"
+        } else {
+            "printf '\\033[31mred-pty\\033[0m\\n'"
+        };
+        let tool = BashTool::new(None, HashMap::new()).with_pty(true);
+        let out = tool
+            .execute(json!({ "command": command, "timeout_ms": 30_000 }), &ctx(&dir))
+            .await
+            .expect("pty bash must succeed");
+        let stdout = out["stdout"].as_str().unwrap_or_default().to_string();
+        assert!(stdout.contains("red-pty"), "{out}");
+        assert!(!stdout.contains('\x1b'), "ANSI leaked into result: {out:?}");
+    }
+
+    /// PTY timeout kills the whole tree and reports the standard message
+    /// (same text as the pipe backend so callers need no new handling).
+    #[tokio::test]
+    async fn pty_timeout_kills_and_reports() {
+        let dir = std::env::temp_dir();
+        let command = if cfg!(windows) {
+            "ping -n 30 127.0.0.1 >nul"
+        } else {
+            "sleep 30"
+        };
+        let tool = BashTool::new(None, HashMap::new()).with_pty(true);
+        let err = tool
+            .execute(json!({ "command": command, "timeout_ms": 1_500 }), &ctx(&dir))
+            .await
+            .expect_err("overlong pty command must time out");
+        assert!(err.message.contains("timed out"), "{}", err.message);
+        assert!(err.retryable, "timeout must stay retryable");
+    }
+
+    /// PTY backend completes with a cancel token installed (production
+    /// condition): the polling `try_wait` branch must observe the exit just
+    /// like the pipe backend's `child.wait()` branch does.
+    #[tokio::test]
+    async fn pty_completes_with_a_cancel_token_installed() {
+        let dir = std::env::temp_dir();
+        let tool = BashTool::new(None, HashMap::new()).with_pty(true);
+        let cancel = Arc::new(crate::tools::services::CancelToken::new());
+        let services = crate::tools::services::ToolServices {
+            progress: None,
+            todo_store: None,
+            events: None,
+            question_tx: None,
+            task_spawner: None,
+            cancel: Some(cancel),
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            crate::tools::services::with_services_async(services, async {
+                tool.execute(
+                    json!({ "command": "echo hello-cancel", "timeout_ms": 20_000 }),
+                    &ctx(&dir),
+                )
+                .await
+            }),
+        )
+        .await;
+        let out = result
+            .expect("pty bash deadlocked with cancel token installed")
+            .expect("pty bash must succeed");
+        assert!(out.to_string().contains("hello-cancel"), "{}", out);
     }
 
     /// `BufRead::lines()` fails on the first non-UTF-8 byte, and the reader

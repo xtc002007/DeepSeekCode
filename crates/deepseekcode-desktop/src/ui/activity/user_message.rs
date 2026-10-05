@@ -43,7 +43,12 @@ pub fn render_user_message_card(
                         .items_center()
                         .gap_1()
                         .child(render_icon_rgba(IconName::User, px(12.), theme.text_muted))
-                        .child(div().text_xs().text_color(theme.text_muted).child("You")),
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.text_muted)
+                                .child(deepseekcode_i18n::t("activity.you")),
+                        ),
                 )
                 .child(render_copy_button(copy_id, copy_text, &theme)),
         )

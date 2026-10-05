@@ -101,7 +101,11 @@ fn validated_project_root(
     if !is_dir_allowed(&dir) {
         return Err((
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({ "error": "directory not allowed", "code": "forbidden" })),
+            Json(crate::language::error_body(
+                "error.directory_not_allowed",
+                "forbidden",
+                &[],
+            )),
         ));
     }
     Ok(dir)
@@ -152,7 +156,11 @@ fn validated_provider_id(raw: &str) -> Result<String, (StatusCode, Json<serde_js
     } else {
         Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "invalid provider id", "code": "invalid_input" })),
+            Json(crate::language::error_body(
+                "error.invalid_provider_id",
+                "invalid_input",
+                &[],
+            )),
         ))
     }
 }
@@ -163,7 +171,11 @@ fn validated_mcp_name(raw: &str) -> Result<String, (StatusCode, Json<serde_json:
     } else {
         Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "invalid mcp name", "code": "invalid_input" })),
+            Json(crate::language::error_body(
+                "error.invalid_mcp_name",
+                "invalid_input",
+                &[],
+            )),
         ))
     }
 }
@@ -175,7 +187,11 @@ fn validated_plan_id(raw: &str) -> Result<String, (StatusCode, Json<serde_json::
     } else {
         Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "invalid plan id", "code": "invalid_input" })),
+            Json(crate::language::error_body(
+                "error.invalid_plan_id",
+                "invalid_input",
+                &[],
+            )),
         ))
     }
 }
@@ -184,7 +200,11 @@ fn parse_session_id(id: &str) -> Result<SessionId, (StatusCode, Json<serde_json:
     SessionId::from_str(id).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "invalid session id", "code": "invalid_input" })),
+            Json(crate::language::error_body(
+                "error.invalid_session_id",
+                "invalid_input",
+                &[],
+            )),
         )
     })
 }
@@ -195,7 +215,11 @@ fn parse_permission_id(
     deepseekcode_types::PermissionId::from_str(id).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "invalid permission id", "code": "invalid_input" })),
+            Json(crate::language::error_body(
+                "error.invalid_permission_id",
+                "invalid_input",
+                &[],
+            )),
         )
     })
 }
@@ -261,34 +285,34 @@ fn service_error_inner(
         E::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    // Never leak storage internals (table names / SQL). Cap message length.
-    let message = match &e {
-        E::Storage(_) => "storage error".to_string(),
-        other => {
-            let s = other.to_string();
-            if s.len() > 500 {
-                s[..500].to_string()
-            } else {
-                s
-            }
-        }
+    // Single canonical shape: { error, error_en, detail?, code, lang }.
+    //
+    // `error` is translated; `code` is the stable contract; raw service text
+    // travels in `detail` so clients and developers do not lose diagnostics.
+    // Storage internals still never leave the host.
+    let (code, key) = match &e {
+        E::NotFound(_) => ("not_found", "error.not_found"),
+        E::PermissionDenied(_) => ("forbidden", "error.forbidden"),
+        E::Unauthorized(_) => ("unauthorized", "error.unauthorized"),
+        E::RateLimited(_) => ("rate_limited", "error.rate_limited"),
+        E::InvalidInput(_) => ("invalid_input", "error.invalid_input"),
+        E::AlreadyExists(_) => ("already_exists", "error.already_exists"),
+        E::SessionInterrupted => ("interrupted", "error.session_interrupted"),
+        E::ContextUnavailable(_) => ("context_unavailable", "error.context_unavailable"),
+        E::RetryAfterCompaction | E::RetryWithoutReasoning => ("retryable", "error.retryable"),
+        E::Llm(_) => ("llm_error", "error.llm_error"),
+        E::ToolFailure(_) => ("tool_failure", "error.tool_failure"),
+        E::Config(_) => ("config_error", "error.config_error"),
+        E::Storage(_) => ("storage_error", "error.storage"),
+        E::Io(_) => ("internal", "error.io_failed"),
+        E::Serde(_) => ("internal", "error.invalid_input"),
+        E::Other(_) => ("internal", "error.unknown"),
     };
-    // Single canonical shape: { error, code }.
-    let code = match &e {
-        E::NotFound(_) => "not_found",
-        E::PermissionDenied(_) => "forbidden",
-        E::Unauthorized(_) => "unauthorized",
-        E::RateLimited(_) => "rate_limited",
-        E::InvalidInput(_) => "invalid_input",
-        E::AlreadyExists(_) => "conflict",
-        E::SessionInterrupted => "interrupted",
-        E::ContextUnavailable(_) => "context_unavailable",
-        E::RetryAfterCompaction | E::RetryWithoutReasoning => "retryable",
-        E::Llm(_) => "llm_error",
-        E::ToolFailure(_) => "tool_failure",
-        E::Config(_) => "config_error",
-        E::Storage(_) => "storage_error",
-        _ => "internal",
+    // Never leak storage internals (table names / SQL). Keep the original
+    // text for every other variant; `service_error_body` caps it.
+    let detail = match &e {
+        E::Storage(_) => None,
+        other => Some(other.to_string()),
     };
     // No `tracing!` here by design: the failure context travels on the
     // response extension and the `request_id` middleware emits the single
@@ -302,7 +326,11 @@ fn service_error_inner(
     };
     let mut resp = (
         status,
-        Json(serde_json::json!({ "error": message, "code": code })),
+        Json(crate::language::service_error_body(
+            code,
+            key,
+            detail.as_deref(),
+        )),
     )
         .into_response();
     resp.extensions_mut().insert(ApiErrorDetail {
@@ -438,6 +466,7 @@ pub fn authed_router(state: AppState) -> Router {
         .route("/api/v1/pty/{id}/resize", post(resize_pty))
         .route("/api/v1/pty/{id}", delete(destroy_pty))
         .route("/api/v1/pty/{id}/connect", get(pty_connect))
+        .route("/api/v1/agent-pty/{id}/connect", get(agent_pty_connect))
         .with_state(state)
 }
 
@@ -524,10 +553,11 @@ fn project_dir(headers: &HeaderMap) -> Result<String, (StatusCode, Json<serde_js
                 );
                 (
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "error": "cannot determine project directory",
-                        "code": "bad_request"
-                    })),
+                    Json(crate::language::error_body(
+                        "error.cannot_determine_directory",
+                        "bad_request",
+                        &[],
+                    )),
                 )
             })?,
     };
@@ -792,7 +822,11 @@ pub(crate) async fn prompt(
     if req.session_id != path_id {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "body session_id does not match path id", "code": "invalid_input" })),
+            Json(crate::language::error_body(
+                "error.session_id_mismatch",
+                "invalid_input",
+                &[],
+            )),
         )
             .into_response();
     }
@@ -1035,7 +1069,11 @@ pub(crate) async fn get_session_todo(
     if location.session_service.get(session_id).await.is_err() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "session not found", "code": "not_found" })),
+            Json(crate::language::error_body(
+                "error.session_not_found",
+                "not_found",
+                &[],
+            )),
         )
             .into_response();
     }
@@ -1069,7 +1107,11 @@ pub(crate) async fn update_session_todo(
     if location.session_service.get(session_id).await.is_err() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "session not found", "code": "not_found" })),
+            Json(crate::language::error_body(
+                "error.session_not_found",
+                "not_found",
+                &[],
+            )),
         )
             .into_response();
     }
@@ -1105,7 +1147,11 @@ pub(crate) async fn list_session_plans(
     if location.session_service.get(session_id).await.is_err() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "session not found", "code": "not_found" })),
+            Json(crate::language::error_body(
+                "error.session_not_found",
+                "not_found",
+                &[],
+            )),
         )
             .into_response();
     }
@@ -1156,7 +1202,11 @@ pub(crate) async fn dismiss_session_plan_prompt(
     if location.session_service.get(session_id).await.is_err() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "session not found", "code": "not_found" })),
+            Json(crate::language::error_body(
+                "error.session_not_found",
+                "not_found",
+                &[],
+            )),
         )
             .into_response();
     }
@@ -1232,7 +1282,11 @@ pub(crate) async fn answer_session_question(
     if location.session_service.get(session_id).await.is_err() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "session not found", "code": "not_found" })),
+            Json(crate::language::error_body(
+                "error.session_not_found",
+                "not_found",
+                &[],
+            )),
         )
             .into_response();
     }
@@ -1690,7 +1744,11 @@ pub(crate) async fn delete_policy_grant(
     if !is_dir_allowed(&dir) {
         return (
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({ "error": "directory not allowed", "code": "forbidden" })),
+            Json(crate::language::error_body(
+                "error.directory_not_allowed",
+                "forbidden",
+                &[],
+            )),
         )
             .into_response();
     }
@@ -1770,7 +1828,11 @@ pub(crate) async fn update_policy_config(
         let _ = std::fs::remove_file(&tmp_path);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": "failed to persist policy config", "code": "storage_error" })),
+            Json(crate::language::error_body(
+                "error.policy_persist_failed",
+                "storage_error",
+                &[],
+            )),
         )
             .into_response();
     }
@@ -1960,8 +2022,12 @@ pub(crate) async fn event_stream(
     };
     // Enforce allowlist even for SSE: forbidden dirs get an error-only stream.
     if !is_dir_allowed(&dir) {
-        return error_sse(serde_json::json!({ "error": "forbidden", "code": "forbidden" }))
-            .into_response();
+        return error_sse(crate::language::error_body(
+            "error.forbidden",
+            "forbidden",
+            &[],
+        ))
+        .into_response();
     }
     let engine = state.engine.read().await;
     let location = engine.location(&dir).await;
@@ -1979,9 +2045,11 @@ pub(crate) async fn event_stream(
             .is_err()
         {
             let _ = filter_session.take();
-            return error_sse(
-                serde_json::json!({ "error": "session not found in this project", "code": "not_found" }),
-            )
+            return error_sse(crate::language::error_body(
+                "error.session_not_found_in_project",
+                "not_found",
+                &[],
+            ))
             .into_response();
         }
     }
@@ -2121,7 +2189,11 @@ pub(crate) async fn fs_tree(
         Err(status) => {
             return (
                 status,
-                Json(serde_json::json!({ "error": "path outside project root", "code": "forbidden" })),
+                Json(crate::language::error_body(
+                    "error.path_outside_root",
+                    "forbidden",
+                    &[],
+                )),
             )
                 .into_response();
         }
@@ -2130,7 +2202,11 @@ pub(crate) async fn fs_tree(
     if !dir.is_dir() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "not a directory", "code": "invalid_input" })),
+            Json(crate::language::error_body(
+                "error.not_a_directory",
+                "invalid_input",
+                &[],
+            )),
         )
             .into_response();
     }
@@ -2169,7 +2245,11 @@ pub(crate) async fn fs_file(
     if query.path.len() > 1024 {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "path too long", "code": "invalid_input" })),
+            Json(crate::language::error_body(
+                "error.path_too_long",
+                "invalid_input",
+                &[],
+            )),
         )
             .into_response();
     }
@@ -2178,7 +2258,11 @@ pub(crate) async fn fs_file(
         Err(status) => {
             return (
                 status,
-                Json(serde_json::json!({ "error": "path outside project root", "code": "forbidden" })),
+                Json(crate::language::error_body(
+                    "error.path_outside_root",
+                    "forbidden",
+                    &[],
+                )),
             )
                 .into_response();
         }
@@ -2188,7 +2272,11 @@ pub(crate) async fn fs_file(
         Ok(m) if m.len() > 8 * 1024 * 1024 => {
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                Json(serde_json::json!({ "error": "file too large; use paging", "code": "too_large" })),
+                Json(crate::language::error_body(
+                    "error.file_too_large",
+                    "too_large",
+                    &[],
+                )),
             )
                 .into_response();
         }
@@ -2211,7 +2299,11 @@ pub(crate) async fn fs_file(
         }
         Err(_) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "not found", "code": "not_found" })),
+            Json(crate::language::error_body(
+                "error.not_found",
+                "not_found",
+                &[],
+            )),
         )
             .into_response(),
     }
@@ -2236,10 +2328,11 @@ pub(crate) async fn fs_write(
     if !fs_write_allowed() {
         return (
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
-                "error": "direct file writes are disabled; use agent tools or enable DEEPSEEKCODE_ALLOW_FS_WRITE=1",
-                "code": "forbidden"
-            })),
+            Json(crate::language::error_body(
+                "error.fs_write_disabled",
+                "forbidden",
+                &[],
+            )),
         )
             .into_response();
     }
@@ -2252,10 +2345,11 @@ pub(crate) async fn fs_write(
             Err(_) => {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "error": "invalid x-deepseekcode-session-id header",
-                        "code": "invalid_input"
-                    })),
+                    Json(crate::language::error_body(
+                        "error.invalid_session_header",
+                        "invalid_input",
+                        &[],
+                    )),
                 )
                     .into_response();
             }
@@ -2263,10 +2357,11 @@ pub(crate) async fn fs_write(
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "x-deepseekcode-session-id header required for fs_write",
-                    "code": "invalid_input"
-                })),
+                Json(crate::language::error_body(
+                    "error.session_header_required",
+                    "invalid_input",
+                    &[],
+                )),
             )
                 .into_response();
         }
@@ -2286,7 +2381,11 @@ pub(crate) async fn fs_write(
     {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "session not found in this project", "code": "not_found" })),
+            Json(crate::language::error_body(
+                "error.session_not_found_in_project",
+                "not_found",
+                &[],
+            )),
         )
             .into_response();
     }
@@ -2311,18 +2410,23 @@ pub(crate) async fn fs_write(
         Err(status) => {
             return (
                 status,
-                Json(serde_json::json!({ "error": "path outside project root", "code": "forbidden" })),
+                Json(crate::language::error_body(
+                    "error.path_outside_root",
+                    "forbidden",
+                    &[],
+                )),
             )
                 .into_response();
         }
     };
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            return (
+            return crate::language::service_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
+                "internal",
+                "error.io_failed",
+                Some(&e.to_string()),
+            );
         }
     }
     match std::fs::write(&path, &body.content) {
@@ -2336,11 +2440,12 @@ pub(crate) async fn fs_write(
             );
             Json(serde_json::json!({ "ok": true })).into_response()
         }
-        Err(e) => (
+        Err(e) => crate::language::service_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+            "internal",
+            "error.io_failed",
+            Some(&e.to_string()),
+        ),
     }
 }
 
@@ -2376,7 +2481,11 @@ pub(crate) async fn fs_diff(
         Err(status) => {
             return (
                 status,
-                Json(serde_json::json!({ "error": "path outside project root", "code": "forbidden" })),
+                Json(crate::language::error_body(
+                    "error.path_outside_root",
+                    "forbidden",
+                    &[],
+                )),
             )
                 .into_response();
         }
@@ -2387,9 +2496,11 @@ pub(crate) async fn fs_diff(
         if snapshot_id.len() > 128 || snapshot_id.contains(['/', '\\', '.', '\0']) {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({ "error": "invalid snapshot id", "code": "invalid_input" }),
-                ),
+                Json(crate::language::error_body(
+                    "error.invalid_snapshot_id",
+                    "invalid_input",
+                    &[],
+                )),
             )
                 .into_response();
         }
@@ -2425,7 +2536,11 @@ pub(crate) async fn fs_diff(
             Err(_) => {
                 return (
                     StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({ "error": "original path outside project root" })),
+                    Json(crate::language::error_body(
+                        "error.original_path_outside_root",
+                        "forbidden",
+                        &[],
+                    )),
                 )
                     .into_response();
             }
@@ -2492,7 +2607,11 @@ pub(crate) async fn resize_pty(
     if state.pty.check_ownership(&id, &dir).is_none() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "pty not found in this project", "code": "not_found" })),
+            Json(crate::language::error_body(
+                "error.pty_not_found",
+                "not_found",
+                &[],
+            )),
         )
             .into_response();
     }
@@ -2559,6 +2678,7 @@ pub(crate) async fn pty_ticket(
     params(
         ("id" = String, Path, description = "PTY session id"),
         ("ticket" = Option<String>, Query, description = "One-time connect ticket when server password is set"),
+        ("directory" = Option<String>, Query, description = "Project directory fallback when the WS handshake carries no x-deepseekcode-directory header"),
     ),
     responses(
         (status = 101, description = "WebSocket upgrade for PTY I/O"),
@@ -2572,9 +2692,36 @@ pub(crate) async fn pty_connect(
     Path(id): Path<String>,
     Query(query): Query<PtyConnectQuery>,
 ) -> impl IntoResponse {
-    let dir = match validated_project_root(&headers) {
-        Ok(d) => d,
-        Err(resp) => return resp.into_response(),
+    // The WS handshake cannot always carry custom headers (e.g. a bare
+    // `connect_async(url)` sends none), so accept an explicit `?directory=`
+    // fallback; the header wins when present. Without either, fall back to
+    // the server cwd exactly like the REST paths do.
+    let dir = if headers.contains_key("x-deepseekcode-directory") {
+        match validated_project_root(&headers) {
+            Ok(d) => d,
+            Err(resp) => return resp.into_response(),
+        }
+    } else if let Some(q) = query.directory.as_deref() {
+        let cleaned: String = q.chars().take(1024).collect();
+        let cleaned = cleaned.replace('\0', "");
+        let normalized = normalize_server_directory(&cleaned);
+        if !is_dir_allowed(&normalized) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(crate::language::error_body(
+                    "error.directory_not_allowed",
+                    "forbidden",
+                    &[],
+                )),
+            )
+                .into_response();
+        }
+        normalized
+    } else {
+        match validated_project_root(&headers) {
+            Ok(d) => d,
+            Err(resp) => return resp.into_response(),
+        }
     };
     // Always require a one-time ticket when a password is set; without a
     // password (local loopback) still verify project ownership.
@@ -2583,14 +2730,22 @@ pub(crate) async fn pty_connect(
         if ticket.is_empty() || !state.pty.consume_ticket(ticket, &id, &dir) {
             return (
                 StatusCode::FORBIDDEN,
-                Json(serde_json::json!({ "error": "invalid or expired PTY ticket", "code": "forbidden" })),
+                Json(crate::language::error_body(
+                    "error.invalid_pty_ticket",
+                    "forbidden",
+                    &[],
+                )),
             )
                 .into_response();
         }
     } else if state.pty.check_ownership(&id, &dir).is_none() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "pty not found in this project", "code": "not_found" })),
+            Json(crate::language::error_body(
+                "error.pty_not_found",
+                "not_found",
+                &[],
+            )),
         )
             .into_response();
     }
@@ -2601,6 +2756,7 @@ pub(crate) async fn pty_connect(
 #[derive(Deserialize)]
 pub(crate) struct PtyConnectQuery {
     ticket: Option<String>,
+    directory: Option<String>,
 }
 
 async fn handle_pty_ws(mut socket: WebSocket, state: AppState, id: String) {
@@ -2617,6 +2773,117 @@ async fn handle_pty_ws(mut socket: WebSocket, state: AppState, id: String) {
                     }
                     Some(Ok(WsMessage::Text(text))) => {
                         let _ = state.pty.write(&id, text.as_bytes());
+                    }
+                    _ => break,
+                }
+            }
+            output = rx.recv() => {
+                if let Ok(data) = output {
+                    if socket.send(WsMessage::Binary(data.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/agent-pty/{id}/connect",
+    tag = "pty",
+    params(
+        ("id" = String, Path, description = "Agent PTY session id (published by the bash tool)"),
+        ("directory" = Option<String>, Query, description = "Project directory fallback when the WS handshake carries no x-deepseekcode-directory header"),
+    ),
+    responses(
+        (status = 101, description = "WebSocket upgrade for agent PTY I/O"),
+        (status = 403, description = "PTY belongs to another project directory"),
+        (status = 404, description = "Unknown or finished agent PTY")
+    )
+)]
+pub(crate) async fn agent_pty_connect(
+    ws: WebSocketUpgrade,
+    State(_state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<PtyConnectQuery>,
+) -> impl IntoResponse {
+    use deepseekcode_core::tools::agent_pty::global_agent_pty_registry;
+    let Some(session) = global_agent_pty_registry().get(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(crate::language::error_body(
+                "error.pty_not_found",
+                "not_found",
+                &[],
+            )),
+        )
+            .into_response();
+    };
+    // Same ownership rule as interactive PTYs: the caller must prove the
+    // project directory (header preferred, `?directory=` fallback, server
+    // cwd last). REST auth middleware already applies to this route.
+    let claimed = if headers.contains_key("x-deepseekcode-directory") {
+        match validated_project_root(&headers) {
+            Ok(d) => d,
+            Err(resp) => return resp.into_response(),
+        }
+    } else if let Some(q) = query.directory.as_deref() {
+        let cleaned: String = q.chars().take(1024).collect();
+        let normalized = normalize_server_directory(&cleaned.replace('\0', ""));
+        if !is_dir_allowed(&normalized) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(crate::language::error_body(
+                    "error.directory_not_allowed",
+                    "forbidden",
+                    &[],
+                )),
+            )
+                .into_response();
+        }
+        normalized
+    } else {
+        match validated_project_root(&headers) {
+            Ok(d) => d,
+            Err(resp) => return resp.into_response(),
+        }
+    };
+    let owned = normalize_server_directory(&session.directory);
+    #[cfg(windows)]
+    let owned_match = owned.eq_ignore_ascii_case(&claimed);
+    #[cfg(not(windows))]
+    let owned_match = owned == claimed;
+    if !owned_match {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(crate::language::error_body(
+                "error.pty_not_found",
+                "forbidden",
+                &[],
+            )),
+        )
+            .into_response();
+    }
+    ws.on_upgrade(move |socket| handle_agent_pty_ws(socket, id))
+}
+
+async fn handle_agent_pty_ws(mut socket: WebSocket, id: String) {
+    use deepseekcode_core::tools::agent_pty::global_agent_pty_registry;
+    let Some(session) = global_agent_pty_registry().get(&id) else {
+        return;
+    };
+    let mut rx = session.input_tx.subscribe();
+    loop {
+        tokio::select! {
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(WsMessage::Binary(data))) => {
+                        let _ = global_agent_pty_registry().write(&id, &data);
+                    }
+                    Some(Ok(WsMessage::Text(text))) => {
+                        let _ = global_agent_pty_registry().write(&id, text.as_bytes());
                     }
                     _ => break,
                 }
@@ -2762,10 +3029,7 @@ pub(crate) async fn update_session_model(
         Some(other) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": format!("unknown agent: {other}"),
-                    "code": "invalid_input",
-                })),
+                Json(crate::language::unknown_agent_body(other)),
             )
                 .into_response();
         }
@@ -3052,7 +3316,11 @@ pub(crate) async fn export_diagnostics(
     if validated_project_root(&headers).is_err() {
         return (
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({ "error": "directory not allowed", "code": "forbidden" })),
+            Json(crate::language::error_body(
+                "error.directory_not_allowed",
+                "forbidden",
+                &[],
+            )),
         )
             .into_response();
     }
@@ -3067,7 +3335,11 @@ pub(crate) async fn export_diagnostics(
         {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "invalid run_id", "code": "invalid_input" })),
+                Json(crate::language::error_body(
+                    "error.invalid_run_id",
+                    "invalid_input",
+                    &[],
+                )),
             )
                 .into_response();
         }
@@ -3094,17 +3366,19 @@ pub(crate) async fn export_diagnostics(
                 )
                     .into_response()
             }
-            Err(e) => (
+            Err(e) => crate::language::service_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response(),
+                "internal",
+                "error.io_failed",
+                Some(&e.to_string()),
+            ),
         },
-        Err(e) => (
+        Err(e) => crate::language::service_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+            "internal",
+            "error.io_failed",
+            Some(&e.to_string()),
+        ),
     }
 }
 

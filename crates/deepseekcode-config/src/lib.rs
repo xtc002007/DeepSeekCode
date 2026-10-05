@@ -9,6 +9,6 @@ pub use policy::{
 };
 pub use schema::DeepSeekCodeConfig;
 pub use schema::{
-    CompactionConfig, CompactionKeepConfig, LogFormat, LoggingConfig, PermissionsConfig,
-    PolicyMode, ProviderConfig, ToolOutputConfig,
+    resolve_language, CompactionConfig, CompactionKeepConfig, LogFormat, LoggingConfig,
+    PermissionsConfig, PolicyMode, ProviderConfig, ToolOutputConfig, UiConfig,
 };

@@ -99,7 +99,7 @@ impl SidebarView {
                     .line_height(crate::theme::leading_xs(&theme))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_muted)
-                    .child("RECENT"),
+                    .child(deepseekcode_i18n::t("sidebar.recent")),
             );
             for project in recent_projects {
                 let path = project.path.clone();
@@ -178,7 +178,7 @@ impl SidebarView {
                             .line_height(crate::theme::leading_xs(&theme))
                             .font_weight(FontWeight::BOLD)
                             .text_color(theme.text_secondary)
-                            .child("Projects"),
+                            .child(deepseekcode_i18n::t("sidebar.projects")),
                     )
                     .child(
                         icon_button_shell(
@@ -202,7 +202,7 @@ impl SidebarView {
                 div().px_3().py_1p5().flex_shrink_0().child(
                     button_shell(
                         "open-folder",
-                        "Open Folder…",
+                        &deepseekcode_i18n::t("home.open_folder"),
                         &theme,
                         ButtonVariant::Secondary,
                         ButtonSize::Md,
@@ -385,7 +385,7 @@ fn render_project_row(
                     .py_1()
                     .text_xs()
                     .text_color(theme.text_disabled)
-                    .child("Loading…"),
+                    .child(deepseekcode_i18n::t("common.loading")),
             );
         } else if sessions.is_empty() {
             column = column.child(
@@ -395,7 +395,7 @@ fn render_project_row(
                     .py_1()
                     .text_xs()
                     .text_color(theme.text_disabled)
-                    .child("No sessions"),
+                    .child(deepseekcode_i18n::t("sidebar.no_sessions")),
             );
         } else {
             let limit = session_nav_visible
@@ -416,9 +416,9 @@ fn render_project_row(
                 let path_owned = path_owned.clone();
                 let remaining = sessions.len() - limit;
                 let label = if remaining > PAGE {
-                    format!("更多 ({remaining})")
+                    deepseekcode_i18n::tr!("sidebar.more_count", "count" => remaining)
                 } else {
-                    "更多".to_string()
+                    deepseekcode_i18n::t("sidebar.more")
                 };
                 column = column.child(
                     div()
@@ -459,7 +459,9 @@ fn render_session_row(
     let running = session.running;
     let project_path = project_path.to_string();
 
+    let full_title: SharedString = title.clone().into();
     let row = div()
+        .id(ElementId::Name(format!("session-row-{}", session_id).into()))
         .pl_6()
         .pr_2()
         .py_1()
@@ -469,7 +471,13 @@ fn render_session_row(
         .min_h(px(28.))
         .flex()
         .items_center()
-        .when(active, |s| s.bg(sidebar_session_selected_bg(&theme)));
+        .when(active, |s| s.bg(sidebar_session_selected_bg(&theme)))
+        .tooltip(move |_, cx| {
+            cx.new(|_| crate::terminal::TerminalTabTooltip {
+                text: full_title.clone(),
+            })
+            .into()
+        });
     row.on_mouse_down(MouseButton::Left, {
         let project_path = project_path.clone();
         cx.listener(move |this, _, _, cx| {
@@ -497,19 +505,25 @@ fn render_session_row(
         div()
             .flex_1()
             .min_w(px(0.))
-            .text_xs()
-            .line_height(crate::theme::leading_sm(&theme))
-            .font_weight(if active {
-                FontWeight::MEDIUM
-            } else {
-                FontWeight::NORMAL
-            })
-            .text_color(if active {
-                theme.text_primary
-            } else {
-                theme.text_muted
-            })
             .overflow_hidden()
-            .child(title),
+            .child(
+                div()
+                    .text_xs()
+                    .line_height(crate::theme::leading_sm(&theme))
+                    .font_weight(if active {
+                        FontWeight::MEDIUM
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .text_color(if active {
+                        theme.text_primary
+                    } else {
+                        theme.text_muted
+                    })
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(title),
+            ),
     )
 }

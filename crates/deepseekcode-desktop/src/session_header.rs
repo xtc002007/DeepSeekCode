@@ -27,12 +27,13 @@ impl SessionHeaderView {
         let breadcrumb = project_path
             .and_then(|p| std::path::Path::new(p).file_name())
             .and_then(|n| n.to_str())
-            .unwrap_or("Project");
+            .map(str::to_string)
+            .unwrap_or_else(|| deepseekcode_i18n::t("session.project"));
 
         let title = if has_session {
             session_title.to_string()
         } else {
-            "Select or create a session".to_string()
+            deepseekcode_i18n::t("session.select_or_create")
         };
 
         let status_color = if session_busy {
@@ -64,12 +65,12 @@ impl SessionHeaderView {
                     .gap_0p5()
                     .min_w(px(0.))
                     .flex_1()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.text_disabled)
-                            .child(format!("{breadcrumb} › Session")),
-                    )
+                    .child(div().text_xs().text_color(theme.text_disabled).child(
+                        deepseekcode_i18n::tr!(
+                            "session.breadcrumb",
+                            "breadcrumb" => breadcrumb.as_str()
+                        ),
+                    ))
                     .children(if has_session && title_editing {
                         vec![div()
                             .flex()
@@ -90,7 +91,7 @@ impl SessionHeaderView {
                                             this.save_session_title(cx);
                                         }),
                                     )
-                                    .child("Save"),
+                                    .child(deepseekcode_i18n::t("common.save")),
                             )
                             .child(
                                 div()
@@ -106,7 +107,7 @@ impl SessionHeaderView {
                                             this.cancel_session_title_edit(cx);
                                         }),
                                     )
-                                    .child("Cancel"),
+                                    .child(deepseekcode_i18n::t("common.cancel")),
                             )
                             .into_any_element()]
                     } else {
@@ -133,7 +134,10 @@ impl SessionHeaderView {
             .children(if has_session {
                 let mut status_row = div().flex().items_center().gap_2();
                 if plan_count > 0 {
-                    let label = format!("Plans ({plan_count})");
+                    let label = deepseekcode_i18n::tr!(
+                        "session.plans_count",
+                        "count" => plan_count as u64
+                    );
                     status_row = status_row.child(
                         div()
                             .flex_shrink_0()
@@ -183,7 +187,7 @@ impl SessionHeaderView {
                                 .text_color(status_color)
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .child(session_status.to_string()),
+                                .child(crate::status_text::localize_session_status(session_status)),
                         ),
                 );
                 vec![status_row.into_any_element()]
@@ -222,20 +226,20 @@ pub fn render_session_menu_panel(
         .shadow_lg()
         .child(menu_item(
             cx,
-            "New Session",
+            deepseekcode_i18n::t("session.new"),
             |this, cx| this.new_session(cx),
             &theme,
         ))
         .child(menu_item(
             cx,
-            "Fork Session",
+            deepseekcode_i18n::t("session.fork"),
             |this, cx| this.fork_current_session(cx),
             &theme,
         ))
         .children(if has_selected_message {
             vec![menu_item(
                 cx,
-                "Fork from message",
+                deepseekcode_i18n::t("session.fork_from_message"),
                 |this, cx| {
                     this.fork_current_session(cx);
                 },
@@ -247,7 +251,7 @@ pub fn render_session_menu_panel(
         })
         .child(menu_item(
             cx,
-            "Export Session…",
+            deepseekcode_i18n::t("session.export"),
             |this, cx| {
                 this.export_current_session(cx);
             },
@@ -255,13 +259,13 @@ pub fn render_session_menu_panel(
         ))
         .child(menu_item(
             cx,
-            "Revert…",
+            deepseekcode_i18n::t("session.revert"),
             |this, cx| this.open_revert_dock(cx),
             &theme,
         ))
         .child(menu_item(
             cx,
-            "Compact Now",
+            deepseekcode_i18n::t("session.compact_now"),
             |this, cx| {
                 this.compact_current_session(cx);
             },
@@ -269,7 +273,7 @@ pub fn render_session_menu_panel(
         ))
         .child(menu_item(
             cx,
-            "Move session…",
+            deepseekcode_i18n::t("session.move"),
             |this, cx| {
                 this.move_current_session(cx);
             },
@@ -277,7 +281,7 @@ pub fn render_session_menu_panel(
         ))
         .child(menu_item(
             cx,
-            "Session Settings",
+            deepseekcode_i18n::t("session.menu"),
             |this, cx| {
                 this.open_settings(crate::settings::SettingsSection::Ai, cx);
             },
@@ -287,7 +291,7 @@ pub fn render_session_menu_panel(
 
 fn menu_item(
     cx: &mut Context<crate::workspace::WorkspaceView>,
-    label: &'static str,
+    label: String,
     action: fn(&mut crate::workspace::WorkspaceView, &mut Context<crate::workspace::WorkspaceView>),
     theme: &crate::theme::ThemeTokens,
 ) -> impl IntoElement {

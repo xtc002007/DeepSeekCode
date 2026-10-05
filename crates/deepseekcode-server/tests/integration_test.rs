@@ -30,6 +30,7 @@ async fn test_app(project_dir: &str) -> TestServer {
         engine: engine.clone(),
         password: None,
         pty: Arc::new(PtyManager::new()),
+        locale: Default::default(),
     };
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1522,6 +1523,48 @@ async fn session_cross_directory_access_returns_not_found() {
         .await
         .expect("cross prompt");
     assert_eq!(resp.status(), 404);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn session_error_text_follows_request_language_with_english_fallback() {
+    let dir = TempDir::new().expect("tempdir");
+    std::fs::write(dir.path().join("AGENTS.md"), "# agent").expect("agents");
+    let project_path = normalized_project_path(dir.path());
+    let server = test_app(&project_path).await;
+    let client = reqwest::Client::new();
+    let path = format!("{}/api/v1/session/not-a-session-id", server.base_url);
+
+    // `Accept-Language` quality values select the best shipped language.
+    let response = client
+        .get(&path)
+        .header("x-deepseekcode-directory", &project_path)
+        .header("accept-language", "fr;q=0.2,zh-Hans;q=0.9")
+        .send()
+        .await
+        .expect("invalid session request");
+    assert_eq!(response.status(), 400);
+    let body: serde_json::Value = response.json().await.expect("error json");
+    assert_eq!(body["code"], "invalid_input");
+    assert_eq!(body["lang"], "zh-Hans");
+    assert_eq!(body["error"], "会话 ID 无效");
+    assert_eq!(body["error_en"], "invalid session id");
+
+    // An explicit locale header parses a single tag and beats `Accept-Language`.
+    let response = client
+        .get(&path)
+        .header("x-deepseekcode-directory", &project_path)
+        .header("x-deepseekcode-locale", "ru")
+        .header("accept-language", "zh-Hans")
+        .send()
+        .await
+        .expect("invalid session request");
+    assert_eq!(response.status(), 400);
+    let body: serde_json::Value = response.json().await.expect("error json");
+    assert_eq!(body["lang"], "ru");
+    assert_eq!(body["error"], "недопустимый идентификатор сессии");
+    assert_eq!(body["error_en"], "invalid session id");
 
     server.abort();
 }

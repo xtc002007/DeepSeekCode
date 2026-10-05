@@ -10,7 +10,11 @@ use std::ops::Range;
 use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
-pub const COMPOSER_PLACEHOLDER: &str = "Ask anything, @ to mention, / for actions";
+/// Catalog key for the composer placeholder. The placeholder itself is read
+/// through the catalog at render/input-creation time so it follows the active
+/// locale; comparing raw text against a translated placeholder would break, so
+/// emptiness is checked structurally (see `PromptInput::is_placeholder`).
+pub const COMPOSER_PLACEHOLDER_KEY: &str = "composer.placeholder";
 
 actions!(
     prompt_input,
@@ -68,7 +72,7 @@ impl PromptInput {
             focus_handle: cx.focus_handle(),
             element_id: "prompt-input".into(),
             content: SharedString::default(),
-            placeholder: COMPOSER_PLACEHOLDER.into(),
+            placeholder: deepseekcode_i18n::t(COMPOSER_PLACEHOLDER_KEY).into(),
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -1017,7 +1021,7 @@ impl ComposerView {
                     .border_color(theme.warning.opacity(0.35))
                     .text_xs()
                     .text_color(theme.warning)
-                    .child("Waiting for permission or question approval…")
+                    .child(deepseekcode_i18n::t("composer.waiting_approval"))
                     .into_any_element()]
             } else {
                 vec![]
@@ -1287,7 +1291,11 @@ impl ComposerView {
                                             theme.error
                                         },
                                     ))
-                                    .child(if health_ok { "Local" } else { "Offline" }),
+                                    .child(if health_ok {
+                                        deepseekcode_i18n::t("composer.local")
+                                    } else {
+                                        deepseekcode_i18n::t("titlebar.offline")
+                                    }),
                             )
                             .child(crate::context_usage::ContextUsageMeter::render_compact(
                                 cx,
@@ -1296,7 +1304,7 @@ impl ComposerView {
                             .child(
                                 button_shell(
                                     "compact-session",
-                                    "Compact",
+                                    &deepseekcode_i18n::t("composer.compact"),
                                     &theme,
                                     ButtonVariant::Ghost,
                                     ButtonSize::Sm,
@@ -1314,7 +1322,7 @@ impl ComposerView {
                             .child(
                                 button_shell(
                                     "session-menu",
-                                    "更多",
+                                    &deepseekcode_i18n::t("sidebar.more"),
                                     &theme,
                                     ButtonVariant::Secondary,
                                     ButtonSize::Sm,

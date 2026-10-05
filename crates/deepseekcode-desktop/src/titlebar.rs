@@ -19,7 +19,7 @@ impl TitlebarView {
         health_ok: bool,
     ) -> impl IntoElement {
         let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
-        let title = "DeepSeekCode";
+        let title = deepseekcode_i18n::t("app.name");
 
         div()
             .id("titlebar")
@@ -76,12 +76,13 @@ impl TitlebarView {
                                             theme.error
                                         },
                                     ))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.text_muted)
-                                            .child(if health_ok { "Connected" } else { "Offline" }),
-                                    ),
+                                    .child(div().text_xs().text_color(theme.text_muted).child(
+                                        if health_ok {
+                                            deepseekcode_i18n::t("titlebar.connected")
+                                        } else {
+                                            deepseekcode_i18n::t("titlebar.offline")
+                                        },
+                                    )),
                             )
                             .child(
                                 icon_button_shell(

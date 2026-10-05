@@ -55,14 +55,19 @@ impl PermissionDock {
                         .text_sm()
                         .font_weight(FontWeight::BOLD)
                         .text_color(theme.text_primary)
-                        .child(format!("Policy required · {scope} · {tool}{queue_label}")),
+                        .child(deepseekcode_i18n::tr!(
+                            "policy.title",
+                            "scope" => scope.as_str(),
+                            "tool" => tool.as_str(),
+                            "queue_label" => queue_label.as_str()
+                        )),
                 ),
             )
             .child(
                 div()
                     .text_xs()
                     .text_color(theme.text_secondary)
-                    .child("Review this action before the agent continues."),
+                    .child(deepseekcode_i18n::t("policy.body")),
             )
             // Bounded internal scroll: an uncapped detail (e.g. a full
             // todowrite JSON payload) grows the flex_shrink_0 dock without
@@ -75,22 +80,19 @@ impl PermissionDock {
                     .bg(theme.bg_base)
                     .max_h(px(220.))
                     .overflow_y_scroll()
-                    .child(crate::ui::multiline_text::render_multiline(
-                        &detail,
-                        |el| {
-                            el.p_2()
-                                .text_xs()
-                                .font_family("Consolas")
-                                .text_color(theme.text_primary)
-                        },
-                    )),
+                    .child(crate::ui::multiline_text::render_multiline(&detail, |el| {
+                        el.p_2()
+                            .text_xs()
+                            .font_family(crate::theme::font_mono(&theme))
+                            .text_color(theme.text_primary)
+                    })),
             )
             .when(!patterns.is_empty(), |el| {
-                let count = patterns.len();
+                let count = patterns.len() as u64;
                 let toggle_label = if patterns_expanded {
-                    format!("Hide {count} pattern(s)")
+                    deepseekcode_i18n::tr!("policy.hide_patterns", "count" => count)
                 } else {
-                    format!("Show {count} pattern(s)")
+                    deepseekcode_i18n::tr!("policy.show_patterns", "count" => count)
                 };
                 el.child(
                     div()
@@ -114,7 +116,7 @@ impl PermissionDock {
                             .children(patterns.iter().map(|p| {
                                 div()
                                     .text_xs()
-                                    .font_family("Consolas")
+                                    .font_family(crate::theme::font_mono(&theme))
                                     .text_color(theme.text_muted)
                                     .child(p.clone())
                             })),
@@ -126,7 +128,7 @@ impl PermissionDock {
                     div()
                         .text_xs()
                         .text_color(theme.text_secondary)
-                        .child("Tell the agent what to do differently (optional):"),
+                        .child(deepseekcode_i18n::t("policy.feedback")),
                 )
                 .child(
                     div()
@@ -158,7 +160,7 @@ impl PermissionDock {
                                     this.handle_policy_deny_click(id.clone(), cx);
                                 })
                             })
-                            .child("Deny"),
+                            .child(deepseekcode_i18n::t("common.deny")),
                     )
                     .child(
                         div()
@@ -177,7 +179,7 @@ impl PermissionDock {
                                     this.respond_policy_project(id.clone(), cx);
                                 })
                             })
-                            .child("Always (project)"),
+                            .child(deepseekcode_i18n::t("common.always_project")),
                     )
                     .child(
                         div()
@@ -194,7 +196,7 @@ impl PermissionDock {
                                     this.respond_policy_once(id.clone(), cx);
                                 })
                             })
-                            .child("Allow once"),
+                            .child(deepseekcode_i18n::t("common.allow_once")),
                     ),
             )
     }

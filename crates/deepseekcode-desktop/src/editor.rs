@@ -97,7 +97,7 @@ impl EditorView {
                     .justify_center()
                     .text_sm()
                     .text_color(theme.text_disabled)
-                    .child("Select a file from the tree to view"),
+                    .child(deepseekcode_i18n::t("editor.select_file")),
             );
         };
 
@@ -159,7 +159,7 @@ impl EditorView {
                                 .rounded_md()
                                 .bg(theme.bg_hover)
                                 .text_color(theme.warning)
-                                .child("Read-only")
+                                .child(deepseekcode_i18n::t("common.read_only"))
                                 .into_any_element(),
                         );
                     } else {
@@ -176,7 +176,7 @@ impl EditorView {
                                         this.save_editor_file(cx);
                                     }),
                                 )
-                                .child("Save")
+                                .child(deepseekcode_i18n::t("editor.save"))
                                 .into_any_element(),
                         );
                     }
@@ -201,9 +201,9 @@ impl EditorView {
                                     }),
                                 )
                                 .child(if state.side_by_side_diff {
-                                    "Unified diff"
+                                    deepseekcode_i18n::t("editor.unified")
                                 } else {
-                                    "Side-by-side"
+                                    deepseekcode_i18n::t("editor.side_by_side")
                                 })
                                 .into_any_element(),
                         );
@@ -291,7 +291,7 @@ impl EditorView {
                             .flex_1()
                             .px_2()
                             .text_color(theme.text_muted)
-                            .child("(empty file)"),
+                            .child(deepseekcode_i18n::t("editor.empty_file")),
                     ),
             );
         }
@@ -396,7 +396,10 @@ fn render_side_by_side(hunks: &str, theme: &crate::theme::ThemeTokens) -> impl I
                 .px_2()
                 .py_1()
                 .text_color(theme.text_muted)
-                .child(format!("{changed_rows} changed lines")),
+                .child(deepseekcode_i18n::tr!(
+                    "editor.changed_lines",
+                    "count" => changed_rows as u64
+                )),
         );
 
     for row in rows.iter() {
@@ -436,7 +439,7 @@ fn render_side_by_side(hunks: &str, theme: &crate::theme::ThemeTokens) -> impl I
             div()
                 .p_4()
                 .text_color(theme.text_disabled)
-                .child("No diff hunks to display"),
+                .child(deepseekcode_i18n::t("editor.no_hunks")),
         );
     }
 
@@ -605,5 +608,9 @@ fn diff_stats_label(diff: &str) -> String {
     if added == 0 && removed == 0 {
         return String::new();
     }
-    format!("+{added} -{removed}")
+    deepseekcode_i18n::tr!(
+        "editor.line_stats",
+        "added" => added as u64,
+        "removed" => removed as u64
+    )
 }

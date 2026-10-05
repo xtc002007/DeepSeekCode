@@ -619,41 +619,41 @@ fn git_status_label(code: char, staged: bool) -> String {
     match code {
         'M' => {
             if staged {
-                "Staged modified".into()
+                deepseekcode_i18n::t("git.status.staged_modified")
             } else {
-                "Modified".into()
+                deepseekcode_i18n::t("git.status.modified")
             }
         }
         'A' => {
             if staged {
-                "Staged added".into()
+                deepseekcode_i18n::t("git.status.staged_added")
             } else {
-                "Added".into()
+                deepseekcode_i18n::t("git.status.added")
             }
         }
         'D' => {
             if staged {
-                "Staged deleted".into()
+                deepseekcode_i18n::t("git.status.staged_deleted")
             } else {
-                "Deleted".into()
+                deepseekcode_i18n::t("git.status.deleted")
             }
         }
         'R' => {
             if staged {
-                "Staged renamed".into()
+                deepseekcode_i18n::t("git.status.staged_renamed")
             } else {
-                "Renamed".into()
+                deepseekcode_i18n::t("git.status.renamed")
             }
         }
         'C' => {
             if staged {
-                "Staged copied".into()
+                deepseekcode_i18n::t("git.status.staged_copied")
             } else {
-                "Copied".into()
+                deepseekcode_i18n::t("git.status.copied")
             }
         }
-        'U' => "Updated".into(),
-        '?' => "Untracked".into(),
+        'U' => deepseekcode_i18n::t("git.status.updated"),
+        '?' => deepseekcode_i18n::t("git.status.untracked"),
         _ => String::new(),
     }
 }
@@ -733,18 +733,13 @@ fn size_summary(text: &str) -> String {
     } else {
         text.lines().count()
     };
-    let bytes = text.len();
-    format!("{lines} lines · {}", human_bytes(bytes))
-}
-
-fn human_bytes(bytes: usize) -> String {
-    const KB: f64 = 1024.0;
-    if bytes < KB as usize {
-        format!("{bytes} B")
-    } else {
-        let value = (bytes as f64 / KB / 1024.0 * 10.0).round() / 10.0;
-        format!("{value:.1} KB")
-    }
+    let bytes = text.len() as u64;
+    // Fixed bug: the old helper divided by 1024 twice and still printed `KB`.
+    format!(
+        "{} · {}",
+        deepseekcode_i18n::tr!("tool.detail.line_count", "count" => lines as u64),
+        deepseekcode_i18n::bytes(bytes)
+    )
 }
 
 /// Files touched by a unified diff, in order, de-duplicated.
@@ -817,23 +812,23 @@ pub fn summarize_permission_request(tool: &str, input: &Value) -> String {
         }
         "read" | "list" => {
             if !path.is_empty() {
-                push(format!("path: {path}"));
+                push(deepseekcode_i18n::tr!("tool.detail.list", "path" => path.as_str()));
             }
         }
         "write" => {
-            if !path.is_empty() {
-                push(format!("path: {path}"));
-            }
             let content = str_field("content");
-            if !content.is_empty() {
-                push(format!("content: {}", size_summary(&content)));
-                push(format!("first line: {}", first_line_preview(&content, 80)));
+            if path.is_empty() && content.is_empty() {
+                // Fall through to the generic empty-payload handling below.
+            } else {
+                push(deepseekcode_i18n::tr!(
+                    "tool.detail.write",
+                    "path" => path.as_str(),
+                    "content" => size_summary(&content),
+                    "first_line" => first_line_preview(&content, 80)
+                ));
             }
         }
         "edit" => {
-            if !path.is_empty() {
-                push(format!("path: {path}"));
-            }
             let old = str_field("old_string");
             let new = str_field("new_string");
             if !old.is_empty() || !new.is_empty() {
@@ -847,13 +842,16 @@ pub fn summarize_permission_request(tool: &str, input: &Value) -> String {
                 } else {
                     new.lines().count()
                 };
-                push(format!("replace {old_lines} line(s) with {new_lines}"));
-            }
-            if !old.is_empty() {
-                push(format!("match: {}", first_line_preview(&old, 80)));
-            }
-            if !new.is_empty() {
-                push(format!("insert: {}", first_line_preview(&new, 80)));
+                push(deepseekcode_i18n::tr!(
+                    "tool.detail.edit",
+                    "path" => path.as_str(),
+                    "old_lines" => old_lines as u64,
+                    "new_lines" => new_lines as u64,
+                    "matched" => first_line_preview(&old, 80),
+                    "inserted" => first_line_preview(&new, 80)
+                ));
+            } else if !path.is_empty() {
+                push(deepseekcode_i18n::tr!("tool.detail.list", "path" => path.as_str()));
             }
         }
         "apply_patch" => {
@@ -861,54 +859,70 @@ pub fn summarize_permission_request(tool: &str, input: &Value) -> String {
             let targets = patch_targets(&patch);
             let hunks = hunk_count(&patch);
             if targets.is_empty() {
-                push(format!("patch: {hunks} hunk(s) · {}", size_summary(&patch)));
-            } else {
-                push(format!(
-                    "patch: {} file(s) · {hunks} hunk(s)",
-                    targets.len()
+                push(deepseekcode_i18n::tr!(
+                    "tool.detail.apply_patch_hunks",
+                    "hunks" => hunks as u64,
+                    "preview" => size_summary(&patch)
                 ));
-                for target in targets.iter().take(6) {
-                    push(format!("- {target}"));
-                }
+            } else {
+                let listed: Vec<String> = targets
+                    .iter()
+                    .take(6)
+                    .map(|target| {
+                        deepseekcode_i18n::tr!(
+                            "tool.detail.apply_patch_target",
+                            "target" => target.as_str()
+                        )
+                    })
+                    .collect();
+                let mut body = deepseekcode_i18n::tr!(
+                    "tool.detail.apply_patch_files",
+                    "files" => targets.len() as u64,
+                    "hunks" => hunks as u64,
+                    "targets" => listed.join("\n")
+                );
                 if targets.len() > 6 {
-                    push(format!("- … {} more", targets.len() - 6));
+                    body.push('\n');
+                    body.push_str(&deepseekcode_i18n::tr!(
+                        "tool.detail.apply_patch_more",
+                        "count" => (targets.len() - 6) as u64
+                    ));
                 }
+                push(body);
             }
         }
         "grep" => {
-            push(format!(
-                "pattern: {}",
-                truncate_preview(&str_field("pattern"), 120)
+            push(deepseekcode_i18n::tr!(
+                "tool.detail.grep",
+                "pattern" => truncate_preview(&str_field("pattern"), 120),
+                "path" => if path.is_empty() { ".".to_string() } else { path.clone() }
             ));
-            let scope = if path.is_empty() {
-                ".".to_string()
-            } else {
-                path
-            };
-            push(format!("path: {scope}"));
         }
         "glob" => {
             let pattern = input["pattern"]
                 .as_str()
                 .or_else(|| input["glob_pattern"].as_str())
                 .unwrap_or("*");
-            push(format!("pattern: {pattern}"));
+            push(deepseekcode_i18n::tr!("tool.detail.glob", "pattern" => pattern));
         }
-        "webfetch" => push(format!("url: {}", truncate_preview(&str_field("url"), 200))),
-        "websearch" => push(format!(
-            "query: {}",
-            truncate_preview(&str_field("query"), 120)
+        "webfetch" => push(deepseekcode_i18n::tr!(
+            "tool.detail.webfetch",
+            "url" => truncate_preview(&str_field("url"), 200)
         )),
-        "skill" => push(format!(
-            "skill: {}",
-            truncate_preview(&str_field("name"), 80)
+        "websearch" => push(deepseekcode_i18n::tr!(
+            "tool.detail.websearch",
+            "query" => truncate_preview(&str_field("query"), 120)
+        )),
+        "skill" => push(deepseekcode_i18n::tr!(
+            "tool.detail.skill",
+            "name" => truncate_preview(&str_field("name"), 80)
         )),
         "task" => {
-            push(format!("agent: {}", str_field("agent")));
-            let prompt = str_field("prompt");
-            if !prompt.is_empty() {
-                push(format!("task: {}", first_line_preview(&prompt, 100)));
-            }
+            push(deepseekcode_i18n::tr!(
+                "tool.detail.task",
+                "agent" => str_field("agent"),
+                "prompt" => first_line_preview(&str_field("prompt"), 100)
+            ));
         }
         "question" => {
             let question = input["question"]
@@ -918,9 +932,9 @@ pub fn summarize_permission_request(tool: &str, input: &Value) -> String {
             push(first_line_preview(question, 200));
         }
         "plan_complete" | "plan.complete" => {
-            push(format!(
-                "title: {}",
-                truncate_preview(&str_field("title"), 100)
+            push(deepseekcode_i18n::tr!(
+                "tool.detail.plan_complete",
+                "title" => truncate_preview(&str_field("title"), 100)
             ));
         }
         "todowrite" | "todo_write" => {
@@ -935,19 +949,22 @@ pub fn summarize_permission_request(tool: &str, input: &Value) -> String {
                         .unwrap_or(false)
                 })
                 .count();
-            push(format!("todos: {total} total · {done} done"));
-            if let Some(first) = todos
-                .first()
-                .and_then(|t| t.get("content"))
-                .and_then(|c| c.as_str())
-            {
-                push(format!("first: {}", truncate_preview(first, 80)));
-            }
+            push(deepseekcode_i18n::tr!(
+                "tool.detail.todo_write",
+                "total" => total as u64,
+                "done" => done as u64,
+                "first" => todos
+                    .first()
+                    .and_then(|t| t.get("content"))
+                    .and_then(|c| c.as_str())
+                    .map(|first| truncate_preview(first, 80))
+                    .unwrap_or_default()
+            ));
         }
-        "todoread" | "todo_read" => push("read todo list".into()),
-        "lsp" => push(format!(
-            "operation: {}",
-            truncate_preview(&str_field("operation"), 80)
+        "todoread" | "todo_read" => push(deepseekcode_i18n::t("tool.detail.todo_read")),
+        "lsp" => push(deepseekcode_i18n::tr!(
+            "tool.detail.lsp",
+            "operation" => truncate_preview(&str_field("operation"), 80)
         )),
         _ => {
             // An empty payload carries no information; printing `{}` (or a
@@ -967,7 +984,7 @@ pub fn summarize_permission_request(tool: &str, input: &Value) -> String {
     }
 
     if lines.is_empty() {
-        lines.push("(no details)".into());
+        lines.push(deepseekcode_i18n::t("tool.detail.unknown"));
     }
     lines.join("\n")
 }
@@ -1028,11 +1045,11 @@ mod tests {
             }),
         );
         assert!(out.contains("path: packages/agent-core/src/tools/assess-response.ts"));
-        assert!(out.contains("replace 1 line(s)"));
+        assert!(out.contains("replace 1 line with"));
         assert!(!out.contains("xxxx"), "file body leaked into the prompt");
         // 短小、几行内可读完。
-        assert!(out.lines().count() <= 5, "{out}");
-        assert!(out.chars().count() < 400, "summary too long: {}", out.len());
+        assert!(out.lines().count() <= 7, "{out}");
+        assert!(out.chars().count() < 500, "summary too long: {}", out.len());
     }
 
     #[test]
@@ -1043,7 +1060,7 @@ mod tests {
             &json!({ "path": "src/a.ts", "content": content }),
         );
         assert!(out.contains("path: src/a.ts"));
-        assert!(out.contains("lines ·"));
+        assert!(out.contains("150 lines ·"));
         assert!(out.contains("first line: line one"));
         assert!(!out.contains("line three\nline one"), "content leaked");
     }
@@ -1052,8 +1069,8 @@ mod tests {
     fn permission_summary_apply_patch_lists_files_only() {
         let patch = "--- a/old.txt\n+++ b/new.txt\n@@ -1,2 +1,3 @@\n a\n+b\n--- a/old.txt\n+++ b/second.txt\n@@ -5 +5 @@\n-c\n+d\n";
         let out = summarize_permission_request("apply_patch", &json!({ "patch": patch }));
-        assert!(out.contains("2 file(s)"), "{out}");
-        assert!(out.contains("2 hunk(s)"), "{out}");
+        assert!(out.contains("2 files"), "{out}");
+        assert!(out.contains("2 hunks"), "{out}");
         assert!(out.contains("- new.txt"), "{out}");
         assert!(out.contains("- second.txt"), "{out}");
         assert!(!out.contains("@@"), "diff body leaked: {out}");

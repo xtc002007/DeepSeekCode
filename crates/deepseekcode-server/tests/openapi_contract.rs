@@ -22,6 +22,7 @@ async fn test_server() -> (String, tokio::task::JoinHandle<()>, TempDir) {
         engine,
         password: None,
         pty: Arc::new(PtyManager::new()),
+        locale: Default::default(),
     };
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

@@ -148,7 +148,11 @@ impl SessionActivityStore {
             ) {
                 let stream = event.payload["stream"].as_str().unwrap_or("stdout");
                 self.detail_store.append_output(id, chunk, stream);
-                let preview = format!("[{stream}] {chunk}");
+                let preview = deepseekcode_i18n::tr!(
+                    "activity.stream_chunk",
+                    "stream" => stream,
+                    "chunk" => chunk
+                );
                 if patch_running_tool_leaf_preview(&mut self.activity_tree, id, &preview) {
                     timeline_bumped = true;
                 }

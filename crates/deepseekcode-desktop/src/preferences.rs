@@ -29,6 +29,16 @@ impl ThemeId {
             ThemeId::System => "System",
         }
     }
+
+    /// Localized label for Settings UI. Kept separate from `label()` so
+    /// non-UI call sites (logs, tests) keep the stable English token.
+    pub fn localized_label(self) -> String {
+        match self {
+            ThemeId::Dark => deepseekcode_i18n::t("theme.dark"),
+            ThemeId::Light => deepseekcode_i18n::t("theme.light"),
+            ThemeId::System => deepseekcode_i18n::t("theme.system"),
+        }
+    }
 }
 
 /// One user-added model entry (Settings → Custom models), e.g. an
@@ -51,6 +61,8 @@ pub struct AppPreferences {
     pub server_password: Option<String>,
     pub theme: ThemeId,
     pub custom_models: Vec<CustomModelEntry>,
+    /// UI language. `Auto` follows `DEEPSEEKCODE_LANG` → POSIX chain → OS.
+    pub language: deepseekcode_i18n::LanguagePref,
 }
 
 impl Default for AppPreferences {
@@ -64,6 +76,7 @@ impl Default for AppPreferences {
             server_password: None,
             theme: ThemeId::Dark,
             custom_models: Vec::new(),
+            language: deepseekcode_i18n::LanguagePref::Auto,
         }
     }
 }
@@ -87,6 +100,10 @@ struct PreferencesFile {
     /// files loadable.
     #[serde(default)]
     pub custom_models: Vec<CustomModelEntry>,
+    /// UI language (`"auto"` or a BCP-47 tag). `default` keeps old files
+    /// loadable; unknown tags parse to `Auto` in `LanguagePref::parse`.
+    #[serde(default)]
+    pub language: deepseekcode_i18n::LanguagePref,
 }
 
 impl Default for PreferencesFile {
@@ -101,6 +118,7 @@ impl Default for PreferencesFile {
             server_password: None,
             theme: defaults.theme,
             custom_models: defaults.custom_models,
+            language: defaults.language,
         }
     }
 }
@@ -116,6 +134,7 @@ impl From<PreferencesFile> for AppPreferences {
             server_password: None,
             theme: file.theme,
             custom_models: file.custom_models,
+            language: file.language,
         }
     }
 }
@@ -131,6 +150,7 @@ impl From<&AppPreferences> for PreferencesFile {
             server_password: None,
             theme: prefs.theme,
             custom_models: prefs.custom_models.clone(),
+            language: prefs.language,
         }
     }
 }

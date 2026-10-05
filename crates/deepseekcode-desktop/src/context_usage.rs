@@ -90,7 +90,10 @@ impl ContextUsageMeter {
                     .text_xs()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(ring_color)
-                    .child(format!("{pct}%")),
+                    .child(deepseekcode_i18n::tr!(
+                        "context.percent",
+                        "percent" => pct as f64 / 100.0
+                    )),
             )
     }
 
@@ -114,16 +117,29 @@ impl ContextUsageMeter {
             .gap_1()
             .text_xs()
             .text_color(theme.text_secondary)
-            .child(format!(
-                "Context: {} / {} tokens",
-                state.total_tokens, state.context_window
+            .child(deepseekcode_i18n::tr!(
+                "context.title",
+                "used" => state.total_tokens as u64,
+                "total" => state.context_window as u64
             ))
-            .child(format!("Input: {}", state.input_tokens))
-            .child(format!("Last output: {}", state.output_tokens))
-            .child(format!("Last reasoning: {}", state.reasoning_tokens));
+            .child(deepseekcode_i18n::tr!(
+                "context.input",
+                "value" => deepseekcode_i18n::count(state.input_tokens as u64)
+            ))
+            .child(deepseekcode_i18n::tr!(
+                "context.last_output",
+                "value" => deepseekcode_i18n::count(state.output_tokens as u64)
+            ))
+            .child(deepseekcode_i18n::tr!(
+                "context.last_reasoning",
+                "value" => deepseekcode_i18n::count(state.reasoning_tokens as u64)
+            ));
         // P1-4: receipt line only when `show_turn_usage` produced one.
         if !state.last_receipt.is_empty() {
-            panel = panel.child(format!("Cache:{}", state.last_receipt));
+            panel = panel.child(deepseekcode_i18n::tr!(
+                "context.cache",
+                "value" => state.last_receipt.as_str()
+            ));
         }
         panel
     }
@@ -165,12 +181,21 @@ impl ContextUsageMeter {
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(ring_color)
-                    .child(format!("{pct}%")),
+                    .child(deepseekcode_i18n::tr!(
+                        "context.percent",
+                        "percent" => pct as f64 / 100.0
+                    )),
             )
-            .child(div().text_xs().text_color(theme.text_muted).child(format!(
-                "{} / {} tokens",
-                state.total_tokens, state.context_window
-            )));
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.text_muted)
+                    .child(deepseekcode_i18n::tr!(
+                        "context.usage",
+                        "used" => state.total_tokens as u64,
+                        "total" => state.context_window as u64
+                    )),
+            );
 
         if state.expanded {
             let mut detail = div()
@@ -188,12 +213,24 @@ impl ContextUsageMeter {
                 .gap_1()
                 .text_xs()
                 .text_color(theme.text_secondary)
-                .child(format!("Input: {}", state.input_tokens))
-                .child(format!("Output: {}", state.output_tokens))
-                .child(format!("Reasoning: {}", state.reasoning_tokens));
+                .child(deepseekcode_i18n::tr!(
+                    "context.input",
+                    "value" => deepseekcode_i18n::count(state.input_tokens as u64)
+                ))
+                .child(deepseekcode_i18n::tr!(
+                    "context.output",
+                    "value" => deepseekcode_i18n::count(state.output_tokens as u64)
+                ))
+                .child(deepseekcode_i18n::tr!(
+                    "context.reasoning",
+                    "value" => deepseekcode_i18n::count(state.reasoning_tokens as u64)
+                ));
             // P1-4: receipt line only when `show_turn_usage` produced one.
             if !state.last_receipt.is_empty() {
-                detail = detail.child(format!("Cache:{}", state.last_receipt));
+                detail = detail.child(deepseekcode_i18n::tr!(
+                    "context.cache",
+                    "value" => state.last_receipt.as_str()
+                ));
             }
             panel = panel.child(detail);
         }

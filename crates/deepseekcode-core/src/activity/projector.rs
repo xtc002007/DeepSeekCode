@@ -39,6 +39,27 @@ struct PendingTool {
     metadata: Value,
 }
 
+/// `internal_tool_call_id → tool_call_id` aliases, one per `ToolStarted`.
+/// Progress chunks travel under the internal id; everything else uses the
+/// outer one. Without this join, streamed previews (and desktop tabs)
+/// address a phantom call and never reach the running leaf.
+fn collect_tool_id_aliases(events: &[EventEnvelope]) -> HashMap<String, String> {
+    let mut aliases = HashMap::new();
+    for event in events {
+        if event.kind == EventKind::ToolStarted {
+            if let (Some(outer), Some(internal)) = (
+                event.payload["tool_call_id"].as_str(),
+                event.payload["internal_tool_call_id"].as_str(),
+            ) {
+                if !internal.is_empty() && !outer.is_empty() && internal != outer {
+                    aliases.insert(internal.to_string(), outer.to_string());
+                }
+            }
+        }
+    }
+    aliases
+}
+
 impl ActivityProjector {
     /// Incrementally apply one event; returns whether the tree was rebuilt or patched.
     pub fn apply_event(
@@ -80,6 +101,10 @@ impl ActivityProjector {
 
         let mut roots: Vec<ActivityNode> = Vec::new();
         let mut turn: Option<TurnBuilder> = None;
+        // Progress chunks travel under the INTERNAL tool-call id while
+        // Started/Completed use the outer one: pre-scan the aliases once so
+        // live previews update the SAME leaf instead of missing it.
+        let aliases = collect_tool_id_aliases(events);
 
         for event in events {
             match event.kind {
@@ -226,9 +251,11 @@ impl ActivityProjector {
                     }
                 }
                 EventKind::ToolProgress => {
-                    let id = event.payload["tool_call_id"]
-                        .as_str()
-                        .unwrap_or("")
+                    let raw = event.payload["tool_call_id"].as_str().unwrap_or("");
+                    let id = aliases
+                        .get(raw)
+                        .map(String::as_str)
+                        .unwrap_or(raw)
                         .to_string();
                     if id.is_empty() {
                         continue;
@@ -337,6 +364,7 @@ impl ActivityProjector {
                                 id: format!("thought-{}", event.seq),
                                 kind: ActivityGroupKind::Thought,
                                 label: format_thought_label(duration_ms),
+                                duration_secs: Some(duration_ms / 1000),
                                 summary: None,
                                 children: vec![ActivityNode::Leaf(ActivityLeaf {
                                     id: format!("reasoning-{}", event.seq),
@@ -459,7 +487,10 @@ impl TurnBuilder {
         ActivityGroup {
             id: self.id,
             kind: ActivityGroupKind::ProviderTurn,
+            // English label kept for logs and older clients; clients localize
+            // from `duration_secs` instead of scraping this string.
             label: format_worked_label(duration_ms),
+            duration_secs: Some(duration_ms / 1000),
             summary: Some(summary),
             children: self.children,
             collapsed_default: false,
@@ -674,6 +705,7 @@ fn session_meta_group(event: &EventEnvelope) -> ActivityGroup {
         id: format!("meta-{}", event.seq),
         kind: ActivityGroupKind::SessionMeta,
         label: label.into(),
+        duration_secs: None,
         summary: None,
         children: vec![ActivityNode::Leaf(ActivityLeaf {
             id: format!("meta-leaf-{}", event.seq),
@@ -861,6 +893,7 @@ fn task_subagent_node(
         id: format!("task-group-{}", leaf.id),
         kind: ActivityGroupKind::TaskSubagent,
         label: format!("Task {agent}"),
+        duration_secs: None,
         summary: None,
         children: group_children,
         collapsed_default: true,
@@ -1377,6 +1410,54 @@ mod tests {
         };
         assert_eq!(leaf.kind, ActivityKind::Read);
         assert_eq!(leaf.verb, "Read");
+    }
+
+    /// 回归：progress（内部 ULID）必须更新 Started（外部 UUID）建的叶子。
+    /// 否则运行中的叶子永远收不到流式预览，终端 tab 也对不上同一调用。
+    #[test]
+    fn progress_internal_id_updates_started_outer_leaf() {
+        let events = vec![
+            ev(EventKind::ProviderTurnStarted, serde_json::json!({})),
+            ev(
+                EventKind::ToolStarted,
+                serde_json::json!({
+                    "tool_call_id": "outer-1",
+                    "internal_tool_call_id": "inner-1",
+                    "tool_name": "bash",
+                    "input": { "command": "echo hi" },
+                }),
+            ),
+            ev(
+                EventKind::ToolProgress,
+                serde_json::json!({
+                    "tool_call_id": "inner-1",
+                    "tool_name": "bash",
+                    "chunk": "hi",
+                    "stream": "stdout",
+                }),
+            ),
+        ];
+        let tree = ActivityProjector::project(&events, &[]);
+        let mut found = false;
+        for root in &tree.roots {
+            let children = match root {
+                ActivityNode::Group(g) => &g.children,
+                ActivityNode::Leaf(_) => continue,
+            };
+            for child in children {
+                if let ActivityNode::Leaf(leaf) = child {
+                    if leaf.id == "outer-1" {
+                        found = true;
+                        assert_eq!(leaf.status, ActivityStatus::Running);
+                        assert!(
+                            leaf.text.as_deref().unwrap_or("").contains("hi"),
+                            "live preview missing: {leaf:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(found, "outer leaf missing from tree");
     }
 
     #[test]

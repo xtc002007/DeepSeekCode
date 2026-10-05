@@ -89,6 +89,14 @@ pub struct DeepSeekCodeClient {
 }
 
 impl DeepSeekCodeClient {
+    /// The client's UI language, advertised to the server on every request.
+    ///
+    /// It is read per request (not cached on the client) so a desktop language
+    /// change takes effect without rebuilding its SDK client.
+    fn accept_language() -> reqwest::header::HeaderValue {
+        reqwest::header::HeaderValue::from_static(deepseekcode_i18n::locale().tag())
+    }
+
     pub fn new(base_url: impl Into<String>, directory: impl Into<String>) -> Self {
         let base_url = base_url.into().trim_end_matches('/').to_string();
         // CRITICAL: never proxy traffic to our OWN server.
@@ -393,7 +401,9 @@ impl DeepSeekCodeClient {
         let mut req = self
             .http
             .delete(format!("{}/api/v1/worktree{query}", self.base_url,));
-        req = req.header("x-deepseekcode-directory", &self.directory);
+        req = req
+            .header("x-deepseekcode-directory", &self.directory)
+            .header(reqwest::header::ACCEPT_LANGUAGE, Self::accept_language());
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
@@ -578,6 +588,7 @@ impl DeepSeekCodeClient {
             .http
             .post(format!("{}{}", self.base_url, path))
             .header("x-deepseekcode-directory", &self.directory)
+            .header(reqwest::header::ACCEPT_LANGUAGE, Self::accept_language())
             .json(&body);
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
@@ -636,6 +647,7 @@ impl DeepSeekCodeClient {
             .http
             .patch(format!("{}{}", self.base_url, path))
             .header("x-deepseekcode-directory", &self.directory)
+            .header(reqwest::header::ACCEPT_LANGUAGE, Self::accept_language())
             .json(&body);
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
@@ -691,7 +703,8 @@ impl DeepSeekCodeClient {
         let mut req = self
             .http
             .delete(format!("{}{}", self.base_url, path))
-            .header("x-deepseekcode-directory", &self.directory);
+            .header("x-deepseekcode-directory", &self.directory)
+            .header(reqwest::header::ACCEPT_LANGUAGE, Self::accept_language());
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
@@ -758,7 +771,8 @@ impl DeepSeekCodeClient {
         let mut req = self
             .http
             .get(format!("{}{}", self.base_url, path))
-            .header("x-deepseekcode-directory", &self.directory);
+            .header("x-deepseekcode-directory", &self.directory)
+            .header(reqwest::header::ACCEPT_LANGUAGE, Self::accept_language());
         if self.auth.is_some() {
             req = req.header("x-deepseekcode-ticket", "1");
         }
@@ -873,6 +887,7 @@ impl DeepSeekCodeClient {
             .http
             .put(format!("{}{}", self.base_url, "/api/v1/fs/file"))
             .header("x-deepseekcode-directory", &self.directory)
+            .header(reqwest::header::ACCEPT_LANGUAGE, Self::accept_language())
             .header("x-deepseekcode-session-id", session_id.to_string())
             .json(&body);
         if let Some((user, pass)) = &self.auth {
@@ -956,6 +971,7 @@ impl DeepSeekCodeClient {
             .http
             .post(format!("{}{}", self.base_url, path))
             .header("x-deepseekcode-directory", &self.directory)
+            .header(reqwest::header::ACCEPT_LANGUAGE, Self::accept_language())
             .json(&body);
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
@@ -1011,7 +1027,8 @@ impl DeepSeekCodeClient {
         let mut req = self
             .http
             .delete(format!("{}{}", self.base_url, path))
-            .header("x-deepseekcode-directory", &self.directory);
+            .header("x-deepseekcode-directory", &self.directory)
+            .header(reqwest::header::ACCEPT_LANGUAGE, Self::accept_language());
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
@@ -1098,7 +1115,9 @@ impl DeepSeekCodeClient {
     ) -> Result<Pin<Box<dyn Stream<Item = EventStreamItem> + Send>>> {
         let url = self.event_url(since_seq, session_id);
         let mut req = self.http.get(&url);
-        req = req.header("x-deepseekcode-directory", &self.directory);
+        req = req
+            .header("x-deepseekcode-directory", &self.directory)
+            .header(reqwest::header::ACCEPT_LANGUAGE, Self::accept_language());
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
@@ -1201,7 +1220,9 @@ impl DeepSeekCodeClient {
         let start = Instant::now();
         let operation = format!("GET {path}");
         let mut req = self.http.get(format!("{}{}", self.base_url, path));
-        req = req.header("x-deepseekcode-directory", &self.directory);
+        req = req
+            .header("x-deepseekcode-directory", &self.directory)
+            .header(reqwest::header::ACCEPT_LANGUAGE, Self::accept_language());
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
@@ -1248,7 +1269,9 @@ impl DeepSeekCodeClient {
         let start = Instant::now();
         let operation = format!("GET {path}");
         let mut req = self.http.get(format!("{}{}", self.base_url, path));
-        req = req.header("x-deepseekcode-directory", &self.directory);
+        req = req
+            .header("x-deepseekcode-directory", &self.directory)
+            .header(reqwest::header::ACCEPT_LANGUAGE, Self::accept_language());
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
@@ -1315,6 +1338,7 @@ impl DeepSeekCodeClient {
         let mut req = self.http.post(format!("{}{}", self.base_url, path));
         req = req
             .header("x-deepseekcode-directory", &self.directory)
+            .header(reqwest::header::ACCEPT_LANGUAGE, Self::accept_language())
             .json(body);
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
@@ -1362,7 +1386,9 @@ impl DeepSeekCodeClient {
         let start = Instant::now();
         let operation = format!("POST {path}");
         let mut req = self.http.post(format!("{}{}", self.base_url, path));
-        req = req.header("x-deepseekcode-directory", &self.directory);
+        req = req
+            .header("x-deepseekcode-directory", &self.directory)
+            .header(reqwest::header::ACCEPT_LANGUAGE, Self::accept_language());
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
@@ -1433,7 +1459,9 @@ impl DeepSeekCodeClient {
         let start = Instant::now();
         let operation = format!("DELETE {path}");
         let mut req = self.http.delete(format!("{}{}", self.base_url, path));
-        req = req.header("x-deepseekcode-directory", &self.directory);
+        req = req
+            .header("x-deepseekcode-directory", &self.directory)
+            .header(reqwest::header::ACCEPT_LANGUAGE, Self::accept_language());
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));
         }
@@ -1487,6 +1515,7 @@ impl DeepSeekCodeClient {
             .http
             .put(format!("{}{}", self.base_url, path))
             .header("x-deepseekcode-directory", &self.directory)
+            .header(reqwest::header::ACCEPT_LANGUAGE, Self::accept_language())
             .json(body);
         if let Some((user, pass)) = &self.auth {
             req = req.basic_auth(user, Some(pass));

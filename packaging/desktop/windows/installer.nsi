@@ -59,7 +59,48 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 
-!insertmacro MUI_LANGUAGE "English"
+!ifndef INSTALLER_LANGUAGE
+  !define INSTALLER_LANGUAGE "auto"
+!endif
+
+; Ten shipped UI locales. `auto` keeps a single multilingual installer and
+; lets NSIS pick from the OS language; a pinned tag builds a single-language
+; installer for managed/offline deployment.
+!if "${INSTALLER_LANGUAGE}" == "auto"
+  !insertmacro MUI_LANGUAGE "English"
+  !insertmacro MUI_LANGUAGE "SimpChinese"
+  !insertmacro MUI_LANGUAGE "TradChinese"
+  !insertmacro MUI_LANGUAGE "Japanese"
+  !insertmacro MUI_LANGUAGE "Korean"
+  !insertmacro MUI_LANGUAGE "Spanish"
+  !insertmacro MUI_LANGUAGE "French"
+  !insertmacro MUI_LANGUAGE "German"
+  !insertmacro MUI_LANGUAGE "PortugueseBR"
+  !insertmacro MUI_LANGUAGE "Russian"
+  ; MultiUser.nsh ships no Korean strings (upstream gap, not ours). The
+  ; installer still works; that page falls back to English text.
+  !insertmacro MUI_RESERVEFILE_LANGDLL
+!else if "${INSTALLER_LANGUAGE}" == "zh-Hans"
+  !insertmacro MUI_LANGUAGE "SimpChinese"
+!else if "${INSTALLER_LANGUAGE}" == "zh-Hant"
+  !insertmacro MUI_LANGUAGE "TradChinese"
+!else if "${INSTALLER_LANGUAGE}" == "ja"
+  !insertmacro MUI_LANGUAGE "Japanese"
+!else if "${INSTALLER_LANGUAGE}" == "ko"
+  !insertmacro MUI_LANGUAGE "Korean"
+!else if "${INSTALLER_LANGUAGE}" == "es"
+  !insertmacro MUI_LANGUAGE "Spanish"
+!else if "${INSTALLER_LANGUAGE}" == "fr"
+  !insertmacro MUI_LANGUAGE "French"
+!else if "${INSTALLER_LANGUAGE}" == "de"
+  !insertmacro MUI_LANGUAGE "German"
+!else if "${INSTALLER_LANGUAGE}" == "pt-BR"
+  !insertmacro MUI_LANGUAGE "PortugueseBR"
+!else if "${INSTALLER_LANGUAGE}" == "ru"
+  !insertmacro MUI_LANGUAGE "Russian"
+!else
+  !insertmacro MUI_LANGUAGE "English"
+!endif
 
 Section "Install"
   ${If} $MultiUser.InstallMode == "AllUsers"
@@ -108,6 +149,7 @@ SectionEnd
 
 Function .onInit
   !insertmacro MULTIUSER_INIT
+  !insertmacro MUI_LANGDLL_DISPLAY
   ${GetParameters} $R0
   ${GetOptions} $R0 "/D=" $R1
   StrCmp $R1 "" +2 0

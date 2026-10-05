@@ -14,6 +14,7 @@ wasm-plugins = ["deepseekcode-core/wasm-plugins", "deepseekcode-embed/wasm-plugi
 deepseekcode-types = { workspace = true }
 deepseekcode-schema = { workspace = true }
 deepseekcode-config = { workspace = true }
+deepseekcode-i18n = { workspace = true }
 deepseekcode-core = { path = "../deepseekcode-core", default-features = false }
 deepseekcode-embed = { path = "../deepseekcode-embed", default-features = false }
 deepseekcode-storage = { workspace = true }

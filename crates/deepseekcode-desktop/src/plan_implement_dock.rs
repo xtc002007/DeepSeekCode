@@ -41,7 +41,7 @@ impl PlanImplementDock {
                     .text_sm()
                     .font_weight(FontWeight::BOLD)
                     .text_color(theme.text_primary)
-                    .child(format!("Plan ready · {title}")),
+                    .child(deepseekcode_i18n::tr!("plan.ready", "title" => title.as_str())),
             )
             .when(summary.is_some(), |el| {
                 el.child(
@@ -54,7 +54,7 @@ impl PlanImplementDock {
             .child(
                 div()
                     .text_xs()
-                    .font_family("Consolas")
+                    .font_family(crate::theme::font_mono(&theme))
                     .text_color(theme.text_muted)
                     .child(plan_path.clone()),
             )
@@ -65,7 +65,7 @@ impl PlanImplementDock {
                     .justify_end()
                     .child(dock_button(
                         cx,
-                        "View plan",
+                        deepseekcode_i18n::t("plan.view"),
                         theme.bg_base,
                         theme.text_primary,
                         {
@@ -75,7 +75,7 @@ impl PlanImplementDock {
                     ))
                     .child(dock_button(
                         cx,
-                        "Implement plan",
+                        deepseekcode_i18n::t("plan.implement"),
                         theme.info,
                         theme.text_on_accent,
                         {
@@ -85,7 +85,7 @@ impl PlanImplementDock {
                     ))
                     .child(dock_button(
                         cx,
-                        "Dismiss",
+                        deepseekcode_i18n::t("common.dismiss"),
                         theme.bg_base,
                         theme.text_secondary,
                         {
@@ -99,7 +99,7 @@ impl PlanImplementDock {
 
 fn dock_button(
     cx: &mut Context<crate::workspace::WorkspaceView>,
-    label: &'static str,
+    label: String,
     bg: gpui::Rgba,
     fg: gpui::Rgba,
     handler: impl Fn(

@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 [features]
 default = ["wasm-plugins"]
@@ -14,6 +15,7 @@ wasm-plugins = ["deepseekcode-core/wasm-plugins"]
 deepseekcode-types = { workspace = true }
 deepseekcode-schema = { workspace = true }
 deepseekcode-config = { workspace = true }
+deepseekcode-i18n = { workspace = true }
 deepseekcode-core = { path = "../deepseekcode-core", default-features = false }
 deepseekcode-llm = { workspace = true }
 deepseekcode-storage = { workspace = true }
@@ -41,6 +43,7 @@ jsonc-parser = { workspace = true }
 [dev-dependencies]
 deepseekcode-core = { workspace = true }
 deepseekcode-config = { workspace = true }
+deepseekcode-i18n = { workspace = true }
 reqwest = { workspace = true }
 tempfile = { workspace = true }
 wiremock = { workspace = true }

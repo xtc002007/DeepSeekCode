@@ -4,6 +4,7 @@ members = [
     "crates/deepseekcode-types",
     "crates/deepseekcode-schema",
     "crates/deepseekcode-config",
+    "crates/deepseekcode-i18n",
     "crates/deepseekcode-telemetry",
     "crates/deepseekcode-storage",
     "crates/deepseekcode-llm",
@@ -24,6 +25,7 @@ default-members = [
     "crates/deepseekcode-types",
     "crates/deepseekcode-schema",
     "crates/deepseekcode-config",
+    "crates/deepseekcode-i18n",
     "crates/deepseekcode-telemetry",
     "crates/deepseekcode-storage",
     "crates/deepseekcode-llm",
@@ -48,6 +50,7 @@ rust-version = "1.85"
 deepseekcode-types = { path = "crates/deepseekcode-types" }
 deepseekcode-schema = { path = "crates/deepseekcode-schema" }
 deepseekcode-config = { path = "crates/deepseekcode-config" }
+deepseekcode-i18n = { path = "crates/deepseekcode-i18n" }
 deepseekcode-telemetry = { path = "crates/deepseekcode-telemetry" }
 deepseekcode-storage = { path = "crates/deepseekcode-storage" }
 deepseekcode-llm = { path = "crates/deepseekcode-llm" }

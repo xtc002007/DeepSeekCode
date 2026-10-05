@@ -155,6 +155,9 @@ impl EmbeddedEngine {
             engine: engine.clone(),
             password,
             pty: Arc::new(PtyManager::new()),
+            locale: deepseekcode_config::load_effective_config(camino::Utf8Path::new(&project_dir))
+                .map(|config| deepseekcode_config::resolve_language(&config))
+                .unwrap_or_default(),
         };
         let app = build_router(state);
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);

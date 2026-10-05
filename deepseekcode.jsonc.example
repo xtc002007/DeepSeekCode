@@ -95,5 +95,17 @@
       //   "enabled": true
       // }
     }
+  },
+
+  "ui": {
+    // Interface language. "auto" follows DEEPSEEKCODE_LANG, then the POSIX
+    // locale chain (LANGUAGE / LC_ALL / LC_MESSAGES / LANG), then the OS
+    // language. Pin a tag to override: "en", "zh-Hans", "zh-Hant", "ja", "ko",
+    // "es", "fr", "de", "pt-BR", "ru". System prompts and tool descriptions
+    // always stay English regardless of this setting.
+    "language": "auto",
+    // Print the per-turn cache receipt (`in 12,000 (10,800 cached / 1,200 new)
+    // · out 100`). Accounting is recorded either way; this only gates display.
+    "show_turn_usage": true
   }
 }

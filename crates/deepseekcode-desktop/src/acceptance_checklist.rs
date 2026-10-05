@@ -255,6 +255,7 @@ mod tests {
             id: "turn-1".into(),
             kind: ActivityGroupKind::ProviderTurn,
             label: "Worked for 2s".into(),
+            duration_secs: Some(2),
             summary: Some(ActivitySummary::default()),
             children: vec![],
             collapsed_default: false,
@@ -274,6 +275,7 @@ mod tests {
                     id: "turn-1".into(),
                     kind: deepseekcode_schema::activity::ActivityGroupKind::ProviderTurn,
                     label: "Worked".into(),
+                    duration_secs: None,
                     summary: None,
                     children: vec![ActivityNode::Leaf(ActivityLeaf {
                         id: "todo-9".into(),

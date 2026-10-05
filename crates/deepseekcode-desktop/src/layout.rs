@@ -15,11 +15,22 @@ pub enum RightPanelTab {
 
 impl RightPanelTab {
     pub fn label(self) -> &'static str {
+        // Stable English tokens for logs/tests. UI renders `localized_label`.
         match self {
             Self::Files => "Files",
             Self::Editor => "Editor",
             Self::Terminal => "Terminal",
             Self::Git => "Git",
+        }
+    }
+
+    /// Localized label for the tab bar.
+    pub fn localized_label(self) -> String {
+        match self {
+            Self::Files => deepseekcode_i18n::t("nav.files"),
+            Self::Editor => deepseekcode_i18n::t("nav.editor"),
+            Self::Terminal => deepseekcode_i18n::t("nav.terminal"),
+            Self::Git => deepseekcode_i18n::t("nav.git"),
         }
     }
 

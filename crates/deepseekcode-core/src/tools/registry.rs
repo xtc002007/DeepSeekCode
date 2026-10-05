@@ -154,15 +154,18 @@ impl ToolRegistry {
         self.register(Box::new(GrepTool));
         self.register(Box::new(GlobTool));
         self.register(Box::new(ListTool));
-        self.register(Box::new(BashTool::new(
-            config.shell.clone(),
-            shell_env.clone(),
-        )));
+        // Agent-visible PTYs (`DEEPSEEKCODE_BASH_PTY=1`, set by the desktop):
+        // the terminal tab IS the execution site. Everywhere else (CLI,
+        // server, tests) keeps pipes, preserving stdout/stderr separation.
+        let agent_pty = super::agent_pty::agent_pty_enabled();
+        self.register(Box::new(
+            BashTool::new(config.shell.clone(), shell_env.clone()).with_pty(agent_pty),
+        ));
         if cfg!(windows) {
-            self.register(Box::new(PowershellTool::new(
-                config.shell.clone(),
-                shell_env.clone(),
-            )));
+            self.register(Box::new(
+                PowershellTool::new(config.shell.clone(), shell_env.clone())
+                    .with_pty(agent_pty),
+            ));
         }
         self.register(Box::new(ApplyPatchTool));
         self.register(Box::new(TodoWriteTool));

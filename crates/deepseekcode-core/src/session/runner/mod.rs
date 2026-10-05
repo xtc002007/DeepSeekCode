@@ -69,15 +69,37 @@ Response must include:\n\
 - Recommendations for what should be done next\n\n\
 Any attempt to use tools is a critical violation. Respond with text ONLY.";
 
+/// Cache-stable user-language policy.
+///
+/// The assistant should mirror the language of the user's most recent message
+/// instead of defaulting to English. This block is intentionally fixed English
+/// control text: translating the instruction itself would fork the provider
+/// prefix cache whenever the UI language changes, while the *outcome* (a reply
+/// in the user's language) is exactly what this instruction produces.
+///
+/// Diagnostics, logs, telemetry, tool descriptions, JSON schemas, compaction
+/// summaries, identifiers, paths, and shell commands remain English.
+const LANGUAGE_POLICY: &str = "LANGUAGE MIRRORING\n\n\
+Reply in the same language the user is using in their most recent message: if they write in Chinese, answer in Chinese; in English, answer in English; and switch whenever they switch. \
+Never translate code, identifiers, file paths, shell commands, error strings, URLs, JSON keys, or tool names. \
+Keep diagnostics, logs, telemetry, schemas, and compaction summaries in English.";
+
 /// Shared merge for both `transform_system` paths (cached fast path and
-/// hook path): baseline + built-in plan prompt + config agent prompt, in that
-/// order. Previously duplicated inline with drift risk between the branches.
+/// hook path): baseline + language policy + built-in plan prompt + config agent
+/// prompt, in that order. Previously duplicated inline with drift risk between
+/// the branches.
 fn merge_plan_prompt(
     baseline: String,
     agent: &deepseekcode_schema::agent::AgentKind,
     cfg_prompt: &str,
 ) -> String {
     let mut merged = baseline;
+    // Installed once, before agent-specific material, so the earliest stable
+    // prefix carries the mirroring instruction. A caller that already embeds
+    // the marker is left alone.
+    if !merged.contains("LANGUAGE MIRRORING") {
+        merged = format!("{merged}\n\n{LANGUAGE_POLICY}");
+    }
     if matches!(agent, deepseekcode_schema::agent::AgentKind::Plan) {
         let builtin = crate::agent::plan_system_prompt();
         if !builtin.is_empty() {
@@ -1514,5 +1536,51 @@ impl SessionRunner {
             )
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+    use deepseekcode_schema::agent::AgentKind;
+
+    #[test]
+    fn language_policy_is_installed_once_before_agent_material() {
+        let merged = merge_plan_prompt(
+            "baseline system".to_string(),
+            &AgentKind::Build,
+            "custom prompt",
+        );
+        let policy = merged.find("LANGUAGE MIRRORING").expect("policy marker");
+        let custom = merged.find("custom prompt").expect("config prompt");
+        assert!(policy < custom, "mirroring must precede mutable agent text");
+        assert_eq!(
+            merged.matches("LANGUAGE MIRRORING").count(),
+            1,
+            "the policy must not duplicate"
+        );
+        assert!(
+            merged.contains("Never translate code, identifiers, file paths"),
+            "the policy must protect technical tokens"
+        );
+    }
+
+    #[test]
+    fn an_existing_policy_is_not_duplicated() {
+        let baseline = format!("baseline\n\n{LANGUAGE_POLICY}");
+        let merged = merge_plan_prompt(baseline, &AgentKind::Plan, "custom prompt");
+        assert_eq!(merged.matches("LANGUAGE MIRRORING").count(), 1);
+    }
+
+    #[test]
+    fn the_policy_is_cache_stable_control_text() {
+        // UI locales must not change this block: it is model-facing control
+        // text, and a translated control block would fork provider prefix
+        // caches on every language switch. Assert the English control text is
+        // present verbatim; this test deliberately does not touch the process
+        // locale so it cannot race other locale-sensitive tests.
+        assert!(LANGUAGE_POLICY.contains("LANGUAGE MIRRORING"));
+        assert!(LANGUAGE_POLICY.contains("Reply in the same language"));
+        assert!(LANGUAGE_POLICY.contains("Never translate code, identifiers"));
     }
 }

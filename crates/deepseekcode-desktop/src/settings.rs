@@ -79,6 +79,7 @@ impl SettingsView {
         open: bool,
         section: SettingsSection,
         current_theme: ThemeId,
+        current_language: deepseekcode_i18n::LanguagePref,
         scroll_handle: &ScrollHandle,
         providers: &[ProviderInfo],
         selected_agent: &str,
@@ -138,6 +139,7 @@ impl SettingsView {
                         cx,
                         section,
                         current_theme,
+                        current_language,
                         scroll_handle,
                         providers,
                         selected_agent,
@@ -185,70 +187,70 @@ fn render_sidebar(
                 .py_3()
                 .text_sm()
                 .font_weight(FontWeight::BOLD)
-                .child("Settings"),
+                .child(deepseekcode_i18n::t("settings.title")),
         )
         .child(nav_item(
             cx,
             SettingsSection::Appearance,
             section,
-            "Appearance",
-            "Theme & display",
+            deepseekcode_i18n::t("settings.section.appearance"),
+            deepseekcode_i18n::t("settings.section.appearance_desc"),
         ))
         .child(nav_item(
             cx,
             SettingsSection::General,
             section,
-            "General",
-            "Workspace preferences",
+            deepseekcode_i18n::t("settings.section.general"),
+            deepseekcode_i18n::t("settings.section.general_desc"),
         ))
         .child(nav_item(
             cx,
             SettingsSection::Ai,
             section,
-            "AI & Providers",
-            "Models, agents, API keys",
+            deepseekcode_i18n::t("settings.section.ai"),
+            deepseekcode_i18n::t("settings.section.ai_desc"),
         ))
         .child(nav_item(
             cx,
             SettingsSection::Project,
             section,
-            "Project",
-            "AGENTS.md & config",
+            deepseekcode_i18n::t("settings.section.project"),
+            deepseekcode_i18n::t("settings.section.project_desc"),
         ))
         .child(nav_item(
             cx,
             SettingsSection::Permissions,
             section,
-            "Permissions",
-            "Allow / deny rules",
+            deepseekcode_i18n::t("settings.section.permissions"),
+            deepseekcode_i18n::t("settings.section.permissions_desc"),
         ))
         .child(nav_item(
             cx,
             SettingsSection::Integrations,
             section,
-            "Integrations",
-            "MCP, skills, plugins",
+            deepseekcode_i18n::t("settings.section.integrations"),
+            deepseekcode_i18n::t("settings.section.integrations_desc"),
         ))
         .child(nav_item(
             cx,
             SettingsSection::Worktrees,
             section,
-            "Worktrees",
-            "Git worktrees",
+            deepseekcode_i18n::t("settings.section.worktrees"),
+            deepseekcode_i18n::t("settings.section.worktrees_desc"),
         ))
         .child(nav_item(
             cx,
             SettingsSection::Diagnostics,
             section,
-            "Diagnostics",
-            "Health & export",
+            deepseekcode_i18n::t("settings.section.diagnostics"),
+            deepseekcode_i18n::t("settings.section.diagnostics_desc"),
         ))
         .child(nav_item(
             cx,
             SettingsSection::Advanced,
             section,
-            "Session & Data",
-            "Export, revert, sessions",
+            deepseekcode_i18n::t("settings.section.session"),
+            deepseekcode_i18n::t("settings.section.session_desc"),
         ))
         .child(div().mt_auto())
 }
@@ -276,15 +278,15 @@ fn render_close_button(cx: &Context<crate::workspace::WorkspaceView>) -> impl In
                 this.close_settings(cx);
             }),
         )
-        .child("✕")
+        .child(deepseekcode_i18n::t("settings.close"))
 }
 
 fn nav_item(
     cx: &Context<crate::workspace::WorkspaceView>,
     target: SettingsSection,
     current: SettingsSection,
-    title: &'static str,
-    subtitle: &'static str,
+    title: String,
+    subtitle: String,
 ) -> impl IntoElement {
     let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
     let active = target == current;
@@ -311,6 +313,7 @@ fn render_content(
     cx: &Context<crate::workspace::WorkspaceView>,
     section: SettingsSection,
     current_theme: ThemeId,
+    current_language: deepseekcode_i18n::LanguagePref,
     scroll_handle: &ScrollHandle,
     providers: &[ProviderInfo],
     selected_agent: &str,
@@ -335,7 +338,7 @@ fn render_content(
     let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
     let body: AnyElement = match section {
         SettingsSection::Appearance => {
-            render_appearance_section(cx, current_theme).into_any_element()
+            render_appearance_section(cx, current_theme, current_language).into_any_element()
         }
         SettingsSection::Ai => render_ai_section(
             cx,
@@ -390,15 +393,25 @@ fn render_content(
                 .text_lg()
                 .font_weight(FontWeight::BOLD)
                 .child(match section {
-                    SettingsSection::Appearance => "Appearance",
-                    SettingsSection::Ai => "AI & Providers",
-                    SettingsSection::General => "General",
-                    SettingsSection::Project => "Project",
-                    SettingsSection::Permissions => "Permissions",
-                    SettingsSection::Integrations => "Integrations",
-                    SettingsSection::Worktrees => "Worktrees",
-                    SettingsSection::Diagnostics => "Diagnostics",
-                    SettingsSection::Advanced => "Session & Data",
+                    SettingsSection::Appearance => {
+                        deepseekcode_i18n::t("settings.section.appearance")
+                    }
+                    SettingsSection::Ai => deepseekcode_i18n::t("settings.section.ai"),
+                    SettingsSection::General => deepseekcode_i18n::t("settings.section.general"),
+                    SettingsSection::Project => deepseekcode_i18n::t("settings.section.project"),
+                    SettingsSection::Permissions => {
+                        deepseekcode_i18n::t("settings.section.permissions")
+                    }
+                    SettingsSection::Integrations => {
+                        deepseekcode_i18n::t("settings.section.integrations")
+                    }
+                    SettingsSection::Worktrees => {
+                        deepseekcode_i18n::t("settings.section.worktrees")
+                    }
+                    SettingsSection::Diagnostics => {
+                        deepseekcode_i18n::t("settings.section.diagnostics")
+                    }
+                    SettingsSection::Advanced => deepseekcode_i18n::t("settings.section.session"),
                 }),
         )
         .child(render_scrollable_body(cx, scroll_handle, body))
@@ -422,18 +435,56 @@ fn render_scrollable_body(
 fn render_appearance_section(
     cx: &Context<crate::workspace::WorkspaceView>,
     current_theme: ThemeId,
+    current_language: deepseekcode_i18n::LanguagePref,
 ) -> impl IntoElement {
     let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
     let mut row = div().flex().gap_2();
     for id in ThemeId::ALL {
         row = row.child(theme_choice(cx, id, current_theme, &theme));
     }
-    div().flex().flex_col().gap_4().child(settings_group(
-        &theme,
-        "Theme",
-        "Choose the application color scheme. System follows your OS preference when supported.",
-        row,
-    ))
+    let mut lang_row = div().flex().flex_col().gap_2();
+    for pref in deepseekcode_i18n::LanguagePref::all() {
+        lang_row = lang_row.child(language_choice(cx, pref, current_language, &theme));
+    }
+    // Detected language, for the `Auto` row context. Shown once, not per row.
+    let detected = deepseekcode_i18n::detect::detection_report();
+    let detected_label = match detected.locale {
+        Some(locale) => deepseekcode_i18n::tr!(
+            "settings.language_detected",
+            "language" => locale.endonym()
+        ),
+        None => String::new(),
+    };
+    let lang_body =
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(lang_row)
+            .when(!detected_label.is_empty(), |el| {
+                el.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.text_muted)
+                        .child(detected_label),
+                )
+            });
+    div()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .child(settings_group(
+            &theme,
+            deepseekcode_i18n::t("settings.theme"),
+            deepseekcode_i18n::t("settings.theme_desc"),
+            row,
+        ))
+        .child(settings_group(
+            &theme,
+            deepseekcode_i18n::t("settings.language"),
+            deepseekcode_i18n::t("settings.language_desc"),
+            lang_body,
+        ))
 }
 
 fn theme_choice(
@@ -467,7 +518,68 @@ fn theme_choice(
         .on_mouse_down(MouseButton::Left, {
             cx.listener(move |this, _, _, cx| this.set_theme(id, cx))
         })
-        .child(id.label())
+        .child(id.localized_label())
+}
+
+fn language_choice(
+    cx: &Context<crate::workspace::WorkspaceView>,
+    pref: deepseekcode_i18n::LanguagePref,
+    current: deepseekcode_i18n::LanguagePref,
+    theme: &ThemeTokens,
+) -> impl IntoElement {
+    use deepseekcode_i18n::{LanguagePref, Locale};
+    let active = pref == current;
+    // `Auto` shows the localized "System (detected)" row; a pinned locale
+    // shows its endonym so it is readable in any UI language.
+    let label: String = match pref {
+        LanguagePref::Auto => deepseekcode_i18n::t("common.language_system"),
+        LanguagePref::Locale(locale) => locale.endonym().to_string(),
+    };
+    // Secondary hint: the language name in the *current* UI language, so a
+    // user can confirm what they picked (e.g. endonym `日本語` + `日语`).
+    let hint: Option<String> = match pref {
+        LanguagePref::Auto => {
+            let detected = deepseekcode_i18n::detect::detection_report()
+                .locale
+                .unwrap_or(Locale::En);
+            Some(detected.endonym().to_string())
+        }
+        LanguagePref::Locale(locale) => {
+            let key = format!("language.name.{}", locale.tag());
+            deepseekcode_i18n::t_strict(&key)
+        }
+    };
+    let row = div()
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .cursor_pointer()
+        .bg(if active {
+            theme.bg_selected
+        } else {
+            theme.bg_elevated
+        })
+        .border_1()
+        .border_color(if active {
+            theme.border_focus
+        } else {
+            theme.border_default
+        })
+        .text_color(if active {
+            theme.text_primary
+        } else {
+            theme.text_secondary
+        })
+        .on_mouse_down(MouseButton::Left, {
+            cx.listener(move |this, _, _, cx| this.set_language(pref, cx))
+        })
+        .child(label);
+    match hint {
+        Some(hint) => row
+            .child(div().text_xs().text_color(theme.text_muted).child(hint))
+            .into_any_element(),
+        None => row.into_any_element(),
+    }
 }
 
 fn render_ai_section(
@@ -500,26 +612,26 @@ fn render_ai_section(
         .gap_4()
         .child(settings_group(
             &theme,
-            "Default Agent",
-            "Choose how the assistant behaves for new prompts.",
+            deepseekcode_i18n::t("settings.default_agent"),
+            deepseekcode_i18n::t("settings.default_agent_desc"),
             render_agent_choices(cx, selected_agent),
         ))
         .child(settings_group(
             &theme,
-            "Default Model",
-            "Select the model used when sending prompts.",
+            deepseekcode_i18n::t("settings.default_model"),
+            deepseekcode_i18n::t("settings.default_model_desc"),
             render_model_choices(cx, providers, selected_model, selected_provider),
         ))
         .child(settings_group(
             &theme,
-            "Providers",
-            "Connect API keys once — stored in OS keychain with encrypted local fallback.",
+            deepseekcode_i18n::t("settings.providers"),
+            deepseekcode_i18n::t("settings.providers_desc"),
             render_providers(cx, providers, has_project),
         ))
         .child(settings_group(
             &theme,
-            "Custom models",
-            "Add any model id (OpenRouter format author/model, e.g. openai/gpt-4o, deepseek/deepseek-chat). Entries appear in the model lists and persist across restarts.",
+            deepseekcode_i18n::t("settings.custom_models"),
+            deepseekcode_i18n::t("settings.custom_models_desc"),
             render_custom_model_manager(
                 cx,
                 &theme,
@@ -549,7 +661,7 @@ fn render_custom_model_manager(
             div()
                 .text_xs()
                 .text_color(theme.text_muted)
-                .child("No custom models yet — add one below."),
+                .child(deepseekcode_i18n::t("settings.custom_models_empty")),
         );
     } else {
         for entry in custom_models {
@@ -573,7 +685,7 @@ fn render_custom_model_manager(
                     .child(
                         div()
                             .text_xs()
-                            .font_family("Consolas")
+                            .font_family(crate::theme::font_mono(&theme))
                             .text_color(theme.text_secondary)
                             .child(format!("{provider_label} | {}", entry.id)),
                     )
@@ -592,7 +704,7 @@ fn render_custom_model_manager(
                                     this.remove_custom_model(&entry_provider, &entry_id, cx);
                                 }),
                             )
-                            .child("Remove"),
+                            .child(deepseekcode_i18n::t("common.remove")),
                     )
                     .into_any_element(),
             );
@@ -622,7 +734,10 @@ fn render_custom_model_manager(
                     this.add_custom_model(&provider_id, cx);
                 }),
             )
-            .child(format!("Add to {provider_name}")),
+            .child(deepseekcode_i18n::tr!(
+                "settings.add_to_provider",
+                "provider" => provider_name.as_str()
+            )),
     );
     body
 }
@@ -675,31 +790,31 @@ fn render_general_section(
         .gap_4()
         .child(settings_group(
             &theme,
-            "Prompt delivery",
-            "Steer inserts prompts during an active turn; Queue waits until idle.",
+            deepseekcode_i18n::t("settings.prompt_delivery"),
+            deepseekcode_i18n::t("settings.prompt_delivery_desc"),
             div()
                 .flex()
                 .gap_2()
                 .child(delivery_choice(
                     cx,
                     PromptDelivery::Steer,
-                    "Steer (default)",
+                    deepseekcode_i18n::t("delivery.steer_default"),
                     prompt_delivery,
                 ))
                 .child(delivery_choice(
                     cx,
                     PromptDelivery::Queue,
-                    "Queue",
+                    deepseekcode_i18n::t("delivery.queue"),
                     prompt_delivery,
                 )),
         ))
         .child(settings_group(
             &theme,
-            "Data location",
-            "Application data is stored under your platform data directory.",
+            deepseekcode_i18n::t("settings.data_location"),
+            deepseekcode_i18n::t("settings.data_location_desc"),
             div()
                 .text_xs()
-                .font_family("Consolas")
+                .font_family(crate::theme::font_mono(&theme))
                 .text_color(theme.text_secondary)
                 .child(
                     deepseekcode_types::data_dir()
@@ -709,8 +824,8 @@ fn render_general_section(
         ))
         .child(settings_group(
             &theme,
-            "Remote server",
-            "Connect to a remote DeepSeekCode server instead of the embedded engine (non-localhost URLs).",
+            deepseekcode_i18n::t("settings.remote_server"),
+            deepseekcode_i18n::t("settings.remote_server_desc"),
             div()
                 .flex()
                 .flex_col()
@@ -725,16 +840,19 @@ fn render_general_section(
                         .bg(theme.bg_selected)
                         .text_xs()
                         .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.save_server_settings(cx);
-                        }))
-                        .child("Save server settings"),
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.save_server_settings(cx);
+                            }),
+                        )
+                        .child(deepseekcode_i18n::t("settings.save_server")),
                 ),
         ))
         .child(settings_group(
             &theme,
-            "Multi-workspace",
-            "Open another project in a separate window.",
+            deepseekcode_i18n::t("settings.multi_workspace"),
+            deepseekcode_i18n::t("settings.multi_workspace_desc"),
             div()
                 .px_3()
                 .py_2()
@@ -742,24 +860,27 @@ fn render_general_section(
                 .bg(theme.bg_elevated)
                 .text_sm()
                 .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    this.open_new_window(cx);
-                }))
-                .child("New Window"),
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.open_new_window(cx);
+                    }),
+                )
+                .child(deepseekcode_i18n::t("settings.new_window")),
         ))
         .child(settings_group(
             &theme,
-            "Keyboard",
-            "Common shortcuts for the prompt input.",
+            deepseekcode_i18n::t("settings.keyboard"),
+            deepseekcode_i18n::t("settings.keyboard_desc"),
             div()
                 .flex()
                 .flex_col()
                 .gap_1()
                 .text_xs()
                 .text_color(theme.text_muted)
-                .child("Enter — send prompt")
-                .child("Ctrl+A — select all")
-                .child("Ctrl+V / Ctrl+C / Ctrl+X — paste / copy / cut"),
+                .child(deepseekcode_i18n::t("settings.shortcut_enter"))
+                .child(deepseekcode_i18n::t("settings.shortcut_select_all"))
+                .child(deepseekcode_i18n::t("settings.shortcut_clipboard")),
         ))
         .child(
             div()
@@ -770,17 +891,20 @@ fn render_general_section(
                 .text_xs()
                 .text_center()
                 .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    this.open_settings_section(SettingsSection::Ai, cx);
-                }))
-                .child("Go to AI & Providers →"),
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.open_settings_section(SettingsSection::Ai, cx);
+                    }),
+                )
+                .child(deepseekcode_i18n::t("settings.goto_providers")),
         )
 }
 
 fn delivery_choice(
     cx: &Context<crate::workspace::WorkspaceView>,
     delivery: PromptDelivery,
-    label: &'static str,
+    label: String,
     current: PromptDelivery,
 ) -> impl IntoElement {
     let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
@@ -823,16 +947,16 @@ fn render_project_section(
         .gap_4()
         .child(settings_group(
             &theme,
-            "Project directories",
-            "Additional workspace roots registered for this location.",
+            deepseekcode_i18n::t("settings.project_directories"),
+            deepseekcode_i18n::t("settings.project_directories_desc"),
             if catalog.project_directories.is_empty() {
                 div()
                     .text_xs()
                     .text_color(theme.text_muted)
                     .child(if catalog.loaded {
-                        "No extra directories — use Files → + to add."
+                        deepseekcode_i18n::t("settings.project_directories_empty")
                     } else {
-                        "Loading…"
+                        deepseekcode_i18n::t("common.loading")
                     })
             } else {
                 div().flex().flex_col().gap_1().children(
@@ -842,7 +966,7 @@ fn render_project_section(
                         .map(|path| {
                             div()
                                 .text_xs()
-                                .font_family("Consolas")
+                                .font_family(crate::theme::font_mono(&theme))
                                 .text_color(theme.text_primary)
                                 .child(path.clone())
                                 .into_any_element()
@@ -853,8 +977,8 @@ fn render_project_section(
         ))
         .child(settings_group(
             &theme,
-            "AGENTS.md",
-            "Project context file used by the session engine.",
+            deepseekcode_i18n::t("settings.agents_md"),
+            deepseekcode_i18n::t("settings.agents_md_desc"),
             div()
                 .px_3()
                 .py_2()
@@ -868,13 +992,15 @@ fn render_project_section(
                         this.open_agents_md(cx);
                     }),
                 )
-                .child("Open AGENTS.md"),
+                .child(deepseekcode_i18n::t("settings.open_agents_md")),
         ))
         .child(settings_group(
             &theme,
-            "Configuration",
-            format!(
-                "Edit the {PRODUCT_NAME} project config (`{CONFIG_FILE}`) in the editor panel."
+            deepseekcode_i18n::t("settings.configuration"),
+            deepseekcode_i18n::tr!(
+                "settings.configuration_desc",
+                "product" => PRODUCT_NAME,
+                "file" => CONFIG_FILE
             ),
             div()
                 .px_3()
@@ -889,7 +1015,10 @@ fn render_project_section(
                         this.open_project_config(cx);
                     }),
                 )
-                .child(format!("Open {PRODUCT_NAME} config")),
+                .child(deepseekcode_i18n::tr!(
+                    "settings.open_config",
+                    "product" => PRODUCT_NAME
+                )),
         ))
 }
 
@@ -909,8 +1038,8 @@ fn render_permissions_section(
         .gap_4()
         .child(settings_group(
             &theme,
-            "Policy mode",
-            "Auto (YOLO) permits non-block rules without prompting.",
+            deepseekcode_i18n::t("settings.policy_mode"),
+            deepseekcode_i18n::t("settings.policy_mode_desc"),
             div()
                 .flex()
                 .gap_2()
@@ -918,22 +1047,24 @@ fn render_permissions_section(
                     cx,
                     &theme,
                     false,
-                    "Interactive",
+                    deepseekcode_i18n::t("settings.policy_interactive"),
                     !policy_auto_mode,
                 ))
                 .child(policy_mode_button(
                     cx,
                     &theme,
                     true,
-                    "Auto (YOLO)",
+                    deepseekcode_i18n::t("settings.policy_auto"),
                     policy_auto_mode,
                 )),
         ))
         .child(settings_group(
             &theme,
-            "Policy rules",
-            format!(
-                "Scope / pattern / action table. Saved to {PRODUCT_NAME} config (`{CONFIG_FILE}`) policy section."
+            deepseekcode_i18n::t("settings.policy_rules"),
+            deepseekcode_i18n::tr!(
+                "settings.policy_rules_desc",
+                "product" => PRODUCT_NAME,
+                "file" => CONFIG_FILE
             ),
             div()
                 .flex()
@@ -945,9 +1076,9 @@ fn render_permissions_section(
                         .text_xs()
                         .text_color(theme.text_muted)
                         .child(if catalog.loaded {
-                            "No rules yet — add one below."
+                            deepseekcode_i18n::t("settings.policy_rules_empty")
                         } else {
-                            "Open a project to edit policy."
+                            deepseekcode_i18n::t("settings.policy_rules_no_project")
                         })
                         .into_any_element()]
                 } else {
@@ -978,10 +1109,13 @@ fn render_permissions_section(
                                 .bg(theme.bg_elevated)
                                 .text_xs()
                                 .cursor_pointer()
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.add_policy_rule_row(cx);
-                                }))
-                                .child("+ Add rule"),
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.add_policy_rule_row(cx);
+                                    }),
+                                )
+                                .child(deepseekcode_i18n::t("settings.policy_add_rule")),
                         )
                         .child(
                             div()
@@ -991,13 +1125,26 @@ fn render_permissions_section(
                                 .bg(theme.bg_elevated)
                                 .text_xs()
                                 .cursor_pointer()
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.apply_policy_preset("dev", cx);
-                                }))
-                                .child("Dev preset"),
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.apply_policy_preset("dev", cx);
+                                    }),
+                                )
+                                .child(deepseekcode_i18n::t("settings.policy_dev_preset")),
                         )
-                        .child(policy_preset_button(cx, &theme, "readonly", "Read-only"))
-                        .child(policy_preset_button(cx, &theme, "strict", "Strict")),
+                        .child(policy_preset_button(
+                            cx,
+                            &theme,
+                            "readonly",
+                            deepseekcode_i18n::t("settings.policy_readonly_preset"),
+                        ))
+                        .child(policy_preset_button(
+                            cx,
+                            &theme,
+                            "strict",
+                            deepseekcode_i18n::t("settings.policy_strict_preset"),
+                        )),
                 )
                 .when(selected_policy_row.is_some(), |el| {
                     el.child(
@@ -1009,7 +1156,7 @@ fn render_permissions_section(
                                 div()
                                     .text_xs()
                                     .text_color(theme.text_muted)
-                                    .child("Pattern for selected rule:"),
+                                    .child(deepseekcode_i18n::t("workspace.pattern_for_rule")),
                             )
                             .child(div().min_h(px(28.)).child(policy_pattern_input.clone())),
                     )
@@ -1018,7 +1165,7 @@ fn render_permissions_section(
                     div()
                         .text_xs()
                         .text_color(theme.text_muted)
-                        .child("Advanced: edit as lines (scope | pattern | action)"),
+                        .child(deepseekcode_i18n::t("settings.policy_advanced")),
                 )
                 .child(div().min_h(px(80.)).child(permission_allow_input.clone()))
                 .child(
@@ -1030,16 +1177,19 @@ fn render_permissions_section(
                         .text_sm()
                         .text_center()
                         .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                            this.save_policy_rules(cx);
-                        }))
-                        .child("Save policy rules"),
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.save_policy_rules(cx);
+                            }),
+                        )
+                        .child(deepseekcode_i18n::t("settings.policy_save")),
                 ),
         ))
         .child(settings_group(
             &theme,
-            "Remembered allows",
-            "Project grants from Always (project) approvals.",
+            deepseekcode_i18n::t("settings.remembered_allows"),
+            deepseekcode_i18n::t("settings.remembered_allows_desc"),
             div()
                 .flex()
                 .flex_col()
@@ -1049,9 +1199,9 @@ fn render_permissions_section(
                         .text_xs()
                         .text_color(theme.text_muted)
                         .child(if catalog.loaded {
-                            "No remembered grants for this project."
+                            deepseekcode_i18n::t("settings.remembered_allows_empty")
                         } else {
-                            "Open a project to view grants."
+                            deepseekcode_i18n::t("settings.remembered_allows_no_project")
                         })
                         .into_any_element()]
                 } else {
@@ -1071,7 +1221,7 @@ fn render_permissions_section(
                                 .child(
                                     div()
                                         .text_xs()
-                                        .font_family("Consolas")
+                                        .font_family(crate::theme::font_mono(&theme))
                                         .text_color(theme.text_secondary)
                                         .child(format!("{} | {}", grant.scope, grant.pattern)),
                                 )
@@ -1090,7 +1240,7 @@ fn render_permissions_section(
                                                 this.delete_policy_grant(grant_id.clone(), cx);
                                             })
                                         })
-                                        .child("Delete"),
+                                        .child(deepseekcode_i18n::t("common.delete")),
                                 )
                                 .into_any_element()
                         })
@@ -1103,7 +1253,7 @@ fn policy_mode_button(
     cx: &Context<crate::workspace::WorkspaceView>,
     theme: &ThemeTokens,
     auto: bool,
-    label: &'static str,
+    label: String,
     active: bool,
 ) -> impl IntoElement {
     div()
@@ -1140,9 +1290,21 @@ fn render_policy_table_header(theme: &ThemeTokens) -> impl IntoElement {
         .text_xs()
         .font_weight(FontWeight::BOLD)
         .text_color(theme.text_muted)
-        .child(div().w(px(120.)).child("Scope"))
-        .child(div().flex_1().child("Pattern"))
-        .child(div().w(px(72.)).child("Action"))
+        .child(
+            div()
+                .w(px(120.))
+                .child(deepseekcode_i18n::t("settings.policy_column_scope")),
+        )
+        .child(
+            div()
+                .flex_1()
+                .child(deepseekcode_i18n::t("settings.policy_column_pattern")),
+        )
+        .child(
+            div()
+                .w(px(72.))
+                .child(deepseekcode_i18n::t("settings.policy_column_action")),
+        )
         .child(div().w(px(48.)).child(""))
 }
 
@@ -1169,7 +1331,7 @@ fn render_policy_table_row(
             div()
                 .w(px(120.))
                 .text_xs()
-                .font_family("Consolas")
+                .font_family(crate::theme::font_mono(theme))
                 .text_color(theme.text_primary)
                 .cursor_pointer()
                 .on_mouse_down(MouseButton::Left, {
@@ -1183,7 +1345,7 @@ fn render_policy_table_row(
             div()
                 .flex_1()
                 .text_xs()
-                .font_family("Consolas")
+                .font_family(crate::theme::font_mono(theme))
                 .text_color(theme.text_secondary)
                 .cursor_pointer()
                 .on_mouse_down(MouseButton::Left, {
@@ -1218,15 +1380,15 @@ fn render_policy_table_row(
                         this.remove_policy_rule_row(index, cx);
                     })
                 })
-                .child("Remove"),
+                .child(deepseekcode_i18n::t("common.remove")),
         )
 }
 
-fn policy_action_label(action: PolicyAction) -> &'static str {
+fn policy_action_label(action: PolicyAction) -> String {
     match action {
-        PolicyAction::Permit => "permit",
-        PolicyAction::Prompt => "prompt",
-        PolicyAction::Block => "block",
+        PolicyAction::Permit => deepseekcode_i18n::t("policy.action.permit"),
+        PolicyAction::Prompt => deepseekcode_i18n::t("policy.action.prompt"),
+        PolicyAction::Block => deepseekcode_i18n::t("policy.action.block"),
     }
 }
 
@@ -1234,7 +1396,7 @@ fn policy_preset_button(
     cx: &Context<crate::workspace::WorkspaceView>,
     theme: &ThemeTokens,
     preset: &'static str,
-    label: &'static str,
+    label: String,
 ) -> impl IntoElement {
     div()
         .px_2()
@@ -1266,22 +1428,22 @@ fn render_integrations_section(
         .gap_3()
         .child(settings_group(
             &theme,
-            "Location",
-            "Workspace location metadata (skills path, plugins).",
+            deepseekcode_i18n::t("settings.location"),
+            deepseekcode_i18n::t("settings.location_desc"),
             div()
                 .text_xs()
-                .font_family("Consolas")
+                .font_family(crate::theme::font_mono(&theme))
                 .text_color(theme.text_secondary)
                 .child(if catalog.location_summary.is_empty() {
-                    "Loading…".to_string()
+                    deepseekcode_i18n::t("common.loading")
                 } else {
                     catalog.location_summary.clone()
                 }),
         ))
         .child(settings_group(
             &theme,
-            "MCP servers",
-            "Connect or disconnect configured MCP servers.",
+            deepseekcode_i18n::t("settings.mcp_servers"),
+            deepseekcode_i18n::t("settings.mcp_servers_desc"),
             div()
                 .flex()
                 .flex_col()
@@ -1301,25 +1463,30 @@ fn render_integrations_section(
                                 this.refresh_mcp_servers(cx);
                             }),
                         )
-                        .child("Refresh MCP list"),
+                        .child(deepseekcode_i18n::t("settings.mcp_refresh")),
                 )
                 .child(render_mcp_list(cx, catalog)),
         ))
         .child(settings_group(
             &theme,
-            "Skills",
-            "Skill catalog entries discovered for this workspace.",
-            render_string_list(&theme, &catalog.skills, catalog.loaded, "No skills found"),
+            deepseekcode_i18n::t("settings.skills"),
+            deepseekcode_i18n::t("settings.skills_desc"),
+            render_string_list(
+                &theme,
+                &catalog.skills,
+                catalog.loaded,
+                deepseekcode_i18n::t("settings.skills_empty"),
+            ),
         ))
         .child(settings_group(
             &theme,
-            "Plugins",
-            "Loaded plugin hooks for this workspace.",
+            deepseekcode_i18n::t("settings.plugins"),
+            deepseekcode_i18n::t("settings.plugins_desc"),
             render_string_list(
                 &theme,
                 &catalog.plugins,
                 catalog.loaded,
-                "No plugins loaded",
+                deepseekcode_i18n::t("settings.plugins_empty"),
             ),
         ))
 }
@@ -1336,14 +1503,14 @@ fn render_worktrees_only_section(
         .gap_3()
         .child(settings_group(
             &theme,
-            "Branch name",
-            "Optional branch name for new worktrees (leave empty for auto).",
+            deepseekcode_i18n::t("git.worktree_branch_name"),
+            deepseekcode_i18n::t("git.worktree_branch_name_desc"),
             worktree_branch_input.clone(),
         ))
         .child(settings_group(
             &theme,
-            "Git worktrees",
-            "Create isolated DeepSeekCode worktrees under `.deepseekcode/worktrees` for parallel branches.",
+            deepseekcode_i18n::t("git.worktrees"),
+            deepseekcode_i18n::t("git.worktrees_desc"),
             render_worktree_section(cx, catalog),
         ))
 }
@@ -1359,8 +1526,8 @@ fn render_diagnostics_section(
         .gap_3()
         .child(settings_group(
             &theme,
-            "Health",
-            "Server health status from the last poll.",
+            deepseekcode_i18n::t("settings.health"),
+            deepseekcode_i18n::t("settings.health_desc"),
             div()
                 .text_sm()
                 .text_color(if catalog.health_status == "ok" {
@@ -1368,12 +1535,15 @@ fn render_diagnostics_section(
                 } else {
                     theme.warning
                 })
-                .child(format!("Status: {}", catalog.health_status)),
+                .child(deepseekcode_i18n::tr!(
+                    "settings.health_status",
+                    "status" => catalog.health_status.as_str()
+                )),
         ))
         .child(settings_group(
             &theme,
-            "Diagnostics export",
-            "Export logs and telemetry for troubleshooting.",
+            deepseekcode_i18n::t("settings.diagnostics_export"),
+            deepseekcode_i18n::t("settings.diagnostics_export_desc"),
             div()
                 .px_3()
                 .py_2()
@@ -1387,12 +1557,12 @@ fn render_diagnostics_section(
                         this.export_diagnostics(cx);
                     }),
                 )
-                .child("Export Diagnostics Bundle"),
+                .child(deepseekcode_i18n::t("settings.diagnostics_export_action")),
         ))
         .child(settings_group(
             &theme,
-            "OpenAPI",
-            "Browse the HTTP API schema in your browser.",
+            deepseekcode_i18n::t("settings.openapi"),
+            deepseekcode_i18n::t("settings.openapi_desc"),
             div()
                 .px_3()
                 .py_2()
@@ -1406,7 +1576,7 @@ fn render_diagnostics_section(
                         this.open_openapi_docs(cx);
                     }),
                 )
-                .child("Open /api/v1/openapi.json"),
+                .child(deepseekcode_i18n::t("settings.openapi_open")),
         ))
 }
 
@@ -1422,8 +1592,8 @@ fn render_advanced_section(
         .gap_3()
         .child(settings_group(
             &theme,
-            "Compaction",
-            "Auto-compaction settings and manual compaction trigger.",
+            deepseekcode_i18n::t("settings.compaction"),
+            deepseekcode_i18n::t("settings.compaction_desc"),
             div()
                 .flex()
                 .flex_col()
@@ -1431,12 +1601,12 @@ fn render_advanced_section(
                 .child(
                     div()
                         .text_xs()
-                        .font_family("Consolas")
+                        .font_family(crate::theme::font_mono(&theme))
                         .text_color(theme.text_secondary)
                         .child(if catalog.loaded {
                             catalog.compaction_summary.clone()
                         } else {
-                            "Open settings after a project is loaded.".into()
+                            deepseekcode_i18n::t("settings.no_project")
                         }),
                 )
                 .child(if catalog.compaction_message.is_empty() {
@@ -1462,13 +1632,13 @@ fn render_advanced_section(
                                 this.compact_current_session(cx);
                             }),
                         )
-                        .child("Compact Now"),
+                        .child(deepseekcode_i18n::t("settings.compact_now")),
                 ),
         ))
         .child(settings_group(
             &theme,
-            "Session",
-            "Fork, export, revert, or start a new conversation.",
+            deepseekcode_i18n::t("settings.session_section"),
+            deepseekcode_i18n::t("settings.session_section_desc"),
             div()
                 .flex()
                 .flex_col()
@@ -1487,7 +1657,7 @@ fn render_advanced_section(
                                 this.new_session(cx);
                             }),
                         )
-                        .child("New Session"),
+                        .child(deepseekcode_i18n::t("session.new")),
                 )
                 .child(
                     div()
@@ -1503,7 +1673,7 @@ fn render_advanced_section(
                                 this.fork_current_session(cx);
                             }),
                         )
-                        .child("Fork Session"),
+                        .child(deepseekcode_i18n::t("session.fork")),
                 )
                 .child(
                     div()
@@ -1524,9 +1694,9 @@ fn render_advanced_section(
                             }),
                         )
                         .child(if export_sanitize {
-                            "Sanitize on export: ON"
+                            deepseekcode_i18n::t("settings.sanitize_on")
                         } else {
-                            "Sanitize on export: OFF"
+                            deepseekcode_i18n::t("settings.sanitize_off")
                         }),
                 )
                 .child(
@@ -1543,7 +1713,7 @@ fn render_advanced_section(
                                 this.export_current_session(cx);
                             }),
                         )
-                        .child("Export Session…"),
+                        .child(deepseekcode_i18n::t("session.export")),
                 )
                 .child(
                     div()
@@ -1559,7 +1729,7 @@ fn render_advanced_section(
                                 this.open_revert_dock(cx);
                             }),
                         )
-                        .child("Revert…"),
+                        .child(deepseekcode_i18n::t("session.revert")),
                 ),
         ))
 }
@@ -1576,7 +1746,7 @@ fn render_worktree_section(
             div()
                 .text_sm()
                 .text_color(theme.text_muted)
-                .child("Open settings after a project is loaded."),
+                .child(deepseekcode_i18n::t("settings.no_project")),
         );
     }
 
@@ -1607,7 +1777,7 @@ fn render_worktree_section(
                             this.create_worktree(cx);
                         }),
                     )
-                    .child("Create worktree"),
+                    .child(deepseekcode_i18n::t("git.worktree_create")),
             )
             .child(
                 div()
@@ -1623,7 +1793,7 @@ fn render_worktree_section(
                             this.prune_worktrees(cx);
                         }),
                     )
-                    .child("Prune stale"),
+                    .child(deepseekcode_i18n::t("git.worktree_prune")),
             ),
     );
 
@@ -1632,7 +1802,7 @@ fn render_worktree_section(
             div()
                 .text_sm()
                 .text_color(theme.text_muted)
-                .child("No worktrees yet (requires a git repository)."),
+                .child(deepseekcode_i18n::t("git.worktree_none")),
         );
     } else {
         for entry in &catalog.worktrees {
@@ -1640,7 +1810,8 @@ fn render_worktree_section(
             let branch = entry
                 .get("branch")
                 .and_then(|v| v.as_str())
-                .unwrap_or("detached");
+                .map(str::to_string)
+                .unwrap_or_else(|| deepseekcode_i18n::t("git.worktree_detached"));
             let path_owned = path.to_string();
             body = body.child(
                 div()
@@ -1659,7 +1830,7 @@ fn render_worktree_section(
                             .child(
                                 div()
                                     .text_sm()
-                                    .font_family("Consolas")
+                                    .font_family(crate::theme::font_mono(&theme))
                                     .child(path.to_string()),
                             )
                             .child(
@@ -1687,7 +1858,7 @@ fn render_worktree_section(
                                             this.open_worktree_path(path_owned.clone(), cx);
                                         })
                                     })
-                                    .child("Open"),
+                                    .child(deepseekcode_i18n::t("common.open")),
                             )
                             .child(
                                 div()
@@ -1703,7 +1874,7 @@ fn render_worktree_section(
                                             this.remove_worktree(path_owned.clone(), cx);
                                         })
                                     })
-                                    .child("Remove"),
+                                    .child(deepseekcode_i18n::t("common.remove")),
                             ),
                     ),
             );
@@ -1722,13 +1893,13 @@ fn render_mcp_list(
         return div()
             .text_sm()
             .text_color(theme.text_muted)
-            .child("Loading…");
+            .child(deepseekcode_i18n::t("common.loading"));
     }
     if catalog.mcp.is_empty() {
         return div()
             .text_sm()
             .text_color(theme.text_muted)
-            .child("No MCP servers configured");
+            .child(deepseekcode_i18n::t("settings.mcp_empty"));
     }
     let mut list = div().flex().flex_col().gap_2();
     for entry in &catalog.mcp {
@@ -1771,9 +1942,9 @@ fn render_mcp_list(
                                     theme.text_muted
                                 })
                                 .child(if connected {
-                                    "Connected"
+                                    deepseekcode_i18n::t("settings.mcp_connected")
                                 } else {
-                                    "Disconnected"
+                                    deepseekcode_i18n::t("settings.mcp_disconnected")
                                 }),
                         ),
                 )
@@ -1782,12 +1953,12 @@ fn render_mcp_list(
                         .flex()
                         .items_center()
                         .gap_2()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.text_disabled)
-                                .child(format!("{tools} tools")),
-                        )
+                        .child(div().text_xs().text_color(theme.text_disabled).child(
+                            deepseekcode_i18n::tr!(
+                                "settings.mcp_tool_count",
+                                "count" => tools as u64
+                            ),
+                        ))
                         .child(if connected {
                             div()
                                 .px_2()
@@ -1802,7 +1973,7 @@ fn render_mcp_list(
                                         this.disconnect_mcp_server(name_owned.clone(), cx);
                                     })
                                 })
-                                .child("Disconnect")
+                                .child(deepseekcode_i18n::t("common.disconnect"))
                                 .into_any_element()
                         } else {
                             div()
@@ -1818,7 +1989,7 @@ fn render_mcp_list(
                                         this.connect_mcp_server(name_owned.clone(), cx);
                                     })
                                 })
-                                .child("Connect")
+                                .child(deepseekcode_i18n::t("common.connect"))
                                 .into_any_element()
                         }),
                 ),
@@ -1831,13 +2002,13 @@ fn render_string_list(
     theme: &ThemeTokens,
     items: &[String],
     loaded: bool,
-    empty_label: &'static str,
+    empty_label: String,
 ) -> impl IntoElement {
     if !loaded {
         return div()
             .text_sm()
             .text_color(theme.text_muted)
-            .child("Loading…");
+            .child(deepseekcode_i18n::t("common.loading"));
     }
     if items.is_empty() {
         return div()
@@ -1854,7 +2025,7 @@ fn render_string_list(
                 .rounded_md()
                 .bg(theme.bg_elevated)
                 .text_xs()
-                .font_family("Consolas")
+                .font_family(crate::theme::font_mono(&theme))
                 .child(item.clone()),
         );
     }
@@ -1868,20 +2039,23 @@ fn render_providers(
 ) -> impl IntoElement {
     let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
     if providers.is_empty() {
-        return div().text_sm().text_color(theme.text_muted).child(if has_project {
-            "Couldn't load providers — close and reopen Settings; if it persists, check Diagnostics."
-        } else {
-            "No project open — open a folder first (sidebar → Open Folder…), then connect API keys here."
-        });
+        return div()
+            .text_sm()
+            .text_color(theme.text_muted)
+            .child(if has_project {
+                deepseekcode_i18n::t("settings.providers_load_failed")
+            } else {
+                deepseekcode_i18n::t("settings.no_project_open")
+            });
     }
     let mut list = div().flex().flex_col().gap_2();
     for provider in providers {
         let provider_id = provider.id.clone();
         let disconnect_id = provider.id.clone();
         let status = if provider.connected {
-            "Connected"
+            deepseekcode_i18n::t("settings.connected")
         } else {
-            "Not connected"
+            deepseekcode_i18n::t("settings.not_connected")
         };
         let status_color = if provider.connected {
             theme.success
@@ -1904,9 +2078,9 @@ fn render_providers(
                     }),
                 )
                 .child(if provider.connected {
-                    "Update Key"
+                    deepseekcode_i18n::t("settings.update_key")
                 } else {
-                    "Connect"
+                    deepseekcode_i18n::t("common.connect")
                 }),
         );
 
@@ -1925,7 +2099,7 @@ fn render_providers(
                             this.disconnect_provider(&disconnect_id, cx);
                         }),
                     )
-                    .child("Disconnect"),
+                    .child(deepseekcode_i18n::t("common.disconnect")),
             );
         }
 
@@ -1988,7 +2162,7 @@ fn render_model_choices(
         return div()
             .text_sm()
             .text_color(theme.text_muted)
-            .child("Connect a provider to choose a model.")
+            .child(deepseekcode_i18n::t("settings.connect_provider_first"))
             .into_any_element();
     }
 
@@ -2002,7 +2176,10 @@ fn render_model_choices(
     if !known && !selected_model.is_empty() {
         let custom_id = selected_model.to_string();
         let custom_provider = selected_provider.unwrap_or("openrouter").to_string();
-        let custom_label = format!("Custom · {selected_model}");
+        let custom_label = deepseekcode_i18n::tr!(
+            "settings.custom_model_selected",
+            "model" => selected_model
+        );
         list = list.child(
             div()
                 .px_3()
@@ -2055,7 +2232,7 @@ fn render_model_choices(
 
 fn settings_group(
     theme: &ThemeTokens,
-    title: &'static str,
+    title: impl IntoElement,
     description: impl IntoElement,
     body: impl IntoElement,
 ) -> impl IntoElement {

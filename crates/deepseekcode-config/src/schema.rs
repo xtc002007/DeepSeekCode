@@ -151,18 +151,41 @@ fn default_price_output() -> f64 {
 pub struct UiConfig {
     #[serde(default = "default_true_ui")]
     pub show_turn_usage: bool,
+    /// Interface language. `"auto"` (the default) follows
+    /// `DEEPSEEKCODE_LANG`, the POSIX locale chain and the OS language, in
+    /// that order; a BCP-47 tag such as `"zh-Hant"` or `"pt-BR"` pins one of
+    /// the ten shipped locales. An unknown tag falls back to `auto` rather
+    /// than failing the load, so a config written for a future release still
+    /// starts. See `deepseekcode_i18n`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
             show_turn_usage: true,
+            language: None,
         }
     }
 }
 
 fn default_true_ui() -> bool {
     true
+}
+
+/// Resolve `ui.language` to a locale, falling back to the project config and
+/// then to detection.
+///
+/// This is the single place the config value is interpreted, so the CLI, the
+/// server and the desktop cannot disagree about which locale is in effect.
+pub fn resolve_language(project: &DeepSeekCodeConfig) -> deepseekcode_i18n::LanguagePref {
+    project
+        .ui
+        .language
+        .as_deref()
+        .map(deepseekcode_i18n::LanguagePref::parse)
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -378,5 +401,117 @@ impl Default for LoggingConfig {
             modules: HashMap::new(),
             audit: AuditLoggingConfig::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use deepseekcode_i18n::{LanguagePref, Locale};
+
+    fn config_with_language(value: Option<&str>) -> DeepSeekCodeConfig {
+        let mut config = DeepSeekCodeConfig::default();
+        config.ui.language = value.map(str::to_string);
+        config
+    }
+
+    #[test]
+    fn ui_language_defaults_to_auto() {
+        let config = DeepSeekCodeConfig::default();
+        assert_eq!(config.ui.language, None);
+        assert_eq!(
+            resolve_language(&config),
+            LanguagePref::Auto,
+            "an absent language must detect, not pin English"
+        );
+    }
+
+    #[test]
+    fn ui_language_accepts_every_shipped_tag() {
+        for locale in Locale::ALL {
+            let config = config_with_language(Some(locale.tag()));
+            assert_eq!(
+                resolve_language(&config),
+                LanguagePref::Locale(locale),
+                "{} did not round-trip",
+                locale.tag()
+            );
+        }
+    }
+
+    #[test]
+    fn ui_language_accepts_posix_and_display_forms() {
+        for (raw, expected) in [
+            ("zh_TW.UTF-8", Locale::ZhHant),
+            ("zh-HK", Locale::ZhHant),
+            ("zh_CN", Locale::ZhHans),
+            ("ja_JP.UTF-8", Locale::Ja),
+            ("de_DE@euro", Locale::De),
+            ("pt-BR", Locale::PtBr),
+            ("Português", Locale::PtBr),
+            ("繁體中文", Locale::ZhHant),
+            ("EN-us", Locale::En),
+        ] {
+            let config = config_with_language(Some(raw));
+            assert_eq!(
+                resolve_language(&config),
+                LanguagePref::Locale(expected),
+                "{raw} should resolve to {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unshipped_language_degrades_to_auto_instead_of_failing_the_load() {
+        // A config written for a future release, or hand-edited to a language
+        // we do not ship, must still start the app: detection is a strictly
+        // better outcome than refusing to load.
+        for raw in ["it", "nl-NL", "klingon", "*", ""] {
+            let config = config_with_language(Some(raw));
+            assert_eq!(
+                resolve_language(&config),
+                LanguagePref::Auto,
+                "{raw:?} should fall back to detection"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_auto_is_accepted() {
+        let config = config_with_language(Some("auto"));
+        assert_eq!(resolve_language(&config), LanguagePref::Auto);
+        let config = config_with_language(Some("AUTO"));
+        assert_eq!(resolve_language(&config), LanguagePref::Auto);
+    }
+
+    #[test]
+    fn ui_language_deserializes_from_jsonc_shaped_json() {
+        let json = r#"{"ui":{"language":"zh-Hant","show_turn_usage":false}}"#;
+        let config: DeepSeekCodeConfig = serde_json::from_str(json).expect("parses");
+        assert_eq!(
+            resolve_language(&config),
+            LanguagePref::Locale(Locale::ZhHant)
+        );
+        assert!(!config.ui.show_turn_usage);
+    }
+
+    #[test]
+    fn an_absent_ui_section_still_deserializes() {
+        // Older configs have no `ui` block at all; the language must default to
+        // detection rather than the whole file failing to load.
+        let config: DeepSeekCodeConfig = serde_json::from_str("{}").expect("parses");
+        assert_eq!(resolve_language(&config), LanguagePref::Auto);
+        assert!(config.ui.show_turn_usage);
+    }
+
+    #[test]
+    fn a_pinned_language_is_not_serialized_back_as_null() {
+        let mut config = config_with_language(Some("ja"));
+        let serialized = serde_json::to_string(&config.ui).expect("serializes");
+        assert!(serialized.contains("\"language\":\"ja\""), "{serialized}");
+        // And an unset language stays out of the file entirely.
+        config.ui.language = None;
+        let serialized = serde_json::to_string(&config.ui).expect("serializes");
+        assert!(!serialized.contains("language"), "{serialized}");
     }
 }

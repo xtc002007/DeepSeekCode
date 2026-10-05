@@ -33,8 +33,10 @@ mod session_header;
 mod session_timeline_view;
 mod settings;
 mod sidebar;
+mod status_text;
 mod syntax;
 mod terminal;
+pub mod terminal_vscode;
 mod terminal_vt;
 mod theme;
 mod titlebar;
@@ -46,8 +48,17 @@ use app::DeepSeekCodeApp;
 use deepseekcode_config::LoggingConfig;
 
 pub fn start() {
+    // Agent commands run in REAL interactive PTYs (the terminal tab IS the
+    // execution site: same input/output behavior as a hand-opened shell,
+    // auto-destroyed on completion). The core gate reads this before any
+    // engine boots; CLI/server/tests never set it and keep pipes.
+    std::env::set_var("DEEPSEEKCODE_BASH_PTY", "1");
     deepseekcode_sdk::install_dedicated_engine_runtime();
-    let (logging, config_error) = load_logging_config();
+    let (logging, config_error, config_language) = load_logging_config();
+    // Language first, before any UI string is rendered: project config
+    // `ui.language` wins when pinned, otherwise auto-detect. The workspace
+    // later applies the user's Settings choice on top (see `WorkspaceView`).
+    deepseekcode_i18n::init_from_preference(config_language);
     let run_ctx = deepseekcode_telemetry::init("desktop", &logging);
     tracing::info!(
         target: deepseekcode_telemetry::APP,
@@ -67,13 +78,28 @@ pub fn start() {
     DeepSeekCodeApp::run();
 }
 
-fn load_logging_config() -> (LoggingConfig, Option<String>) {
+fn load_logging_config() -> (
+    LoggingConfig,
+    Option<String>,
+    deepseekcode_i18n::LanguagePref,
+) {
     match deepseekcode_config::load_effective_config(camino::Utf8Path::new(".")) {
-        Ok(c) => (c.logging, None),
+        Ok(c) => {
+            let language = deepseekcode_config::resolve_language(&c);
+            (c.logging, None, language)
+        }
         Err(e) => {
-            let msg = format!("config load failed ({e}); using default logging");
+            let msg = deepseekcode_i18n::tr!(
+                "cli.err.config_load_failed",
+                "directory" => ".",
+                "error" => e.to_string()
+            );
             eprintln!("deepseekcode: {msg}");
-            (Default::default(), Some(msg))
+            (
+                Default::default(),
+                Some(msg),
+                deepseekcode_i18n::LanguagePref::Auto,
+            )
         }
     }
 }

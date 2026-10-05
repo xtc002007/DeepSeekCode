@@ -27,6 +27,7 @@ deepseekcode-types = { workspace = true }
 deepseekcode-schema = { workspace = true }
 deepseekcode-core = { path = "../deepseekcode-core", default-features = false }
 deepseekcode-config = { workspace = true }
+deepseekcode-i18n = { workspace = true }
 deepseekcode-telemetry = { workspace = true }
 deepseekcode-sdk = { path = "../deepseekcode-sdk", default-features = false }
 clap = { workspace = true }

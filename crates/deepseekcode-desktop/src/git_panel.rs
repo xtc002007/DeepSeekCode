@@ -37,7 +37,7 @@ impl GitPanel {
                                 this.refresh_git_status_async(cx);
                             })
                         })
-                        .child("Refresh"),
+                        .child(deepseekcode_i18n::t("common.refresh")),
                 ),
         );
         if let Some(message) = status_message.filter(|s| !s.is_empty()) {
@@ -67,22 +67,28 @@ impl GitPanel {
                         .px_2()
                         .text_sm()
                         .text_color(theme.text_muted)
-                        .child("Working tree clean."),
+                        .child(deepseekcode_i18n::t("git.clean")),
                 );
             }
         } else {
             list = list
-                .child(render_section(cx, "Staged", staged, theme.success, &theme))
                 .child(render_section(
                     cx,
-                    "Unstaged",
+                    &deepseekcode_i18n::t("git.staged"),
+                    staged,
+                    theme.success,
+                    &theme,
+                ))
+                .child(render_section(
+                    cx,
+                    &deepseekcode_i18n::t("git.unstaged"),
                     unstaged,
                     theme.warning,
                     &theme,
                 ))
                 .child(render_section(
                     cx,
-                    "Untracked",
+                    &deepseekcode_i18n::t("git.untracked"),
                     untracked,
                     theme.text_muted,
                     &theme,
@@ -96,7 +102,7 @@ impl GitPanel {
                     .text_xs()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_link)
-                    .child("Recent commits"),
+                    .child(deepseekcode_i18n::t("git.recent_commits")),
             );
             for line in log {
                 list = list.child(

@@ -109,6 +109,10 @@ pub struct ActivityMeta {
     pub exit_code: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// Same span as [`Self::duration_ms`] in whole seconds, for localized
+    /// rendering without re-deriving the unit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub todo_pending: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -156,7 +160,18 @@ pub struct ActivitySummary {
 pub struct ActivityGroup {
     pub id: String,
     pub kind: ActivityGroupKind,
+    /// Pre-rendered English label, kept for wire compatibility and for logs.
+    ///
+    /// **Do not parse this.** It is a localized display string; the desktop
+    /// renders [`Self::duration_secs`] through the message catalog instead.
+    /// Older servers do not send it in the caller's language, which is exactly
+    /// why a client that scraped it for numbers broke in every non-English
+    /// locale.
     pub label: String,
+    /// Wall-clock span this group covers, in whole seconds. `None` for groups
+    /// that have no meaningful duration (markers, session meta).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<ActivitySummary>,
     #[schema(no_recursion)]

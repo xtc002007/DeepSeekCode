@@ -40,8 +40,13 @@ pub fn light_tokens() -> ThemeTokens {
         tool_write: hex_rgb(0x16a34a),
         tool_bash: hex_rgb(0xd97706),
 
-        terminal_bg: hex_rgb(0xfafafa),
-        terminal_fg: hex_rgb(0x1a1a1a),
+        // VSCode Light (default light+) terminal: white bg, dark fg.
+        terminal_bg: hex_rgb(0xffffff),
+        terminal_fg: hex_rgb(0x333333),
+        terminal_cursor: hex_rgb(0x000000),
+        terminal_command: hex_rgb(0xc19c00),
+        terminal_prompt: hex_rgb(0x737373),
+        terminal_tab_active: hex_rgb(0x007acc),
 
         markdown: MarkdownTokens {
             text: hex_rgb(0x1a1a1a),

@@ -9,6 +9,17 @@ Rust-native AI programming environment. Core SDK with embedded Axum server; GPUI
 - `deepseekcode-sdk` — `EmbeddedEngine` + `DeepSeekCodeClient`
 - `deepseekcode-desktop` — GPUI UI (standalone crate, depends on git `gpui`)
 - `deepseekcode-cli` — `run`, `serve`, `session-list`
+- `deepseekcode-i18n` — locales, catalogs, locale-aware formatting
+
+## Internationalization
+
+Ten UI locales (`en`, `zh-Hans`, `zh-Hant`, `ja`, `ko`, `es`, `fr`, `de`,
+`pt-BR`, `ru`). See [docs/i18n.md](docs/i18n.md). The short version: every
+user-visible string lives in all ten catalogs (English defines the key set),
+values render through `deepseekcode_i18n` helpers (never `format!`), system
+prompts and logs stay English, and `cargo test -p deepseekcode-i18n` enforces
+key/placeholder parity. `ui.language` (`"auto"` or a BCP-47 tag) pins the
+language in `deepseekcode.jsonc`.
 
 ## Session Runtime
 

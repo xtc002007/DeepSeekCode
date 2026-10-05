@@ -16,7 +16,7 @@ impl DetailInspector {
                 .p_3()
                 .text_sm()
                 .text_color(theme.text_muted)
-                .child("Select an activity row to inspect details."),
+                .child(deepseekcode_i18n::t("detail.empty")),
             Some(d) => {
                 // 详情面板允许纵向滚动：长 Output/JSON 不再被 `overflow_hidden`
                 // 静默截断（曾表现为输出缺字）。
@@ -43,12 +43,12 @@ impl DetailInspector {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.text_link)
-                                    .child(format!("URL: {url}")),
-                            )
+                            .child(div().text_xs().text_color(theme.text_link).child(
+                                deepseekcode_i18n::tr!(
+                                    "detail.url",
+                                    "url" => url.as_str()
+                                ),
+                            ))
                             .child(
                                 div()
                                     .px_2()
@@ -64,7 +64,7 @@ impl DetailInspector {
                                             this.open_external_url(&url);
                                         })
                                     })
-                                    .child("Open in browser"),
+                                    .child(deepseekcode_i18n::t("detail.open_browser")),
                             ),
                     );
                 }
@@ -74,7 +74,10 @@ impl DetailInspector {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .child(section_label("Web preview", &theme))
+                            .child(section_label(
+                                &deepseekcode_i18n::t("detail.web_preview"),
+                                &theme,
+                            ))
                             .child(
                                 div()
                                     .id("detail-web-preview")
@@ -93,21 +96,34 @@ impl DetailInspector {
                     );
                 } else if let Some(url) = &d.url {
                     body = body.child(section(
-                        "Web preview",
-                        &format!(
-                            "Fetched content preview unavailable.\nOpen the URL in your browser to view the page.\n{url}"
+                        &deepseekcode_i18n::t("detail.web_preview"),
+                        &deepseekcode_i18n::tr!(
+                            "detail.web_preview_unavailable",
+                            "url" => url.as_str()
                         ),
                         &theme,
                     ));
                 }
                 if let Some(input) = &d.input {
-                    body = body.child(section("Input", input, &theme));
+                    body = body.child(section(
+                        &deepseekcode_i18n::t("tool.detail.input"),
+                        input,
+                        &theme,
+                    ));
                 }
                 if let Some(output) = &d.output {
                     if d.url.is_some() || d.web_preview.is_some() {
-                        body = body.child(section("Raw output", output, &theme));
+                        body = body.child(section(
+                            &deepseekcode_i18n::t("tool.detail.raw_output"),
+                            output,
+                            &theme,
+                        ));
                     } else {
-                        body = body.child(section("Output", output, &theme));
+                        body = body.child(section(
+                            &deepseekcode_i18n::t("tool.detail.output"),
+                            output,
+                            &theme,
+                        ));
                     }
                 }
                 if let Some(todos) = &d.todos {
@@ -116,7 +132,11 @@ impl DetailInspector {
                         .map(|t| format!("[{}] {} ({})", t.status, t.content, t.priority))
                         .collect::<Vec<_>>()
                         .join("\n");
-                    body = body.child(section("Todos", &text, &theme));
+                    body = body.child(section(
+                        &deepseekcode_i18n::t("tool.detail.todos"),
+                        &text,
+                        &theme,
+                    ));
                 }
                 body
             }

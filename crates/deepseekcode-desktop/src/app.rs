@@ -16,7 +16,13 @@ impl DeepSeekCodeApp {
                     error = %e,
                     "desktop tokio runtime creation failed"
                 );
-                eprintln!("DeepSeekCode desktop failed to start tokio runtime: {e}");
+                eprintln!(
+                    "{}: {e}",
+                    deepseekcode_i18n::tr!(
+                        "error.startup_runtime",
+                        "app" => deepseekcode_i18n::t("app.name")
+                    )
+                );
                 std::process::exit(1);
             }
         };
@@ -38,7 +44,7 @@ impl DeepSeekCodeApp {
                 let options = WindowOptions {
                     window_bounds: Some(WindowBounds::Maximized(bounds)),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("DeepSeekCode".into()),
+                        title: Some(deepseekcode_i18n::t("app.name").into()),
                         appears_transparent: true,
                         ..Default::default()
                     }),
@@ -60,7 +66,13 @@ impl DeepSeekCodeApp {
                             error = %e,
                             "desktop window open failed"
                         );
-                        eprintln!("DeepSeekCode failed to open window: {e}");
+                        eprintln!(
+                            "{}: {e}",
+                            deepseekcode_i18n::tr!(
+                                "error.startup_window",
+                                "app" => deepseekcode_i18n::t("app.name")
+                            )
+                        );
                         std::process::exit(1);
                     }
                 }

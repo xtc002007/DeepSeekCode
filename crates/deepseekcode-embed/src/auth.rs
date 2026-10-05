@@ -82,8 +82,12 @@ pub async fn basic_auth_middleware(
                     "basic auth throttled: too many failures"
                 );
                 let mut res = axum::http::Response::new(axum::body::Body::from(
-                    serde_json::json!({"error": "too many auth failures", "code": "rate_limited"})
-                        .to_string(),
+                    crate::language::error_body(
+                        "error.too_many_auth_failures",
+                        "rate_limited",
+                        &[],
+                    )
+                    .to_string(),
                 ));
                 *res.status_mut() = StatusCode::TOO_MANY_REQUESTS;
                 res.headers_mut()
@@ -112,7 +116,7 @@ pub async fn basic_auth_middleware(
         );
         // Include WWW-Authenticate + JSON body per RFC 7617.
         let mut res = axum::http::Response::new(axum::body::Body::from(
-            serde_json::json!({"error": "unauthorized"}).to_string(),
+            crate::language::error_body("error.unauthorized", "unauthorized", &[]).to_string(),
         ));
         *res.status_mut() = StatusCode::UNAUTHORIZED;
         res.headers_mut().insert(

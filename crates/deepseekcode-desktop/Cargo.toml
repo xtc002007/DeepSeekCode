@@ -33,6 +33,7 @@ ico = "0.3"
 deepseekcode-types = { workspace = true }
 deepseekcode-schema = { workspace = true }
 deepseekcode-config = { workspace = true }
+deepseekcode-i18n = { workspace = true }
 deepseekcode-telemetry = { workspace = true }
 deepseekcode-sdk = { workspace = true }
 deepseekcode-core = { workspace = true }
@@ -59,6 +60,9 @@ eventsource-stream = { workspace = true }
 rfd = "0.15"
 image = "0.25"
 tokio-tungstenite = { workspace = true }
+http = { workspace = true }
+base64 = { workspace = true }
+ulid = { workspace = true }
 unicode-segmentation = "1.12"
 pulldown-cmark = { workspace = true }
 keyring = { workspace = true, optional = true }

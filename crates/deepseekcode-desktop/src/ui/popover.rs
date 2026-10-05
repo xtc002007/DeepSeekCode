@@ -122,7 +122,7 @@ pub fn render_project_remove_row(
     cx: &mut Context<crate::workspace::WorkspaceView>,
 ) -> impl IntoElement {
     let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
-    let width = menu_width_for_labels(["Remove from sidebar"]);
+    let width = menu_width_for_labels([deepseekcode_i18n::t("sidebar.remove_from_sidebar")]);
     div()
         .id("popover-project-menu")
         .occlude()
@@ -155,7 +155,7 @@ pub fn render_project_remove_row(
                         });
                     }),
                 )
-                .child("Remove from sidebar"),
+                .child(deepseekcode_i18n::t("sidebar.remove_from_sidebar")),
         )
 }
 
@@ -165,7 +165,7 @@ pub fn render_session_delete_row(
     cx: &mut Context<crate::workspace::WorkspaceView>,
 ) -> impl IntoElement {
     let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
-    let width = menu_width_for_labels(["Delete session"]);
+    let width = menu_width_for_labels([deepseekcode_i18n::t("sidebar.delete_session")]);
     div()
         .id("popover-context-menu")
         .occlude()
@@ -197,7 +197,7 @@ pub fn render_session_delete_row(
                         });
                     }),
                 )
-                .child("Delete session"),
+                .child(deepseekcode_i18n::t("sidebar.delete_session")),
         )
 }
 

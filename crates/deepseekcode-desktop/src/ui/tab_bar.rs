@@ -3,10 +3,10 @@ use crate::ui::icon::{render_icon, IconName};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabItem {
     pub id: &'static str,
-    pub label: &'static str,
+    pub label: String,
     pub icon: IconName,
 }
 

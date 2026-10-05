@@ -28,7 +28,7 @@ jobs:
           $env:DEEPSEEKCODE_LOG_CONSOLE = "0"
           $env:DEEPSEEKCODE_LOG_LEVEL = "debug"
           $env:DEEPSEEKCODE_DISABLE_KEYRING = "1"
-          cargo test -p deepseekcode-types -p deepseekcode-schema -p deepseekcode-config -p deepseekcode-storage -p deepseekcode-llm -p deepseekcode-core -p deepseekcode-plugin -p deepseekcode-telemetry
+          cargo test -p deepseekcode-types -p deepseekcode-schema -p deepseekcode-config -p deepseekcode-i18n -p deepseekcode-storage -p deepseekcode-llm -p deepseekcode-core -p deepseekcode-plugin -p deepseekcode-telemetry
           if ($LASTEXITCODE -ne 0) {
             Get-ChildItem -Path "$env:LOCALAPPDATA\deepseekcode\logs" -Recurse -Filter app.log -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Tail 80 }
             exit $LASTEXITCODE
@@ -39,6 +39,8 @@ jobs:
             exit $LASTEXITCODE
           }
           cargo test -p deepseekcode-server --test openapi_contract
+      - name: i18n catalog parity (all ten locales)
+        run: cargo test -p deepseekcode-i18n --test catalog_parity
       - name: Test desktop (logic)
         env:
           DEEPSEEKCODE_DISABLE_KEYRING: "1"
@@ -80,7 +82,7 @@ jobs:
       - name: Test portable crates
         env:
           DEEPSEEKCODE_DISABLE_KEYRING: "1"
-        run: cargo test -p deepseekcode-types -p deepseekcode-schema -p deepseekcode-config -p deepseekcode-storage -p deepseekcode-llm -p deepseekcode-core
+        run: cargo test -p deepseekcode-types -p deepseekcode-schema -p deepseekcode-config -p deepseekcode-i18n -p deepseekcode-storage -p deepseekcode-llm -p deepseekcode-core
   # B7: MSRV gate — workspace declares rust-version = "1.85"; this job fails
   # if any dependency or language feature breaks the 1.85 floor (CI otherwise
   # runs latest stable, currently 1.97, which would silently mask MSRV drift).

@@ -22,9 +22,33 @@ pub struct DetailPayload {
     pub command: Option<String>,
 }
 
+/// Long-lived bash execution transcript backing one terminal tab.
+///
+/// Unlike `DetailPayload` (rebuilt per session on every hydrate / session
+/// switch), transcripts outlive the session-scoped `DetailStore`: terminal
+/// tabs are global, so without this a tab turns into `$ (unknown command)`
+/// the moment the user switches sessions and its detail entry vanishes.
+#[derive(Clone, Debug, Default)]
+pub struct BashTranscript {
+    pub command: String,
+    pub input: Option<String>,
+    pub output: String,
+    pub received: bool,
+    pub title: Option<String>,
+    /// Working directory the command ran in — rendered as the `D:\path>`
+    /// prompt prefix so a transcript reads like a real console session.
+    pub cwd: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DetailStore {
     entries: std::collections::HashMap<String, DetailPayload>,
+    /// `internal_tool_call_id → tool_call_id` aliases from `ToolStarted`.
+    /// Progress chunks travel under the INTERNAL id (which differs whenever
+    /// the provider id is not ULID-shaped) while Started/Completed use the
+    /// outer one; without this map streamed output lands in orphan entries
+    /// and tabs show `(unknown command)` with no live updates.
+    aliases: std::collections::HashMap<String, String>,
 }
 
 impl DetailStore {
@@ -36,8 +60,31 @@ impl DetailStore {
         self.entries.get(key)
     }
 
+    /// Record that `internal` names the same call as `outer` (both from one
+    /// `ToolStarted` payload). Self-aliases are dropped to keep the map tiny.
+    pub fn alias_tool_call(&mut self, internal: &str, outer: &str) {
+        if !internal.is_empty() && !outer.is_empty() && internal != outer {
+            self.aliases
+                .insert(internal.to_string(), outer.to_string());
+        }
+    }
+
+    /// Canonical (outer) id for any phase key: progress-time internal ids
+    /// resolve to the Started-time outer id, everything else passes through.
+    pub fn canonical_tool_call<'a>(&'a self, id: &'a str) -> &'a str {
+        self.aliases.get(id).map(String::as_str).unwrap_or(id)
+    }
+
     pub fn append_output(&mut self, key: &str, chunk: &str, stream: &str) {
-        let entry = self.entries.entry(key.to_string()).or_default();
+        // The `pty` stream carries the live agent-PTY session id for tab
+        // attach (`{"pty_id": …}`), NOT output text: appending it would leak
+        // the handshake JSON into the captured stdout. The desktop reads it
+        // straight from the event payload instead.
+        if stream == "pty" {
+            return;
+        }
+        let key = self.canonical_tool_call(key).to_string();
+        let entry = self.entries.entry(key).or_default();
         let mut body = parse_or_init_bash_stream(entry.output.as_deref());
         if stream == "stderr" {
             body.stderr.push_str(chunk);
@@ -60,6 +107,18 @@ impl DetailStore {
             entry.web_preview = preview;
         }
     }
+
+    /// All detail keys that carry a bash command (i.e. every LLM execution
+    /// that should appear as a terminal tab).
+    pub fn bash_keys(&self) -> Vec<&str> {
+        self.entries
+            .iter()
+            .filter(|(_, p)| {
+                p.command.as_deref().is_some_and(|c| !c.trim().is_empty())
+            })
+            .map(|(k, _)| k.as_str())
+            .collect()
+    }
 }
 
 pub fn rebuild_detail_store(events: &[deepseekcode_schema::event::EventEnvelope]) -> DetailStore {
@@ -70,6 +129,11 @@ pub fn rebuild_detail_store(events: &[deepseekcode_schema::event::EventEnvelope]
         match event.kind {
             EventKind::ToolStarted => {
                 if let Some(id) = event.payload["tool_call_id"].as_str() {
+                    if let Some(internal) =
+                        event.payload["internal_tool_call_id"].as_str()
+                    {
+                        store.alias_tool_call(internal, id);
+                    }
                     let input = event.payload.get("input").cloned().unwrap_or_default();
                     let detail =
                         serde_json::to_string_pretty(&input).unwrap_or_else(|_| input.to_string());
@@ -355,7 +419,7 @@ impl ActivityTimelineView {
                                     div()
                                         .text_sm()
                                         .text_color(theme.text_secondary)
-                                        .child("正在加载会话…"),
+                                        .child(deepseekcode_i18n::t("activity.loading_session")),
                                 ),
                         ),
                 );
@@ -372,7 +436,7 @@ impl ActivityTimelineView {
                                 .text_xs()
                                 .line_height(crate::theme::leading_sm(&theme))
                                 .text_color(theme.text_muted)
-                                .child("发送一条消息开始对话。"),
+                                .child(deepseekcode_i18n::t("activity.empty_prompt")),
                         ),
                 );
             }
@@ -381,7 +445,7 @@ impl ActivityTimelineView {
                 div()
                     .text_xs()
                     .text_color(theme.text_muted)
-                    .child("No visible activity rows."),
+                    .child(deepseekcode_i18n::t("activity.no_rows")),
             );
         } else {
             // Task hierarchy: rows chunk at depth-0 user messages. Each chunk
@@ -424,42 +488,34 @@ impl ActivityTimelineView {
     }
 }
 
-/// Parse `<prefix> for <N>s` / `<prefix> for <1s` labels into seconds.
-fn parse_worked_secs(label: &str) -> Option<u64> {
-    let rest = label.split_once(" for ")?.1;
-    if rest == "<1s" {
-        return Some(0);
+/// Render a turn-group header from structured data, never by parsing text.
+///
+/// `duration_secs` comes from the backend (`ActivityGroup::duration_secs`).
+/// Older trees predate that field and keep an English `label`; those render
+/// as-is instead of being scraped for numbers. Scraping translated text for
+/// `" for "` was the bug this replaces: it assumed English word order and
+/// unit abbreviations (`2h 5m`), neither of which holds in other locales.
+fn turn_header_label(
+    kind: &deepseekcode_schema::activity::ActivityGroupKind,
+    label: &str,
+    duration_secs: Option<u64>,
+    summary: Option<&deepseekcode_schema::activity::ActivitySummary>,
+) -> String {
+    use deepseekcode_schema::activity::ActivityGroupKind;
+    if *kind != ActivityGroupKind::ProviderTurn {
+        return label.to_string();
     }
-    rest.strip_suffix('s')?.parse().ok()
-}
-
-fn format_duration_secs(secs: u64) -> String {
-    if secs == 0 {
-        "<1s".into()
-    } else if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        let (m, r) = (secs / 60, secs % 60);
-        if r == 0 {
-            format!("{m}m")
-        } else {
-            format!("{m}m {r}s")
-        }
-    } else {
-        format!("{}h {}m", secs / 3600, secs % 3600 / 60)
-    }
-}
-
-/// Humanize second-precision duration labels: `Worked for 7502s` reads broken
-/// (unclosed turns accumulate against `now`), so render `Worked for 2h 5m`.
-/// Any label that does not match `<prefix> for <N>s` passes through unchanged.
-fn humanize_worked_label(label: &str) -> String {
-    match label.split_once(" for ") {
-        Some((prefix, _)) => match parse_worked_secs(label) {
-            Some(secs) => format!("{prefix} for {}", format_duration_secs(secs)),
-            None => label.to_string(),
+    let Some(secs) = duration_secs else {
+        // Legacy tree: keep the stored label verbatim (usually English).
+        return label.to_string();
+    };
+    let duration = deepseekcode_i18n::tr!("activity.worked_for", "duration" => deepseekcode_i18n::Arg::Duration(secs));
+    match summary {
+        Some(s) => match crate::activity_leaf::format_summary_header(s) {
+            Some(header) => format!("{header}, {duration}"),
+            None => duration,
         },
-        None => label.to_string(),
+        None => duration,
     }
 }
 
@@ -541,11 +597,11 @@ fn chunk_task_rows(rows: &[FlattenedActivityRow], task_active: bool) -> Vec<Task
             let total_secs: u64 = exec_rows
                 .iter()
                 .filter_map(|row| match row {
-                    FlattenedActivityRow::GroupHeader { label, kind, .. }
-                        if *kind == ActivityGroupKind::ProviderTurn =>
-                    {
-                        parse_worked_secs(label)
-                    }
+                    FlattenedActivityRow::GroupHeader {
+                        duration_secs,
+                        kind,
+                        ..
+                    } if *kind == ActivityGroupKind::ProviderTurn => *duration_secs,
                     _ => None,
                 })
                 .sum();
@@ -554,9 +610,9 @@ fn chunk_task_rows(rows: &[FlattenedActivityRow], task_active: bool) -> Vec<Task
                 exec_rows,
                 summary_row,
                 exec_id: format!("task-exec-{index}"),
-                exec_label: format!(
-                    "Executed tasks, Worked for {}",
-                    format_duration_secs(total_secs)
+                exec_label: deepseekcode_i18n::tr!(
+                    "activity.executed_tasks",
+                    "duration" => deepseekcode_i18n::Arg::Duration(total_secs)
                 ),
                 exec_collapsed_default: index != last_chunk || !task_active,
             }
@@ -622,6 +678,7 @@ fn render_task_chunk(
         let dummy = ActivityGroup {
             id: chunk.exec_id.clone(),
             label: chunk.exec_label.clone(),
+            duration_secs: None,
             kind: ActivityGroupKind::ProviderTurn,
             children: Vec::new(),
             summary: None,
@@ -713,7 +770,7 @@ fn render_summary_node(
                 .line_height(crate::theme::leading_xs(theme))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text_muted)
-                .child("Summary"),
+                .child(deepseekcode_i18n::t("activity.summary")),
         )
         .child(
             div()
@@ -854,23 +911,16 @@ fn render_flattened_row(
             depth,
             collapsed_default,
             kind,
+            duration_secs,
             summary,
         } => {
-            // Turn headers merge operation summary + duration:
-            // `Explore 5 files, Worked for 12s`. Nested/sub groups keep
-            // their backend label unchanged.
-            let display_label = match (kind, summary) {
-                (ActivityGroupKind::ProviderTurn, Some(s)) => {
-                    match crate::activity_leaf::format_summary_header(s) {
-                        Some(header) => format!("{header}, {}", humanize_worked_label(label)),
-                        None => humanize_worked_label(label),
-                    }
-                }
-                _ => humanize_worked_label(label),
-            };
+            // Turn headers merge operation summary + duration. Nested/sub
+            // groups keep their backend label unchanged.
+            let display_label = turn_header_label(kind, label, *duration_secs, summary.as_ref());
             let group = ActivityGroup {
                 id: group_id.clone(),
                 label: display_label,
+                duration_secs: *duration_secs,
                 kind: *kind,
                 children: Vec::new(),
                 summary: None,
@@ -1343,7 +1393,7 @@ fn activity_kind_style(
 
 #[cfg(test)]
 mod tests {
-    use super::humanize_worked_label;
+    use super::turn_header_label;
     use crate::activity_rows::FlattenedActivityRow;
 
     /// 截图问题：hydrated 会话的 `DetailPayload.input` 是整个参数的
@@ -1373,39 +1423,109 @@ mod tests {
         );
     }
 
+    /// `pty` 进度流携带的是挂载握手（`{"pty_id": …}`），不是输出文本：
+    /// 绝不能进入 stdout 缓冲，否则终端回放和 LLM 结果里会混进 JSON。
     #[test]
-    fn humanize_keeps_short_durations() {
-        assert_eq!(humanize_worked_label("Worked for <1s"), "Worked for <1s");
-        assert_eq!(humanize_worked_label("Worked for 5s"), "Worked for 5s");
-        assert_eq!(humanize_worked_label("Worked for 59s"), "Worked for 59s");
+    fn pty_stream_never_enters_output_buffers() {
+        let mut store = super::DetailStore::default();
+        store.append_output("t1", "hello", "stdout");
+        store.append_output("t1", r#"{"pty_id":"abc"}"#, "pty");
+        store.append_output("t1", "warn", "stderr");
+        let output = store.get("t1").and_then(|d| d.output.clone()).unwrap();
+        assert!(!output.contains("pty_id"), "{output}");
+        assert!(output.contains("hello"), "{output}");
+        assert!(output.contains("warn"), "{output}");
     }
 
+    /// 回归：Started（外部 UUID）与 progress/completed（内部 ULID）是同一
+    /// 次调用的两张皮。没有别名映射时，流式输出进孤儿条目、tab 显示
+    /// `(unknown command)` 且永远收不到 live 更新。
     #[test]
-    fn humanize_folds_minutes_and_hours() {
-        assert_eq!(humanize_worked_label("Worked for 60s"), "Worked for 1m");
-        assert_eq!(humanize_worked_label("Worked for 62s"), "Worked for 1m 2s");
+    fn progress_internal_id_merges_into_started_outer_id() {
+        use deepseekcode_schema::event::{EventEnvelope, EventKind};
+        let outer = "ef0485ef-8845-47f0-afbf-44441457758e";
+        let inner = "01M45FXQ90FC2NAQQHCF6B21HC";
+        let started = EventEnvelope {
+            seq: 1,
+            kind: EventKind::ToolStarted,
+            session_id: None,
+            payload: serde_json::json!({
+                "tool_call_id": outer,
+                "internal_tool_call_id": inner,
+                "tool_name": "bash",
+                "input": {"command": "echo hi", "timeout_ms": 30000},
+            }),
+            created_at: chrono::Utc::now(),
+        };
+        let progress = EventEnvelope {
+            seq: 2,
+            kind: EventKind::ToolProgress,
+            session_id: None,
+            payload: serde_json::json!({
+                "tool_call_id": inner,
+                "tool_name": "bash",
+                "chunk": "hi",
+                "stream": "stdout",
+            }),
+            created_at: chrono::Utc::now(),
+        };
+        let store = super::rebuild_detail_store(&[started, progress]);
+        let detail = store.get(outer).expect("outer entry must exist");
         assert_eq!(
-            humanize_worked_label("Worked for 7502s"),
-            "Worked for 2h 5m"
+            detail.command.as_deref(),
+            Some("echo hi"),
+            "command must survive the merge"
+        );
+        let output = detail.output.clone().unwrap_or_default();
+        assert!(output.contains("hi"), "streamed chunk must land here: {output}");
+        assert!(
+            store.get(inner).is_none(),
+            "no orphan entry may remain under the internal id"
         );
     }
 
     #[test]
-    fn humanize_passes_through_unknown_labels() {
-        assert_eq!(
-            humanize_worked_label("Session interrupted"),
-            "Session interrupted"
+    fn turn_header_prefers_structured_seconds_over_text() {
+        use deepseekcode_schema::activity::ActivityGroupKind;
+        // Structured duration renders through the catalog.
+        let rendered = turn_header_label(
+            &ActivityGroupKind::ProviderTurn,
+            "anything",
+            Some(7502),
+            None,
         );
-        assert_eq!(humanize_worked_label("Thought for 3s"), "Thought for 3s");
+        assert_eq!(
+            rendered,
+            deepseekcode_i18n::tr!(
+                "activity.worked_for",
+                "duration" => deepseekcode_i18n::Arg::Duration(7502)
+            )
+        );
+        // Legacy trees without the field keep their stored label verbatim —
+        // no scraping, in any language.
+        assert_eq!(
+            turn_header_label(
+                &ActivityGroupKind::ProviderTurn,
+                "Worked for 5s",
+                None,
+                None
+            ),
+            "Worked for 5s"
+        );
+        assert_eq!(
+            turn_header_label(&ActivityGroupKind::Thought, "Thought for 3s", None, None),
+            "Thought for 3s"
+        );
     }
 
-    fn header_row(id: &str, label: &str) -> FlattenedActivityRow {
+    fn header_row(id: &str, secs: u64) -> FlattenedActivityRow {
         FlattenedActivityRow::GroupHeader {
             group_id: id.into(),
-            label: label.into(),
+            label: format!("Worked for {secs}s"),
             depth: 0,
             collapsed_default: false,
             kind: deepseekcode_schema::activity::ActivityGroupKind::ProviderTurn,
+            duration_secs: Some(secs),
             summary: None,
         }
     }
@@ -1449,10 +1569,10 @@ mod tests {
     #[test]
     fn chunks_split_at_user_messages_and_hoist_last_assistant() {
         let rows = vec![
-            header_row("turn-1", "Worked for 60s"),
+            header_row("turn-1", 60),
             assistant_row("a1"),
             user_row("u1"),
-            header_row("turn-2", "Worked for 30s"),
+            header_row("turn-2", 30),
         ];
         let chunks = super::chunk_task_rows(&rows, false);
         assert_eq!(chunks.len(), 2);
@@ -1460,20 +1580,32 @@ mod tests {
         assert!(chunks[0].user_row.is_none());
         assert!(chunks[0].summary_row.is_some());
         assert_eq!(chunks[0].exec_rows.len(), 1);
-        assert_eq!(chunks[0].exec_label, "Executed tasks, Worked for 1m");
+        assert_eq!(
+            chunks[0].exec_label,
+            deepseekcode_i18n::tr!(
+                "activity.executed_tasks",
+                "duration" => deepseekcode_i18n::Arg::Duration(60)
+            )
+        );
         // Second chunk owns the user row; its turn has no assistant.
         assert!(chunks[1].user_row.is_some());
         assert!(chunks[1].summary_row.is_none());
-        assert_eq!(chunks[1].exec_label, "Executed tasks, Worked for 30s");
+        assert_eq!(
+            chunks[1].exec_label,
+            deepseekcode_i18n::tr!(
+                "activity.executed_tasks",
+                "duration" => deepseekcode_i18n::Arg::Duration(30)
+            )
+        );
     }
 
     #[test]
     fn execution_collapses_when_idle_and_expands_while_active() {
         let rows = vec![
             user_row("u1"),
-            header_row("turn-1", "Worked for 5s"),
+            header_row("turn-1", 5),
             user_row("u2"),
-            header_row("turn-2", "Worked for 5s"),
+            header_row("turn-2", 5),
         ];
         let idle = super::chunk_task_rows(&rows, false);
         assert!(idle.iter().all(|c| c.exec_collapsed_default));

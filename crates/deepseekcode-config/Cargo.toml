@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 deepseekcode-types = { workspace = true }
 deepseekcode-schema = { workspace = true }
+deepseekcode-i18n = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 jsonc-parser = { workspace = true }

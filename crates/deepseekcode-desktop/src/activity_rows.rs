@@ -25,6 +25,9 @@ pub enum FlattenedActivityRow {
         depth: usize,
         collapsed_default: bool,
         kind: ActivityGroupKind,
+        /// Structured whole-second span for turn headers. This is what the
+        /// UI renders; `label` stays as the backend's English fallback.
+        duration_secs: Option<u64>,
         /// Turn summary, carried for header composition
         /// (`Explore 5 files, Worked for 12s`). Turns never emit a separate
         /// `GroupSummary` row; only non-turn groups use that variant.
@@ -297,6 +300,7 @@ fn flatten_group(
         depth,
         collapsed_default: group.collapsed_default,
         kind: group.kind,
+        duration_secs: group.duration_secs,
         summary: group.summary.clone(),
     });
     if expanded {
@@ -434,6 +438,7 @@ mod tests {
             id: id.into(),
             kind: ActivityGroupKind::ProviderTurn,
             label: "Worked for 1s".into(),
+            duration_secs: Some(1),
             summary: None,
             children,
             collapsed_default: false,
@@ -449,6 +454,7 @@ mod tests {
             id: id.into(),
             kind: ActivityGroupKind::ProviderTurn,
             label: "Worked for 12s".into(),
+            duration_secs: Some(12),
             summary: Some(summary),
             children,
             collapsed_default: false,

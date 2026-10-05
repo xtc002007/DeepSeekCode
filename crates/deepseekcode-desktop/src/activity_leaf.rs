@@ -7,16 +7,28 @@ use deepseekcode_schema::activity::{
 pub fn format_summary_line(summary: &ActivitySummary) -> String {
     let mut parts = Vec::new();
     if summary.files_edited > 0 {
-        parts.push(format!("Edited {} files", summary.files_edited));
+        parts.push(deepseekcode_i18n::tr!(
+            "activity.summary.edited_files",
+            "count" => summary.files_edited as u64
+        ));
     }
     if summary.files_explored > 0 {
-        parts.push(format!("Explored {} files", summary.files_explored));
+        parts.push(deepseekcode_i18n::tr!(
+            "activity.summary.explored_files",
+            "count" => summary.files_explored as u64
+        ));
     }
     if summary.searches > 0 {
-        parts.push(format!("{} searches", summary.searches));
+        parts.push(deepseekcode_i18n::tr!(
+            "activity.summary.searches",
+            "count" => summary.searches as u64
+        ));
     }
     if summary.commands > 0 {
-        parts.push(format!("ran {} commands", summary.commands));
+        parts.push(deepseekcode_i18n::tr!(
+            "activity.summary.commands",
+            "count" => summary.commands as u64
+        ));
     }
     let mut line = parts.join(", ");
     if summary.lines_added > 0 || summary.lines_removed > 0 {
@@ -29,29 +41,41 @@ pub fn format_summary_line(summary: &ActivitySummary) -> String {
         ));
     }
     if line.is_empty() {
-        "Activity".into()
+        deepseekcode_i18n::t("nav.activity")
     } else {
         line
     }
 }
 
 /// Header variant of the turn summary, e.g. `Explore 5 files`.
-/// Base verb forms so it reads naturally in front of a duration:
-/// `Explore 5 files, Worked for 12s`. Returns `None` when there is nothing
-/// worth summarizing (the caller then shows the bare duration label).
+/// Base verb forms so it reads naturally in front of a duration.
+/// Returns `None` when there is nothing worth summarizing (the caller then
+/// shows the bare duration label).
 pub fn format_summary_header(summary: &ActivitySummary) -> Option<String> {
     let mut parts = Vec::new();
     if summary.files_edited > 0 {
-        parts.push(format!("Edit {} files", summary.files_edited));
+        parts.push(deepseekcode_i18n::tr!(
+            "activity.summary.edit_files",
+            "count" => summary.files_edited as u64
+        ));
     }
     if summary.files_explored > 0 {
-        parts.push(format!("Explore {} files", summary.files_explored));
+        parts.push(deepseekcode_i18n::tr!(
+            "activity.summary.explore_files",
+            "count" => summary.files_explored as u64
+        ));
     }
     if summary.searches > 0 {
-        parts.push(format!("{} searches", summary.searches));
+        parts.push(deepseekcode_i18n::tr!(
+            "activity.summary.searches",
+            "count" => summary.searches as u64
+        ));
     }
     if summary.commands > 0 {
-        parts.push(format!("Run {} commands", summary.commands));
+        parts.push(deepseekcode_i18n::tr!(
+            "activity.summary.run_commands",
+            "count" => summary.commands as u64
+        ));
     }
     if parts.is_empty() {
         None
@@ -93,12 +117,18 @@ pub fn format_leaf_line(leaf: &ActivityLeaf) -> String {
 
     if leaf.kind == ActivityKind::UserMessage {
         if let Some(text) = &leaf.text {
-            return format!("{prefix}{}", format_message_preview("You", text));
+            return format!(
+                "{prefix}{}",
+                format_message_preview(&deepseekcode_i18n::t("activity.you"), text)
+            );
         }
     }
     if leaf.kind == ActivityKind::AssistantMessage {
         if let Some(text) = &leaf.text {
-            return format!("{prefix}{}", format_message_preview("Assistant", text));
+            return format!(
+                "{prefix}{}",
+                format_message_preview(&deepseekcode_i18n::t("activity.assistant"), text)
+            );
         }
     }
     if leaf.kind == ActivityKind::Permission {
@@ -111,7 +141,8 @@ pub fn format_leaf_line(leaf: &ActivityLeaf) -> String {
             } else {
                 command.clone()
             };
-            let mut line = format!("{prefix}Running {cmd}");
+            let mut line = format!("{prefix}");
+            line.push_str(&deepseekcode_i18n::tr!("activity.leaf.run", "command" => cmd.as_str()));
             if let Some(text) = &leaf.text {
                 let preview = bash_stream_preview(text);
                 if !preview.is_empty() {
@@ -132,7 +163,7 @@ pub fn format_leaf_line(leaf: &ActivityLeaf) -> String {
         } else {
             format!("{} {}", leaf.verb, object)
         };
-        return format!("{prefix}{base} (stale — timed out)");
+        return format!("{prefix}{base} ({})", deepseekcode_i18n::t("terminal.idle"));
     }
 
     let object = format_target(&leaf.target);
@@ -188,22 +219,21 @@ fn format_meta(kind: &ActivityKind, meta: &ActivityMeta) -> String {
         ActivityKind::Write | ActivityKind::Edit | ActivityKind::ApplyPatch => diff_meta(meta),
         ActivityKind::Grep | ActivityKind::WebSearch => meta
             .match_count
-            .map(|c| format!("{c} matches"))
+            .map(|c| deepseekcode_i18n::tr!("activity.matches", "count" => c as u64))
             .unwrap_or_default(),
         ActivityKind::Glob | ActivityKind::List => meta
             .entry_count
             .or(meta.file_count)
-            .map(|c| format!("{c} items"))
+            .map(|c| deepseekcode_i18n::tr!("tool.result.list", "count" => c as u64))
             .unwrap_or_default(),
         ActivityKind::Bash => {
-            if meta.exit_code.is_some() {
-                meta.exit_code
-                    .map(|c| format!("exit {c}"))
-                    .unwrap_or_default()
-            } else if meta.duration_ms.is_some() {
-                meta.duration_ms
-                    .map(|ms| format!("{ms}ms"))
-                    .unwrap_or_default()
+            if let Some(code) = meta.exit_code {
+                deepseekcode_i18n::tr!("tool.result.bash", "code" => code)
+            } else if let Some(ms) = meta.duration_ms {
+                deepseekcode_i18n::tr!(
+                    "activity.duration_ms",
+                    "ms" => deepseekcode_i18n::count(ms)
+                )
             } else {
                 String::new()
             }
@@ -211,11 +241,11 @@ fn format_meta(kind: &ActivityKind, meta: &ActivityMeta) -> String {
         ActivityKind::TodoWrite => {
             let pending = meta
                 .todo_pending
-                .map(|c| format!("{c} pending"))
+                .map(|c| deepseekcode_i18n::tr!("todo.status.pending", "count" => c as u64))
                 .unwrap_or_default();
             let active = meta
                 .todo_in_progress
-                .map(|c| format!("{c} active"))
+                .map(|c| deepseekcode_i18n::tr!("todo.status.active", "count" => c as u64))
                 .unwrap_or_default();
             match (pending.is_empty(), active.is_empty()) {
                 (false, false) => format!("{pending}, {active}"),
@@ -227,12 +257,10 @@ fn format_meta(kind: &ActivityKind, meta: &ActivityMeta) -> String {
         ActivityKind::Reasoning => meta
             .duration_ms
             .map(|ms| {
-                let secs = ms / 1000;
-                if secs == 0 {
-                    "<1s".into()
-                } else {
-                    format!("{secs}s")
-                }
+                deepseekcode_i18n::tr!(
+                    "activity.duration_ms",
+                    "ms" => deepseekcode_i18n::count(ms)
+                )
             })
             .unwrap_or_default(),
         _ => String::new(),
@@ -350,7 +378,7 @@ mod tests {
         };
         assert_eq!(
             format_summary_header(&mixed).as_deref(),
-            Some("Edit 2 files, Run 1 commands")
+            Some("Edit 2 files, Run 1 command")
         );
         assert_eq!(format_summary_header(&ActivitySummary::default()), None);
     }

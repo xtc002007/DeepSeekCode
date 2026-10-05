@@ -12,10 +12,7 @@ use deepseekcode_schema::session::{
 };
 use deepseekcode_schema::todo::TodoItem;
 use deepseekcode_sdk::{client::DeepSeekCodeClient, EmbeddedEngine, EventStreamItem};
-use deepseekcode_types::{
-    MessageId, SessionId, CONFIG_FILE, DIAGNOSTICS_ARCHIVE_PREFIX, PRODUCT_NAME,
-    SESSION_EXPORT_PREFIX,
-};
+use deepseekcode_types::{MessageId, SessionId, DIAGNOSTICS_ARCHIVE_PREFIX, SESSION_EXPORT_PREFIX};
 use futures::{SinkExt, StreamExt};
 use gpui::*;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -191,6 +188,10 @@ pub struct WorkspaceView {
     terminals: Vec<TerminalTab>,
     active_terminal: usize,
     next_terminal_id: usize,
+    /// Session-independent bash transcripts (see `BashTranscript`): terminal
+    /// tabs are global while `activity.detail_store` is rebuilt per session,
+    /// so tab content is mirrored here or tabs go blank on session switch.
+    bash_transcripts: HashMap<String, crate::activity_timeline::BashTranscript>,
     terminal_focus: FocusHandle,
     pub(crate) session_busy: bool,
     session_status: SharedString,
@@ -226,6 +227,7 @@ pub struct WorkspaceView {
     export_sanitize: bool,
     prompt_delivery: PromptDelivery,
     theme: ThemeId,
+    language: deepseekcode_i18n::LanguagePref,
     server_url: Option<String>,
     server_password: Option<String>,
     attachments: Vec<PromptAttachment>,
@@ -274,39 +276,39 @@ impl WorkspaceView {
         let api_key_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
             input.set_element_id("api-key-input", cx);
-            input.set_placeholder("sk-…", cx);
+            input.set_placeholder(deepseekcode_i18n::t("workspace.api_key_placeholder"), cx);
             input.set_masked(true, cx);
             input
         });
         let base_url_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
             input.set_element_id("base-url-input", cx);
-            input.set_placeholder("https://api.example.com/v1 (optional)", cx);
+            input.set_placeholder(deepseekcode_i18n::t("workspace.base_url_placeholder"), cx);
             input
         });
         let custom_model_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
             input.set_element_id("custom-model-input", cx);
-            input.set_placeholder("e.g. openai/gpt-4o, deepseek/deepseek-chat", cx);
+            input.set_placeholder(deepseekcode_i18n::t("workspace.model_example"), cx);
             input
         });
         let server_url_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
             input.set_element_id("server-url-input", cx);
-            input.set_placeholder("http://127.0.0.1:4096 (remote server URL)", cx);
+            input.set_placeholder(deepseekcode_i18n::t("workspace.server_url_example"), cx);
             input
         });
         let server_password_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
             input.set_element_id("server-password-input", cx);
-            input.set_placeholder("Server password (optional)", cx);
+            input.set_placeholder(deepseekcode_i18n::t("workspace.password_optional"), cx);
             input.set_masked(true, cx);
             input
         });
         let worktree_branch_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
             input.set_element_id("worktree-branch-input", cx);
-            input.set_placeholder("feature/my-branch (optional)", cx);
+            input.set_placeholder(deepseekcode_i18n::t("workspace.branch_optional"), cx);
             input
         });
         let file_editor_input = cx.new(crate::file_editor_input::FileEditorInput::new);
@@ -327,32 +329,35 @@ impl WorkspaceView {
         let session_title_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
             input.set_element_id("session-title-input", cx);
-            input.set_placeholder("Session title", cx);
+            input.set_placeholder(deepseekcode_i18n::t("session.title_placeholder"), cx);
             input.set_key_context("SessionTitleInput", cx);
             input
         });
         let permission_allow_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
             input.set_element_id("permission-allow-input", cx);
-            input.set_placeholder("allow rules (one per line)", cx);
+            input.set_placeholder(
+                deepseekcode_i18n::t("workspace.allow_rules_placeholder"),
+                cx,
+            );
             input
         });
         let permission_deny_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
             input.set_element_id("permission-deny-input", cx);
-            input.set_placeholder("Optional feedback when denying…", cx);
+            input.set_placeholder(deepseekcode_i18n::t("policy.feedback_placeholder"), cx);
             input
         });
         let question_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
             input.set_element_id("question-input", cx);
-            input.set_placeholder("Your answer…", cx);
+            input.set_placeholder(deepseekcode_i18n::t("workspace.answer_placeholder"), cx);
             input
         });
         let policy_pattern_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
             input.set_element_id("policy-pattern-input", cx);
-            input.set_placeholder("pattern (e.g. git * or .deepseekcode/plan/**)", cx);
+            input.set_placeholder(deepseekcode_i18n::t("workspace.pattern_placeholder"), cx);
             input
         });
         let home_view = cx.new(HomeView::new);
@@ -423,6 +428,7 @@ impl WorkspaceView {
             terminals: Vec::new(),
             active_terminal: 0,
             next_terminal_id: 1,
+            bash_transcripts: HashMap::new(),
             terminal_focus: cx.focus_handle(),
             session_busy: false,
             session_status: "Ready".into(),
@@ -457,6 +463,7 @@ impl WorkspaceView {
             export_sanitize: true,
             prompt_delivery: prefs.prompt_delivery,
             theme: prefs.theme,
+            language: prefs.language,
             server_url: prefs.server_url,
             server_password: prefs.server_password,
             attachments: Vec::new(),
@@ -501,6 +508,12 @@ impl WorkspaceView {
             });
         }
         view.preload_home_projects(cx);
+        // User Settings win over project config: a pinned language in
+        // preferences.json applies here (lib.rs already applied the config).
+        // `Auto` keeps whatever lib.rs resolved (config or OS detection).
+        if prefs.language != deepseekcode_i18n::LanguagePref::Auto {
+            deepseekcode_i18n::init_from_preference(prefs.language);
+        }
         view
     }
 
@@ -779,8 +792,11 @@ impl WorkspaceView {
                             "session exported"
                         );
                         rfd::MessageDialog::new()
-                            .set_title("Session exported")
-                            .set_description(format!("Saved to {}", path.display()))
+                            .set_title(&deepseekcode_i18n::t("session.exported"))
+                            .set_description(&deepseekcode_i18n::tr!(
+                                "session.saved_to",
+                                "path" => path.display().to_string()
+                            ))
                             .show();
                     }
                 }
@@ -840,13 +856,49 @@ impl WorkspaceView {
                 .await
             {
                 let _ = view.update(cx, |this, cx| {
-                    if this.project_dir.as_ref().map(|p| p.display().to_string()) != Some(path_str)
+                    if this.project_dir.as_ref().map(|p| p.display().to_string())
+                        != Some(path_str.clone())
                     {
                         this.refresh_project_nav_from_client(cx);
                         return;
                     }
+                    // Optimistic nav insert: the session list is a load-once
+                    // cache (projects with non-empty rows are skipped on
+                    // refresh), so without this the new session stays
+                    // invisible until a full reload. Later authoritative
+                    // fetches replace the whole row vec — no duplicates.
+                    let nav_item = crate::layout::SessionNavItem {
+                        id: session.id,
+                        title: session
+                            .title
+                            .clone()
+                            .filter(|t| !t.trim().is_empty())
+                            .unwrap_or_else(|| {
+                                deepseekcode_i18n::t("workspace.new_session_short").to_string()
+                            }),
+                        updated_at: session.updated_at.to_rfc3339(),
+                        agent: session.agent.clone(),
+                        running: false,
+                    };
+                    if let Some(nav) = this
+                        .project_nav
+                        .iter_mut()
+                        .find(|n| project_paths_equal(&n.path, &path_str))
+                    {
+                        nav.sessions.retain(|s| s.id != session.id);
+                        nav.sessions.insert(0, nav_item);
+                    } else {
+                        this.project_nav.push(ProjectNavItem {
+                            path: path_str.clone(),
+                            sessions: vec![nav_item],
+                        });
+                    }
+                    this.ensure_session_visible_in_nav(session.id);
                     this.hydrate_generation.fetch_add(1, Ordering::SeqCst);
                     this.session_id = Some(session.id);
+                    // New session owns no tabs yet: pin the cursor so the
+                    // post-hydrate shell guarantee becomes the active tab.
+                    this.fix_active_terminal_visible();
                     this.activity.since_seq = 0;
                     this.context_usage = ContextUsageState::default();
                     this.sync_context_window();
@@ -902,6 +954,9 @@ impl WorkspaceView {
         self.refresh_revert_staged(cx);
         self.refresh_session_plans(cx);
         self.session_menu_open = false;
+        // Tabs are session-scoped: land the cursor on this session's tab so
+        // input/render never address the previous session's terminals.
+        self.fix_active_terminal_visible();
         cx.notify();
     }
 
@@ -1201,7 +1256,7 @@ impl WorkspaceView {
 
     fn current_session_title(&self) -> String {
         let Some(session_id) = self.session_id else {
-            return "Session".into();
+            return deepseekcode_i18n::t("workspace.session_placeholder");
         };
         for nav in &self.project_nav {
             if let Some(item) = nav.sessions.iter().find(|s| s.id == session_id) {
@@ -1211,7 +1266,7 @@ impl WorkspaceView {
         self.session_first_prompts
             .get(&session_id)
             .cloned()
-            .unwrap_or_else(|| "新会话".into())
+            .unwrap_or_else(|| deepseekcode_i18n::t("workspace.new_session_short"))
     }
 
     fn update_session_title_in_nav(&mut self, session_id: SessionId, title: String) {
@@ -1633,6 +1688,10 @@ impl WorkspaceView {
                 for event in replay {
                     this.apply_event(event, cx);
                 }
+                // Every historical bash execution becomes a terminal tab backed
+                // by the session-independent transcript store (which survives
+                // later session switches), next to at least one live shell.
+                this.sync_all_bash_terminal_tabs(cx);
                 this.restore_pending_question_from_events(cx);
                 cx.notify();
             });
@@ -1708,10 +1767,7 @@ Describe this project so the AI assistant has context.\n\n\
             return None;
         }
         match std::fs::write(&agents, TEMPLATE) {
-            Ok(()) => Some(
-                "Created AGENTS.md — edit it to describe your project, then send your prompt."
-                    .into(),
-            ),
+            Ok(()) => Some(deepseekcode_i18n::t("workspace.agents_created")),
             Err(e) => {
                 tracing::warn!(
                     target: deepseekcode_telemetry::DESKTOP,
@@ -1720,10 +1776,7 @@ Describe this project so the AI assistant has context.\n\n\
                     error = %e,
                     "failed to create AGENTS.md"
                 );
-                Some(format!(
-                    "Missing AGENTS.md: add AGENTS.md to the project root (or instructions in \
-                     {CONFIG_FILE} for {PRODUCT_NAME}) before prompting."
-                ))
+                Some(deepseekcode_i18n::t("workspace.no_project_loaded"))
             }
         }
     }
@@ -1895,6 +1948,24 @@ Describe this project so the AI assistant has context.\n\n\
                 }
             }
             let _ = view.update(cx, |this, cx| {
+                // Destroy live server shells before dropping their tabs,
+                // otherwise every project switch leaks PTY processes.
+                let live: Vec<String> = this
+                    .terminals
+                    .iter()
+                    .filter_map(|t| t.state.pty_id.clone())
+                    .collect();
+                if !live.is_empty() {
+                    let client_slot = Arc::clone(&this.client);
+                    cx.spawn(async move |_view, _cx| {
+                        if let Some(client) = lock_sdk_client(&client_slot).await {
+                            for pty_id in live {
+                                let _ = client.destroy_pty(&pty_id).await;
+                            }
+                        }
+                    })
+                    .detach();
+                }
                 this.terminals.clear();
                 this.active_terminal = 0;
                 this.next_terminal_id = 1;
@@ -2316,14 +2387,59 @@ Describe this project so the AI assistant has context.\n\n\
     pub(crate) fn add_terminal_tab(&mut self, cx: &mut Context<Self>) {
         let id = self.next_terminal_id;
         self.next_terminal_id += 1;
-        let title = format!("Shell {}", self.terminals.len() + 1);
-        self.terminals.push(TerminalTab::new(id, title));
+        let title = deepseekcode_i18n::tr!(
+            "terminal.shell_named",
+            "name" => (self.terminals.len() + 1) as u64
+        );
+        let session_id = self.session_id;
+        self.terminals.push(TerminalTab::new(id, title, session_id));
         self.active_terminal = self.terminals.len().saturating_sub(1);
         self.connect_terminal_tab(self.active_terminal, cx);
         cx.notify();
     }
 
-    pub(crate) fn switch_terminal_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+    /// Vec indices of the tabs belonging to the current session, in order.
+    /// The Terminal page renders exactly this subset; UI callbacks carry
+    /// positions into it, never raw vec indices.
+    pub(crate) fn visible_terminal_indices(&self) -> Vec<usize> {
+        self.terminals
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| tab.session_id == self.session_id)
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    /// Keep `active_terminal` pointing at a tab of the current session.
+    /// Called after session switches, tab closes, and history syncs so the
+    /// input/render paths never address another session's tab.
+    pub(crate) fn fix_active_terminal_visible(&mut self) {
+        if self
+            .terminals
+            .get(self.active_terminal)
+            .is_some_and(|tab| tab.session_id == self.session_id)
+        {
+            return;
+        }
+        self.active_terminal = self
+            .terminals
+            .iter()
+            .position(|tab| tab.session_id == self.session_id)
+            .unwrap_or(0);
+    }
+
+    /// Put keyboard focus into the terminal so typing reaches the shell
+    /// immediately after clicking a tab / `+` (otherwise keystrokes keep
+    /// going to the previously focused input and the terminal looks dead).
+    pub(crate) fn focus_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.terminal_focus, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn switch_terminal_tab(&mut self, visible: usize, cx: &mut Context<Self>) {
+        let Some(&index) = self.visible_terminal_indices().get(visible) else {
+            return;
+        };
         if index < self.terminals.len() {
             self.active_terminal = index;
             let needs_connect = self.terminals.get(index).is_some_and(|tab| {
@@ -2342,6 +2458,10 @@ Describe this project so the AI assistant has context.\n\n\
             tab.state.connected = false;
             tab.state.input_tx = None;
             tab.state.pty_id = None;
+            // Detach a failed agent PTY so the tab falls back to its
+            // transcript instead of pointing at a dead session.
+            tab.agent_pty_id = None;
+            tab.state.pty_live = false;
             tab.state.connect_error = Some(message.into());
         }
     }
@@ -2359,9 +2479,14 @@ Describe this project so the AI assistant has context.\n\n\
         let buffer = Arc::clone(&tab.buffer);
         let grid = Arc::clone(&tab.grid);
         let tab_id = tab.id;
+        // Take the previous PTY id (if any) so reconnecting never orphans a
+        // server shell: it is destroyed once the client is in hand below.
+        let old_pty_id = self
+            .terminals
+            .get_mut(tab_index)
+            .and_then(|tab| tab.state.pty_id.take());
         if let Some(tab) = self.terminals.get_mut(tab_index) {
             tab.state.input_tx = None;
-            tab.state.pty_id = None;
             tab.state.connect_error = None;
         }
         let client_slot = Arc::clone(&self.client);
@@ -2384,15 +2509,24 @@ Describe this project so the AI assistant has context.\n\n\
                     "pty connection failed"
                 );
                 let _ = view.update(cx, |this, cx| {
-                    this.mark_terminal_connect_failed(tab_id, "embedded client not ready");
+                    this.mark_terminal_connect_failed(
+                        tab_id,
+                        deepseekcode_i18n::t("terminal.client_not_ready"),
+                    );
                     cx.notify();
                 });
                 return;
             };
+            if let Some(old) = old_pty_id {
+                let _ = client.destroy_pty(&old).await;
+            }
             let pty_id = match client.create_pty(Some(24), Some(80)).await {
                 Ok(id) => id,
                 Err(e) => {
-                    let reason = format!("create PTY failed: {e}");
+                    let reason = deepseekcode_i18n::tr!(
+                        "terminal.create_pty_failed",
+                        "error" => e.to_string()
+                    );
                     tracing::warn!(
                         target: deepseekcode_telemetry::DESKTOP,
                             run_id = %deepseekcode_telemetry::current_run_id(),
@@ -2413,6 +2547,12 @@ Describe this project so the AI assistant has context.\n\n\
                 ws_path.push_str(&format!("?ticket={ticket}"));
             }
             let ws_url = client.ws_url(&ws_path);
+            // The handshake must carry the project directory: without it the
+            // server validates the PTY against its own cwd and rejects the
+            // upgrade (403/404) whenever the app was launched elsewhere —
+            // a shell that looks idle but can never receive input.
+            let ws_request =
+                crate::terminal_vscode::pty_ws_request(&ws_url, client.directory());
 
             let _ = view.update(cx, |this, cx| {
                 if let Some(tab) = this.terminals.iter_mut().find(|t| t.id == tab_id) {
@@ -2422,10 +2562,14 @@ Describe this project so the AI assistant has context.\n\n\
                 cx.notify();
             });
 
-            let ws = match connect_async(&ws_url).await {
+            let ws = match connect_async(ws_request).await {
                 Ok((ws, _)) => ws,
                 Err(e) => {
-                    let reason = format!("WebSocket connect failed ({ws_url}): {e}");
+                    let reason = deepseekcode_i18n::tr!(
+                        "terminal.websocket_failed",
+                        "url" => ws_url.as_str(),
+                        "error" => e.to_string()
+                    );
                     tracing::warn!(
                         target: deepseekcode_telemetry::DESKTOP,
                             run_id = %deepseekcode_telemetry::current_run_id(),
@@ -2451,6 +2595,9 @@ Describe this project so the AI assistant has context.\n\n\
             });
 
             let (mut write, mut read) = ws.split();
+            // First live frame flips the tab from transcript fallback to the
+            // real grid view (see `TerminalState::pty_live`).
+            let mut live_marked = false;
             loop {
                 tokio::select! {
                     msg = read.next() => {
@@ -2466,6 +2613,27 @@ Describe this project so the AI assistant has context.\n\n\
                                 *buffer.lock().await = rendered;
                             }
                             _ => break,
+                        }
+                        // History replay (if any) goes in right AFTER the
+                        // first live bytes (shell banner), so the tab reads
+                        // banner → replay → live prompt, like the original.
+                        let replay = if !live_marked {
+                            live_marked = true;
+                            view.update(cx, |this, _cx| {
+                                this.terminals.iter_mut().find(|t| t.id == tab_id).and_then(
+                                    |tab| {
+                                        tab.state.pty_live = true;
+                                        tab.pending_replay.take()
+                                    },
+                                )
+                            })
+                            .ok()
+                            .flatten()
+                        } else {
+                            None
+                        };
+                        if let Some(bytes) = replay {
+                            grid.lock().await.write(&bytes);
                         }
                         let _ = view.update(cx, |this, cx| {
                             this.refresh_terminal_output_for_tab(tab_id);
@@ -2521,7 +2689,14 @@ Describe this project so the AI assistant has context.\n\n\
 
     pub(crate) fn send_terminal_input(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
         let idx = self.active_terminal;
-        let Some(tab) = self.terminals.get(idx) else {
+        // Session scoping applies to input too: keystrokes must never reach
+        // another session's shell (e.g. focus lingering after a switch while
+        // the visible list is empty).
+        let Some(tab) = self
+            .terminals
+            .get(idx)
+            .filter(|tab| tab.session_id == self.session_id)
+        else {
             return;
         };
         let Some(input_tx) = tab.state.input_tx.clone() else {
@@ -2547,6 +2722,164 @@ Describe this project so the AI assistant has context.\n\n\
         cx.notify();
     }
 
+    /// Attach a tab to a live agent PTY: the placeholder transcript tab
+    /// morphs into the real running terminal (same grid/input pipeline as a
+    /// hand-opened shell). Idempotent per `(tab, pty_id)`.
+    pub(crate) fn attach_agent_pty_tab(
+        &mut self,
+        detail_key: &str,
+        pty_id: &str,
+        session: Option<SessionId>,
+        cx: &mut Context<Self>,
+    ) {
+        let tab_idx = self.ensure_bash_terminal_tab(detail_key, cx, session);
+        let (grid, buffer, tab_id) = match self.terminals.get(tab_idx) {
+            Some(tab) => (
+                Arc::clone(&tab.grid),
+                Arc::clone(&tab.buffer),
+                tab.id,
+            ),
+            None => return,
+        };
+        if let Some(tab) = self.terminals.get_mut(tab_idx) {
+            if tab.agent_pty_id.as_deref() == Some(pty_id)
+                && (tab.state.connected || tab.state.pty_connecting)
+            {
+                return;
+            }
+            tab.agent_pty_id = Some(pty_id.to_string());
+            tab.state.pty_live = false;
+            tab.state.input_tx = None;
+            tab.state.pty_id = None;
+            tab.state.connect_error = None;
+            tab.state.pty_connecting = true;
+        }
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        if let Some(tab) = self.terminals.get_mut(tab_idx) {
+            tab.state.input_tx = Some(input_tx.clone());
+        }
+        let client_slot = Arc::clone(&self.client);
+        let pty_id = pty_id.to_string();
+        cx.spawn(async move |view, cx| {
+            let client = lock_sdk_client(&client_slot).await;
+            let Some(client) = client else {
+                let _ = view.update(cx, |this, cx| {
+                    this.mark_terminal_connect_failed(
+                        tab_id,
+                        deepseekcode_i18n::t("terminal.client_not_ready"),
+                    );
+                    cx.notify();
+                });
+                return;
+            };
+            grid.lock().await.reset();
+            // Agent PTYs need no ticket (REST auth middleware covers the
+            // route); the project directory header is the ownership proof.
+            let ws_url = client.ws_url(&format!("/api/v1/agent-pty/{pty_id}/connect"));
+            let ws_request =
+                crate::terminal_vscode::pty_ws_request(&ws_url, client.directory());
+            let ws = match connect_async(ws_request).await {
+                Ok((ws, _)) => ws,
+                Err(e) => {
+                    let reason = deepseekcode_i18n::tr!(
+                        "terminal.websocket_failed",
+                        "url" => ws_url.as_str(),
+                        "error" => e.to_string()
+                    );
+                    tracing::warn!(
+                        target: deepseekcode_telemetry::DESKTOP,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
+                        tab_id,
+                        reason = %reason,
+                        "agent pty connection failed"
+                    );
+                    let _ = view.update(cx, |this, cx| {
+                        this.mark_terminal_connect_failed(tab_id, reason);
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            let _ = view.update(cx, |this, cx| {
+                if let Some(tab) = this.terminals.iter_mut().find(|t| t.id == tab_id) {
+                    tab.state.connected = true;
+                    tab.state.pty_connecting = false;
+                    tab.state.connect_error = None;
+                }
+                cx.notify();
+            });
+
+            let (mut write, mut read) = ws.split();
+            let mut live_marked = false;
+            loop {
+                tokio::select! {
+                    msg = read.next() => {
+                        match msg {
+                            Some(Ok(Message::Binary(data))) => {
+                                grid.lock().await.write(&data);
+                                let text = grid.lock().await.render_text();
+                                *buffer.lock().await = text;
+                            }
+                            Some(Ok(Message::Text(text))) => {
+                                grid.lock().await.write(text.as_bytes());
+                                let rendered = grid.lock().await.render_text();
+                                *buffer.lock().await = rendered;
+                            }
+                            _ => break,
+                        }
+                        // History replay (if any) goes in right AFTER the
+                        // first live bytes (shell banner), so the tab reads
+                        // banner → replay → live prompt, like the original.
+                        let replay = if !live_marked {
+                            live_marked = true;
+                            view.update(cx, |this, _cx| {
+                                this.terminals.iter_mut().find(|t| t.id == tab_id).and_then(
+                                    |tab| {
+                                        tab.state.pty_live = true;
+                                        tab.pending_replay.take()
+                                    },
+                                )
+                            })
+                            .ok()
+                            .flatten()
+                        } else {
+                            None
+                        };
+                        if let Some(bytes) = replay {
+                            grid.lock().await.write(&bytes);
+                        }
+                        let _ = view.update(cx, |this, cx| {
+                            this.refresh_terminal_output_for_tab(tab_id);
+                            cx.notify();
+                        });
+                    }
+                    input = input_rx.recv() => {
+                        match input {
+                            Some(data) => {
+                                if write.send(Message::Binary(data.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+
+            let _ = view.update(cx, |this, cx| {
+                if let Some(tab) = this.terminals.iter_mut().find(|t| t.id == tab_id) {
+                    tab.state.connected = false;
+                    tab.state.pty_connecting = false;
+                    tab.state.input_tx = None;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub(crate) fn create_worktree(&mut self, cx: &mut Context<Self>) {
         let branch_text = self.worktree_branch_input.read(cx).text();
         let branch = if branch_text.is_empty() {
@@ -2562,11 +2895,17 @@ Describe this project so the AI assistant has context.\n\n\
             };
             let result = client.create_worktree(branch.as_deref()).await;
             let message = match &result {
-                Ok(entry) => format!(
-                    "Created worktree at {}",
-                    entry.get("path").and_then(|v| v.as_str()).unwrap_or("?")
+                Ok(entry) => deepseekcode_i18n::tr!(
+                    "git.worktree_created",
+                    "path" => entry
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
                 ),
-                Err(e) => format!("Failed to create worktree: {e}"),
+                Err(e) => deepseekcode_i18n::tr!(
+                    "git.worktree_create_failed",
+                    "error" => e.to_string()
+                ),
             };
             let worktrees = client.list_worktrees().await.unwrap_or_default();
             let _ = view.update(cx, |this, cx| {
@@ -3066,6 +3405,14 @@ Describe this project so the AI assistant has context.\n\n\
                 }
                 self.set_session_busy(true, format!("Running tool: {name}"));
                 if let Some(id) = event.payload["tool_call_id"].as_str() {
+                    // Join key: progress chunks travel under the internal id.
+                    if let Some(internal) =
+                        event.payload["internal_tool_call_id"].as_str()
+                    {
+                        self.activity
+                            .detail_store
+                            .alias_tool_call(internal, id);
+                    }
                     self.activity.detail_store.insert(
                         id,
                         crate::activity_timeline::DetailPayload {
@@ -3082,6 +3429,16 @@ Describe this project so the AI assistant has context.\n\n\
                             command,
                         },
                     );
+                    // Every LLM shell execution gets a terminal tab immediately
+                    // (no focus steal) so it is findable in the Terminal page
+                    // with live output while it runs (plus a live shell next
+                    // to the transcripts so the user always has somewhere to
+                    // type). Tabs are tagged with the owning session.
+                    // `powershell` delegates to the bash core, hence covered.
+                    if matches!(name.as_str(), "bash" | "powershell") {
+                        let session = event.session_id;
+                        self.ensure_bash_terminal_tab(id, cx, session);
+                    }
                 }
             }
             EventKind::ToolCompleted => {
@@ -3098,16 +3455,15 @@ Describe this project so the AI assistant has context.\n\n\
                         .detail_store
                         .get(id)
                         .and_then(|d| d.output.clone());
-                    let merged_display = if name == "bash" {
-                        activity_click_router::merge_bash_completed_display(
+                    // Persist structured JSON for bash (stdout/stderr/exit_code
+                    // stay inspectable in the Terminal INPUT/OUTPUT view);
+                    // the renderer derives display text via `parse_bash_result`.
+                    let stored_output = if name == "bash" {
+                        let merged = crate::terminal_vscode::merge_bash_result_json(
                             streamed.as_deref(),
                             &output,
-                        )
-                    } else {
-                        String::new()
-                    };
-                    let stored_output = if name == "bash" && !merged_display.is_empty() {
-                        merged_display.clone()
+                        );
+                        truncate_text(&merged, 50_000)
                     } else {
                         truncate_text(
                             &serde_json::to_string_pretty(&output)
@@ -3132,16 +3488,35 @@ Describe this project so the AI assistant has context.\n\n\
                                 .map(String::from),
                             url: None,
                             web_preview: None,
-                            // Keep the command captured on ToolStarted.
+                            // Keep the command captured on ToolStarted; if
+                            // Started was missed (gap backfill), fall back to
+                            // the command echoed in completion metadata.
                             command: self
                                 .activity
                                 .detail_store
                                 .get(id)
-                                .and_then(|d| d.command.clone()),
+                                .and_then(|d| d.command.clone())
+                                .or_else(|| {
+                                    event.payload["metadata"]["command"]
+                                        .as_str()
+                                        .map(str::to_string)
+                                })
+                                .or_else(|| {
+                                    event.payload["metadata"]["script"]
+                                        .as_str()
+                                        .map(str::to_string)
+                                }),
                         },
                     );
-                    if name == "bash" {
+                    if matches!(name.as_str(), "bash" | "powershell") {
+                        // Publish final output into the transcript, then drop
+                        // the finished tab: completed commands are cleared,
+                        // never kept. The transcript survives, so clicking the
+                        // activity leaf reopens it on demand.
+                        let session = event.session_id;
+                        self.ensure_bash_terminal_tab(id, cx, session);
                         self.refresh_bash_terminal_output(id, cx);
+                        self.close_bash_terminal_for_detail(id, cx);
                     }
                 }
                 if let Some(path) = extract_tool_path(&name, &event.payload) {
@@ -3175,7 +3550,7 @@ Describe this project so the AI assistant has context.\n\n\
                         input: None,
                         output: None,
                         todos: Some(todos),
-                        title: Some("Updated todos".into()),
+                        title: Some(deepseekcode_i18n::t("activity.leaf.todo_write")),
                         url: None,
                         web_preview: None,
                         command: None,
@@ -3183,12 +3558,50 @@ Describe this project so the AI assistant has context.\n\n\
                 );
             }
             EventKind::ToolProgress => {
-                if let Some(id) = event.payload["tool_call_id"].as_str() {
+                if let Some(raw_id) = event.payload["tool_call_id"].as_str() {
+                    // Join key: progress travels under the INTERNAL id while
+                    // Started/Completed use the outer one — resolve first so
+                    // live output, attach and refresh all hit the SAME call
+                    // instead of orphan entries + ghost tabs.
+                    let id = self
+                        .activity
+                        .detail_store
+                        .canonical_tool_call(raw_id)
+                        .to_string();
+                    let id = id.as_str();
+                    // Agent-PTY attach handshake (`stream == "pty"`): morph
+                    // the placeholder tab into the real running terminal.
+                    if event.payload["stream"].as_str() == Some("pty") {
+                        let chunk = event.payload["chunk"].as_str().unwrap_or("");
+                        if let Some(pty_id) = crate::terminal_vscode::parse_agent_pty_id(chunk)
+                        {
+                            self.attach_agent_pty_tab(id, &pty_id, event.session_id, cx);
+                        }
+                    }
                     // NOTE: `apply_session_event` (called above) ALREADY
                     // appended this chunk to `detail_store`. Appending again
                     // here duplicated every streamed line, so the terminal
                     // showed each output line twice. Only the live tab refresh
                     // belongs in this crate-level handler.
+                    let has_tab = self
+                        .terminals
+                        .iter()
+                        .any(|t| t.bash_detail_key.as_deref() == Some(id));
+                    if !has_tab {
+                        // Started event may have been missed (reconnect); if
+                        // this is a bash execution, materialise its tab now so
+                        // streaming output is visible live.
+                        let is_bash = self
+                            .activity
+                            .detail_store
+                            .get(id)
+                            .and_then(|d| d.command.clone())
+                            .is_some();
+                        if is_bash {
+                            let session = event.session_id;
+                            self.ensure_bash_terminal_tab(id, cx, session);
+                        }
+                    }
                     if self.bash_output_detail_ref.as_deref() == Some(id)
                         || self
                             .terminals
@@ -3228,8 +3641,8 @@ Describe this project so the AI assistant has context.\n\n\
                 let summary = event.payload["summary"]
                     .as_str()
                     .or_else(|| event.payload["detail"].as_str())
-                    .unwrap_or("Context sources refreshed")
-                    .to_string();
+                    .map(str::to_string)
+                    .unwrap_or_else(|| deepseekcode_i18n::t("workspace.context_refreshed"));
                 let _detail = event.payload["sources"]
                     .as_array()
                     .map(|sources| {
@@ -3269,10 +3682,9 @@ Describe this project so the AI assistant has context.\n\n\
                 } else {
                     self.set_session_busy(false, "Error");
                     self.composer_error = Some(if error.contains("context unavailable") {
-                        format!(
-                            "Project context is not ready. Add AGENTS.md to the project root \
-                             (or configure instructions in {CONFIG_FILE} for {PRODUCT_NAME}), \
-                             then send your prompt again."
+                        deepseekcode_i18n::tr!(
+                            "workspace.agents_not_ready",
+                            "message" => deepseekcode_i18n::t("workspace.no_project")
                         )
                     } else {
                         truncate_text(&error, 2_000)
@@ -3309,6 +3721,27 @@ Describe this project so the AI assistant has context.\n\n\
             EventKind::PlanCompleted => {
                 self.ingest_plan_completed_event(&event, cx);
             }
+        }
+        // Tail-follow on content growth: every streamed chunk or completed
+        // block keeps a bottom-pinned timeline pinned, so the newest message
+        // is never hidden below the fold. Respects manual scroll-up: the flag
+        // is only honored while `session_follow_tail` is set, which render
+        // clears the moment the user leaves the bottom.
+        match event.kind {
+            EventKind::MessageDelta
+            | EventKind::ToolProgress
+            | EventKind::ToolStarted
+            | EventKind::ToolCompleted
+            | EventKind::MessageCompleted
+            | EventKind::TodoUpdated
+            | EventKind::ProviderTurnStarted
+            | EventKind::PermissionResolved
+            | EventKind::PolicyResolved
+            | EventKind::QuestionRequested
+            | EventKind::PlanCompleted
+            | EventKind::SessionIdle
+            | EventKind::SessionInterrupted => self.maybe_scroll_session_to_tail(),
+            _ => {}
         }
         if rebuild_activity {
             let roots_before = self.activity.activity_tree.roots.len();
@@ -3373,9 +3806,9 @@ Describe this project so the AI assistant has context.\n\n\
             custom_mode: false,
         });
         let placeholder = if has_option_list && allow_custom {
-            "输入不在上述选项中的答案"
+            deepseekcode_i18n::t("workspace.question_other_hint")
         } else {
-            "Your answer…"
+            deepseekcode_i18n::t("workspace.answer_placeholder")
         };
         self.question_input.update(cx, |input, cx| {
             input.set_placeholder(placeholder, cx);
@@ -3389,17 +3822,17 @@ Describe this project so the AI assistant has context.\n\n\
         }
         let mut text = self.prompt_input.read(cx).text();
         if text.trim().is_empty()
-            || text == "Type a prompt…"
-            || text == crate::composer::COMPOSER_PLACEHOLDER
+            || text == deepseekcode_i18n::t("composer.placeholder")
+            || text == deepseekcode_i18n::t("composer.placeholder_idle")
         {
             return;
         }
         let (_, provider_id) = self.resolve_selected_model();
         if let Some(provider) = self.providers.iter().find(|p| p.id == provider_id) {
             if !provider.connected {
-                self.composer_error = Some(format!(
-                    "Provider '{}' is not connected — add an API key in Settings → AI & Providers.",
-                    provider.name
+                self.composer_error = Some(deepseekcode_i18n::tr!(
+                    "workspace.provider_not_connected",
+                    "provider" => provider.name.as_str()
                 ));
                 cx.notify();
                 return;
@@ -3408,8 +3841,9 @@ Describe this project so the AI assistant has context.\n\n\
         self.composer_error = None;
         if let Some(dir) = self.project_dir.clone() {
             if let Some(message) = Self::ensure_agents_md(&dir) {
-                self.composer_error = Some(format!(
-                    "{message} Send your prompt again after AGENTS.md is ready."
+                self.composer_error = Some(deepseekcode_i18n::tr!(
+                    "workspace.agents_not_ready",
+                    "message" => message.as_str()
                 ));
                 cx.notify();
                 return;
@@ -3567,7 +4001,7 @@ Describe this project so the AI assistant has context.\n\n\
     /// pinned to "Stopping…" with a stop button that re-issued the same no-op.
     pub(crate) fn interrupt_session(&mut self, cx: &mut Context<Self>) {
         let Some(session_id) = self.session_id else {
-            self.composer_error = Some("No active session to stop.".into());
+            self.composer_error = Some(deepseekcode_i18n::t("workspace.no_active_session"));
             self.set_session_busy(false, "Ready");
             cx.notify();
             return;
@@ -3594,10 +4028,7 @@ Describe this project so the AI assistant has context.\n\n\
             let Some(client) = client else {
                 // Previously a silent no-op: no request, no status change.
                 let _ = view.update(cx, |this, cx| {
-                    this.composer_error = Some(
-                        "Could not reach the agent to stop the task. Check the server connection."
-                            .into(),
-                    );
+                    this.composer_error = Some(deepseekcode_i18n::t("workspace.stop_unreachable"));
                     this.set_session_busy(false, "Error");
                     cx.notify();
                 });
@@ -3613,7 +4044,10 @@ Describe this project so the AI assistant has context.\n\n\
                 );
                 let _ = view.update(cx, |this, cx| {
                     // Surface the reason: the header alone said only "Error".
-                    this.composer_error = Some(format!("Stop failed: {e}"));
+                    this.composer_error = Some(deepseekcode_i18n::tr!(
+                        "workspace.stop_failed",
+                        "error" => e.to_string()
+                    ));
                     this.set_session_busy(false, "Error");
                     cx.notify();
                 });
@@ -3759,9 +4193,12 @@ Describe this project so the AI assistant has context.\n\n\
             let result = client.compact_session(session_id).await;
             let failed = result.is_err();
             let message = match result {
-                Ok(true) => "Compaction checkpoint installed".to_string(),
-                Ok(false) => "Nothing to compact".to_string(),
-                Err(e) => format!("Compaction failed: {e}"),
+                Ok(true) => deepseekcode_i18n::t("workspace.compaction_installed"),
+                Ok(false) => deepseekcode_i18n::t("workspace.nothing_to_compact"),
+                Err(e) => deepseekcode_i18n::tr!(
+                    "workspace.compaction_failed",
+                    "error" => e.to_string()
+                ),
             };
             let _ = view.update(cx, |this, cx| {
                 this.settings_catalog.compaction_message = message;
@@ -3853,8 +4290,14 @@ Describe this project so the AI assistant has context.\n\n\
                 return;
             };
             let message = match client.remove_worktree(&path).await {
-                Ok(()) => format!("Removed worktree {path}"),
-                Err(e) => format!("Failed to remove worktree: {e}"),
+                Ok(()) => deepseekcode_i18n::tr!(
+                    "git.worktree_removed",
+                    "path" => path.as_str()
+                ),
+                Err(e) => deepseekcode_i18n::tr!(
+                    "git.worktree_remove_failed",
+                    "error" => e.to_string()
+                ),
             };
             let worktrees = client.list_worktrees().await.unwrap_or_default();
             let _ = view.update(cx, |this, cx| {
@@ -3874,8 +4317,11 @@ Describe this project so the AI assistant has context.\n\n\
                 return;
             };
             let message = match client.prune_worktrees().await {
-                Ok(()) => "Pruned stale worktrees".to_string(),
-                Err(e) => format!("Failed to prune worktrees: {e}"),
+                Ok(()) => deepseekcode_i18n::t("git.worktrees_pruned"),
+                Err(e) => deepseekcode_i18n::tr!(
+                    "git.worktree_prune_failed",
+                    "error" => e.to_string()
+                ),
             };
             let worktrees = client.list_worktrees().await.unwrap_or_default();
             let _ = view.update(cx, |this, cx| {
@@ -3947,6 +4393,11 @@ Describe this project so the AI assistant has context.\n\n\
 
     fn send_policy_reply(&mut self, id: String, reply: PolicyReply, cx: &mut Context<Self>) {
         self.remove_policy_prompt(&id);
+        // Approving/denying unblocks the run, which continues at the bottom:
+        // pin the timeline there. Otherwise the viewport stays at the removed
+        // dock's old offset, which reads as "jumped to the item's top".
+        self.session_follow_tail = true;
+        self.pending_scroll_to_tail = true;
         let client_slot = Arc::clone(&self.client);
         let restore_id = id.clone();
         cx.spawn(async move |view, cx| {
@@ -3963,7 +4414,7 @@ Describe this project so the AI assistant has context.\n\n\
                     let _ = view.update(cx, |this, cx| {
                         this.sync_pending_permissions(cx);
                         this.composer_error =
-                            Some("Policy reply failed — request restored to the queue.".into());
+                            Some(deepseekcode_i18n::t("workspace.policy_reply_failed"));
                         cx.notify();
                     });
                 }
@@ -4015,7 +4466,10 @@ Describe this project so the AI assistant has context.\n\n\
                         let _ = view.update(cx, |this, cx| {
                             // Restore pending + surface error; keep typed text.
                             this.pending_question = pending;
-                            this.composer_error = Some(format!("Question answer failed: {e}"));
+                            this.composer_error = Some(deepseekcode_i18n::tr!(
+                                "workspace.question_failed",
+                                "error" => e.to_string()
+                            ));
                             cx.notify();
                         });
                     }
@@ -4157,7 +4611,7 @@ Describe this project so the AI assistant has context.\n\n\
                     for (plan, was) in this.session_plans.iter_mut().zip(prev.iter()) {
                         plan.implement_prompt_dismissed = *was;
                     }
-                    this.composer_error = Some("Dismiss failed — dock restored.".into());
+                    this.composer_error = Some(deepseekcode_i18n::t("workspace.dismiss_failed"));
                 }
                 this.refresh_session_plans(cx);
                 cx.notify();
@@ -4271,11 +4725,11 @@ Describe this project so the AI assistant has context.\n\n\
             .unwrap_or_else(|| provider_id.to_string());
         self.api_key_input.update(cx, |input, cx| {
             input.clear(cx);
-            input.set_placeholder("Enter API key (stored securely in OS keychain)", cx);
+            input.set_placeholder(deepseekcode_i18n::t("workspace.api_key_prompt"), cx);
         });
         self.base_url_input.update(cx, |input, cx| {
             input.clear(cx);
-            input.set_placeholder("Base URL (optional, e.g. https://api.openai.com/v1)", cx);
+            input.set_placeholder(deepseekcode_i18n::t("workspace.base_url_prompt"), cx);
         });
         self.api_key_dialog = Some(ApiKeyDialogState {
             provider_id: provider_id.to_string(),
@@ -4312,13 +4766,17 @@ Describe this project so the AI assistant has context.\n\n\
             })
             .unwrap_or(false);
         let label = if is_image {
-            format!(
-                "[image: {}]",
-                path.file_name().and_then(|n| n.to_str()).unwrap_or("image")
+            deepseekcode_i18n::tr!(
+                "workspace.image_reference",
+                "path" => path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("image")
             )
         } else {
-            let content =
-                std::fs::read_to_string(&path).unwrap_or_else(|e| format!("(unreadable: {e})"));
+            let content = std::fs::read_to_string(&path).unwrap_or_else(
+                |e| deepseekcode_i18n::tr!("workspace.unreadable", "error" => e.to_string()),
+            );
             truncate_preview(&content, 4_000)
         };
         self.attachments.push(PromptAttachment {
@@ -4454,10 +4912,10 @@ Describe this project so the AI assistant has context.\n\n\
                             compaction.keep.and_then(|k| k.tokens)
                         )
                     } else {
-                        "No compaction section in config (defaults apply)".into()
+                        deepseekcode_i18n::t("workspace.no_compaction_config")
                     }
                 })
-                .unwrap_or_else(|| "No project loaded".into());
+                .unwrap_or_else(|| deepseekcode_i18n::t("workspace.no_project_loaded"));
             let _ = view.update(cx, |this, cx| {
                 let skill_names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
                 let plugin_names: Vec<String> = plugins.iter().map(|p| p.name.clone()).collect();
@@ -4642,6 +5100,7 @@ Describe this project so the AI assistant has context.\n\n\
             selected_provider: self.selected_provider.clone(),
             prompt_delivery: self.prompt_delivery,
             theme: self.theme,
+            language: self.language,
             server_url: self.server_url.clone(),
             server_password: self.server_password.clone(),
             custom_models: self.custom_models.clone(),
@@ -4674,6 +5133,24 @@ Describe this project so the AI assistant has context.\n\n\
         self.theme = theme_id;
         crate::theme::DeepSeekCodeTheme::switch(cx, theme_id);
         self.persist_preferences();
+        cx.notify();
+    }
+
+    pub(crate) fn set_language(
+        &mut self,
+        pref: deepseekcode_i18n::LanguagePref,
+        cx: &mut Context<Self>,
+    ) {
+        // No-op when nothing changes, so a re-render never loops on itself.
+        if self.language == pref && deepseekcode_i18n::resolve(pref) == deepseekcode_i18n::locale()
+        {
+            return;
+        }
+        self.language = pref;
+        deepseekcode_i18n::set_preference(pref);
+        self.persist_preferences();
+        // Every visible string is read through the catalog at render time, so
+        // a single notify repaints the whole shell in the new language.
         cx.notify();
     }
 
@@ -4911,7 +5388,15 @@ Describe this project so the AI assistant has context.\n\n\
         .detach();
     }
 
-    pub(crate) fn close_terminal_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+    /// Close the tab at a *visible* (session-filtered) position.
+    pub(crate) fn close_terminal_tab(&mut self, visible: usize, cx: &mut Context<Self>) {
+        let Some(&index) = self.visible_terminal_indices().get(visible) else {
+            return;
+        };
+        self.remove_terminal_at_vec_index(index, cx);
+    }
+
+    fn remove_terminal_at_vec_index(&mut self, index: usize, cx: &mut Context<Self>) {
         if index >= self.terminals.len() {
             return;
         }
@@ -4920,10 +5405,13 @@ Describe this project so the AI assistant has context.\n\n\
             .get(index)
             .and_then(|tab| tab.state.pty_id.clone());
         self.terminals.remove(index);
-        if self.terminals.is_empty() {
+        // Vec shifted left past `index`: keep tracking the same tab.
+        if self.active_terminal > index {
+            self.active_terminal -= 1;
+        }
+        self.fix_active_terminal_visible();
+        if self.active_terminal >= self.terminals.len() {
             self.active_terminal = 0;
-        } else {
-            self.active_terminal = self.active_terminal.min(self.terminals.len() - 1);
         }
         if let Some(pty_id) = pty_id {
             let client_slot = Arc::clone(&self.client);
@@ -4937,13 +5425,15 @@ Describe this project so the AI assistant has context.\n\n\
         cx.notify();
     }
 
+    /// Drop the transcript tab for a finished command (transcript itself is
+    /// kept, so click-to-reopen from the activity leaf still works).
     fn close_bash_terminal_for_detail(&mut self, detail_key: &str, cx: &mut Context<Self>) {
         if let Some(idx) = self
             .terminals
             .iter()
             .position(|t| t.bash_detail_key.as_deref() == Some(detail_key))
         {
-            self.close_terminal_tab(idx, cx);
+            self.remove_terminal_at_vec_index(idx, cx);
         }
     }
 
@@ -5013,6 +5503,16 @@ Describe this project so the AI assistant has context.\n\n\
             }
         })
         .detach();
+        // Clamp both scroll axes into the new bounds: after a panel-width
+        // drag the old offset can point past the content (blank terminal,
+        // thumb stuck at a wrong spot) until the user scrolls by hand.
+        let offset = self.terminal_scroll.offset();
+        let max = self.terminal_scroll.max_offset();
+        let nx = f32::from(offset.x).clamp(-f32::from(max.x), 0.);
+        let ny = f32::from(offset.y).clamp(-f32::from(max.y), 0.);
+        if nx != f32::from(offset.x) || ny != f32::from(offset.y) {
+            self.terminal_scroll.set_offset(point(px(nx), px(ny)));
+        }
     }
 
     pub(crate) fn start_session_title_edit(&mut self, cx: &mut Context<Self>) {
@@ -5106,12 +5606,15 @@ Describe this project so the AI assistant has context.\n\n\
                 input.set_text(policy_text, cx);
             });
             self.policy_pattern_input.update(cx, |input, cx| {
-                input.set_placeholder("Pattern for selected rule…", cx);
+                input.set_placeholder(
+                    deepseekcode_i18n::t("workspace.pattern_for_rule_ellipsis"),
+                    cx,
+                );
                 input.set_text(String::new(), cx);
             });
             // Keep reject box as reject-only placeholder.
             self.permission_deny_input.update(cx, |input, cx| {
-                input.set_placeholder("Optional feedback when denying…", cx);
+                input.set_placeholder(deepseekcode_i18n::t("policy.feedback_placeholder"), cx);
             });
         }
     }
@@ -5312,7 +5815,10 @@ Describe this project so the AI assistant has context.\n\n\
             if let Some(client) = lock_sdk_client(&client_slot).await {
                 if let Err(e) = client.update_policy_settings(&policy, policy_mode).await {
                     let _ = view.update(cx, |this, cx| {
-                        this.composer_error = Some(format!("Failed to save policy: {e}"));
+                        this.composer_error = Some(deepseekcode_i18n::tr!(
+                            "workspace.policy_save_failed",
+                            "error" => e.to_string()
+                        ));
                         cx.notify();
                     });
                     return;
@@ -5580,10 +6086,10 @@ impl Render for WorkspaceView {
         let has_project = self.project_dir.is_some();
         self.refresh_terminal_output();
         self.update_session_follow_tail();
-        if self.pending_scroll_to_tail {
+        if let Some(leaf_id) = self.pending_scroll_to_activity_leaf.take() {
+            // Explicit navigation (todo jump, leaf click) wins over tail:
+            // it also cancels a stale tail request from the same frame.
             self.pending_scroll_to_tail = false;
-            self.session_scroll.scroll_to_bottom();
-        } else if let Some(leaf_id) = self.pending_scroll_to_activity_leaf.take() {
             if let Some(row) = activity_visible_row_index(
                 &self.activity.activity_tree,
                 &leaf_id,
@@ -5595,13 +6101,20 @@ impl Render for WorkspaceView {
                 self.session_scroll
                     .set_offset(gpui::point(gpui::px(0.), -y));
             }
+        } else if self.pending_scroll_to_tail || self.session_follow_tail {
+            // Persistent pin, not one-shot: tree rebuilds / dock open-close
+            // shift rows between frames, so a single scroll_to_bottom can land
+            // stale (reads as "jumped to item top"). Re-enforcing every frame
+            // while pinned self-heals; scrolling up clears the pin above.
+            self.pending_scroll_to_tail = false;
+            self.session_scroll.scroll_to_bottom();
         }
         if has_project && self.layout.right_panel_tab == RightPanelTab::Terminal {
-            if self.terminals.get(self.active_terminal).is_some_and(|tab| {
-                tab.bash_detail_key.is_none() && !tab.state.connected && !tab.state.pty_connecting
-            }) {
-                self.connect_terminal_tab(self.active_terminal, cx);
-            }
+            // NEVER auto-connect here: render runs on every notify, so a
+            // failing shell reconnects in a hot loop (observed in the wild:
+            // a fresh server PTY every ~70ms, tab flickering on
+            // "Connecting..."). (Re)connection happens from event handlers
+            // only: panel open, tab switch, `+`, hydrate shell guarantee.
             self.sync_terminal_pty_size(cx);
         }
 
@@ -5697,6 +6210,7 @@ impl Render for WorkspaceView {
                 self.settings_open,
                 self.settings_section,
                 self.theme,
+                self.language,
                 &self.settings_scroll,
                 &self.providers,
                 self.selected_agent.as_ref(),
@@ -5790,8 +6304,10 @@ impl WorkspaceView {
                         self.editor_read_only,
                         &self.terminals,
                         self.active_terminal,
+                        self.session_id,
                         &self.terminal_focus,
                         &self.terminal_scroll,
+                        &self.bash_transcripts,
                         "",
                         true,
                         &self.git_staged,
@@ -5832,16 +6348,19 @@ impl WorkspaceView {
                             .text_2xl()
                             .font_weight(FontWeight::BOLD)
                             .text_color(theme.text_primary)
-                            .child("DeepSeekCode"),
+                            .child(deepseekcode_i18n::t("app.name")),
                     )
-                    .child(div().text_sm().text_color(theme.text_muted).child(
-                        "Open a project from the sidebar or create AGENTS.md after opening.",
-                    ))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.text_muted)
+                            .child(deepseekcode_i18n::t("workspace.no_project")),
+                    )
                     .child(
                         div()
                             .text_xs()
                             .text_color(theme.text_disabled)
-                            .child("Rust-native AI programming environment"),
+                            .child(deepseekcode_i18n::t("app.tagline")),
                     ),
             )
     }
@@ -6077,7 +6596,10 @@ impl WorkspaceView {
                 .py_8()
                 .text_sm()
                 .text_color(theme.text_muted)
-                .child(format!("无法预览图片：{file_name}"))
+                .child(deepseekcode_i18n::tr!(
+                    "workspace.image_preview_failed",
+                    "file_name" => file_name.as_str()
+                ))
                 .into_any_element(),
         };
         div()
@@ -6191,7 +6713,7 @@ impl WorkspaceView {
                     .text_sm()
                     .font_weight(FontWeight::BOLD)
                     .text_color(theme.text_primary)
-                    .child("Question"),
+                    .child(deepseekcode_i18n::t("workspace.question")),
             )
             .child(
                 div()
@@ -6222,7 +6744,7 @@ impl WorkspaceView {
                                     }
                                 }),
                             )
-                            .child("Submit"),
+                            .child(deepseekcode_i18n::t("common.submit")),
                     ),
                 );
         } else {
@@ -6270,7 +6792,7 @@ impl WorkspaceView {
                                 this.enable_question_custom_mode(cx);
                             }),
                         )
-                        .child("Other (custom input)"),
+                        .child(deepseekcode_i18n::t("workspace.other_input")),
                 );
                 panel = panel.child(opts).child(
                     div().mt_3().child(self.question_input.clone()).child(
@@ -6292,7 +6814,7 @@ impl WorkspaceView {
                                         }
                                     }),
                                 )
-                                .child("Submit"),
+                                .child(deepseekcode_i18n::t("common.submit")),
                         ),
                     ),
                 );
@@ -6347,16 +6869,17 @@ impl WorkspaceView {
                             .text_sm()
                             .font_weight(FontWeight::BOLD)
                             .text_color(theme.text_primary)
-                            .child(format!("Connect {}", dialog.provider_name)),
+                            .child(deepseekcode_i18n::tr!(
+                                "workspace.connect_named",
+                                "provider" => dialog.provider_name.as_str()
+                            )),
                     )
                     .child(
                         div()
                             .text_xs()
                             .mt_2()
                             .text_color(theme.text_muted)
-                            .child(
-                                "Keys are stored in your OS keychain (encrypted local fallback). Leave blank to keep the existing key.",
-                            ),
+                            .child(deepseekcode_i18n::t("workspace.keychain_note")),
                     )
                     .child(
                         div()
@@ -6373,7 +6896,7 @@ impl WorkspaceView {
                             .mt_2()
                             .text_xs()
                             .text_color(theme.text_disabled)
-                            .child("Base URL (optional)"),
+                            .child(deepseekcode_i18n::t("workspace.base_url_optional")),
                     )
                     .child(
                         div()
@@ -6410,10 +6933,13 @@ impl WorkspaceView {
                                     .text_xs()
                                     .text_color(theme.text_primary)
                                     .cursor_pointer()
-                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                        this.cancel_api_key_dialog(cx);
-                                    }))
-                                    .child("Cancel"),
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.cancel_api_key_dialog(cx);
+                                        }),
+                                    )
+                                    .child(deepseekcode_i18n::t("common.cancel")),
                             )
                             .child(
                                 div()
@@ -6424,10 +6950,13 @@ impl WorkspaceView {
                                     .text_xs()
                                     .text_color(theme.text_on_accent)
                                     .cursor_pointer()
-                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                        this.confirm_api_key(cx);
-                                    }))
-                                    .child("Connect"),
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.confirm_api_key(cx);
+                                        }),
+                                    )
+                                    .child(deepseekcode_i18n::t("common.connect")),
                             ),
                     ),
             )
@@ -6783,27 +7312,35 @@ fn format_tool_input(tool: &str, input: &serde_json::Value) -> String {
     match tool {
         "bash" => input["command"]
             .as_str()
-            .unwrap_or("(no command)")
-            .to_string(),
+            .map(str::to_string)
+            .unwrap_or_else(|| deepseekcode_i18n::t("tool.detail.no_command")),
         "read" | "write" | "edit" => {
-            let path = input["path"].as_str().unwrap_or("(no path)");
+            let path = input["path"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| deepseekcode_i18n::t("tool.detail.no_path"));
             if tool == "read" {
-                format!("path: {path}")
+                deepseekcode_i18n::tr!("tool.detail.read", "path" => path)
             } else {
-                format!("path: {path}\n{}", truncate_text(&input.to_string(), 800))
+                deepseekcode_i18n::tr!(
+                    "tool.detail.write",
+                    "path" => path,
+                    "content" => truncate_text(&input.to_string(), 800),
+                    "first_line" => truncate_text(&input.to_string(), 80)
+                )
             }
         }
-        "grep" => format!(
-            "pattern: {}\npath: {}",
-            input["pattern"].as_str().unwrap_or(""),
-            input["path"].as_str().unwrap_or(".")
+        "grep" => deepseekcode_i18n::tr!(
+            "tool.detail.grep",
+            "pattern" => input["pattern"].as_str().unwrap_or(""),
+            "path" => input["path"].as_str().unwrap_or(".")
         ),
         "glob" => {
             let pattern = input["pattern"]
                 .as_str()
                 .or_else(|| input["glob_pattern"].as_str())
                 .unwrap_or("*");
-            format!("pattern: {pattern}")
+            deepseekcode_i18n::tr!("tool.detail.glob", "pattern" => pattern)
         }
         _ => serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string()),
     }
@@ -6830,7 +7367,11 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
         return text.to_string();
     }
     let truncated: String = text.chars().take(max_chars).collect();
-    format!("{truncated}\n… ({max_chars}+ chars)")
+    deepseekcode_i18n::tr!(
+        "common.truncated_chars",
+        "truncated" => truncated,
+        "max_chars" => max_chars as u64
+    )
 }
 
 fn task_session_id_from_payload(payload: &serde_json::Value) -> Option<SessionId> {
@@ -6936,7 +7477,7 @@ fn collect_git_status(dir: &std::path::Path) -> GitStatusSnapshot {
         .unwrap_or(false);
     if !is_repo {
         return GitStatusSnapshot {
-            status_message: Some("Not a git repository.".into()),
+            status_message: Some(deepseekcode_i18n::t("git.not_a_repository")),
             ..GitStatusSnapshot::default()
         };
     }
@@ -6954,7 +7495,7 @@ fn collect_git_status(dir: &std::path::Path) -> GitStatusSnapshot {
             let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
             return GitStatusSnapshot {
                 status_message: Some(if err.is_empty() {
-                    "Git status failed.".into()
+                    deepseekcode_i18n::t("git.status_failed")
                 } else {
                     err
                 }),
@@ -6963,7 +7504,10 @@ fn collect_git_status(dir: &std::path::Path) -> GitStatusSnapshot {
         }
         Err(e) => {
             return GitStatusSnapshot {
-                status_message: Some(format!("Git unavailable: {e}")),
+                status_message: Some(deepseekcode_i18n::tr!(
+                    "git.unavailable",
+                    "error" => e.to_string()
+                )),
                 ..GitStatusSnapshot::default()
             };
         }

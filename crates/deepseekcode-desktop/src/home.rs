@@ -92,14 +92,14 @@ impl Render for HomeView {
                 div()
                     .text_sm()
                     .text_color(theme.text_disabled)
-                    .child("Loading projects…"),
+                    .child(deepseekcode_i18n::t("home.loading_projects")),
             );
         } else if self.recent.is_empty() {
             list = list.child(
                 div()
                     .text_sm()
                     .text_color(theme.text_disabled)
-                    .child("No recent projects"),
+                    .child(deepseekcode_i18n::t("home.empty")),
             );
         } else {
             for project in &self.recent {
@@ -146,13 +146,13 @@ impl Render for HomeView {
                             .text_2xl()
                             .font_weight(FontWeight::BOLD)
                             .text_color(theme.text_primary)
-                            .child("DeepSeekCode"),
+                            .child(deepseekcode_i18n::t("app.name")),
                     )
                     .child(
                         div()
                             .text_sm()
                             .text_color(theme.text_muted)
-                            .child("Rust-native AI programming environment"),
+                            .child(deepseekcode_i18n::t("app.tagline")),
                     )
                     .child(
                         div()
@@ -169,14 +169,14 @@ impl Render for HomeView {
                                     cx.emit(HomeEvent::PickFolder);
                                 }),
                             )
-                            .child("Open Folder…"),
+                            .child(deepseekcode_i18n::t("home.open_folder")),
                     )
                     .child(
                         div()
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.text_disabled)
-                            .child("RECENT PROJECTS"),
+                            .child(deepseekcode_i18n::t("home.recent_projects")),
                     )
                     .child(list),
             )

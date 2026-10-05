@@ -11,6 +11,7 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 
 use crate::auth::basic_auth_middleware;
+use crate::language::locale_middleware;
 use crate::pty::PtyManager;
 use crate::request_id::request_id_middleware;
 use crate::routes;
@@ -43,6 +44,9 @@ pub async fn serve(
         engine,
         password,
         pty: Arc::new(PtyManager::new()),
+        locale: deepseekcode_config::load_effective_config(camino::Utf8Path::new(&project_dir))
+            .map(|config| deepseekcode_config::resolve_language(&config))
+            .unwrap_or_default(),
     };
     let app = build_router(state);
 
@@ -104,6 +108,10 @@ pub fn build_router(state: AppState) -> Router {
         );
     public
         .merge(authed)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            locale_middleware,
+        ))
         .layer(middleware::from_fn(request_id_middleware))
         .layer(
             TraceLayer::new_for_http().make_span_with(|req: &Request<_>| {

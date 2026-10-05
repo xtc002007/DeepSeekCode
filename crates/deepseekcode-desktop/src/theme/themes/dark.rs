@@ -40,8 +40,13 @@ pub fn dark_tokens() -> ThemeTokens {
         tool_write: hex_rgb(0x4ade80),
         tool_bash: hex_rgb(0xfbbf24),
 
-        terminal_bg: hex_rgb(0x0d0d0d),
-        terminal_fg: hex_rgb(0xd4d4d4),
+        // VSCode Dark+ terminal: #1E1E1E bg, #CCCCCC fg.
+        terminal_bg: hex_rgb(0x1e1e1e),
+        terminal_fg: hex_rgb(0xcccccc),
+        terminal_cursor: hex_rgb(0xaeafad),
+        terminal_command: hex_rgb(0xf9f1a5),
+        terminal_prompt: hex_rgb(0x858585),
+        terminal_tab_active: hex_rgb(0x007acc),
 
         markdown: MarkdownTokens {
             text: hex_rgb(0xe0e0e0),

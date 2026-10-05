@@ -1770,6 +1770,7 @@ dependencies = [
  "clap",
  "deepseekcode-config",
  "deepseekcode-core",
+ "deepseekcode-i18n",
  "deepseekcode-schema",
  "deepseekcode-sdk",
  "deepseekcode-server",
@@ -1787,6 +1788,7 @@ name = "deepseekcode-config"
 version = "0.1.2"
 dependencies = [
  "camino",
+ "deepseekcode-i18n",
  "deepseekcode-schema",
  "deepseekcode-types",
  "jsonc-parser",
@@ -1807,6 +1809,7 @@ dependencies = [
  "camino",
  "chrono",
  "deepseekcode-config",
+ "deepseekcode-i18n",
  "deepseekcode-llm",
  "deepseekcode-plugin",
  "deepseekcode-schema",
@@ -1818,6 +1821,7 @@ dependencies = [
  "glob",
  "ignore",
  "libc",
+ "portable-pty",
  "reqwest",
  "serde",
  "serde_json",
@@ -1839,10 +1843,12 @@ name = "deepseekcode-desktop"
 version = "0.1.2"
 dependencies = [
  "alacritty_terminal",
+ "base64 0.22.1",
  "camino",
  "chrono",
  "deepseekcode-config",
  "deepseekcode-core",
+ "deepseekcode-i18n",
  "deepseekcode-schema",
  "deepseekcode-sdk",
  "deepseekcode-telemetry",
@@ -1851,6 +1857,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_platform",
+ "http",
  "ico",
  "image",
  "keyring",
@@ -1872,6 +1879,7 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
+ "ulid",
  "unicode-segmentation",
  "winres",
 ]
@@ -1886,6 +1894,7 @@ dependencies = [
  "chrono",
  "deepseekcode-config",
  "deepseekcode-core",
+ "deepseekcode-i18n",
  "deepseekcode-llm",
  "deepseekcode-schema",
  "deepseekcode-storage",
@@ -1909,6 +1918,15 @@ dependencies = [
  "ulid",
  "utoipa",
  "wiremock",
+]
+
+[[package]]
+name = "deepseekcode-i18n"
+version = "0.1.2"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1981,6 +1999,7 @@ dependencies = [
  "deepseekcode-config",
  "deepseekcode-core",
  "deepseekcode-embed",
+ "deepseekcode-i18n",
  "deepseekcode-llm",
  "deepseekcode-schema",
  "deepseekcode-storage",

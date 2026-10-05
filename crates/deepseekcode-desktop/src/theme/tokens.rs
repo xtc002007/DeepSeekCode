@@ -94,6 +94,14 @@ pub struct ThemeTokens {
 
     pub terminal_bg: Rgba,
     pub terminal_fg: Rgba,
+    /// Blinking block cursor (VSCode `terminalCursor.foreground`).
+    pub terminal_cursor: Rgba,
+    /// Typed command echo (VSCode PowerShell `dir` yellow).
+    pub terminal_command: Rgba,
+    /// Prompt prefix (`PS …>` / `$`) dimmed foreground.
+    pub terminal_prompt: Rgba,
+    /// Selection / active-tab underline accent for terminal tabs.
+    pub terminal_tab_active: Rgba,
 
     pub markdown: MarkdownTokens,
     pub syntax: SyntaxTokens,

@@ -99,6 +99,7 @@ pub use deepseekcode_schema::api::{
         crate::routes::destroy_pty,
         crate::routes::pty_ticket,
         crate::routes::pty_connect,
+        crate::routes::agent_pty_connect,
         crate::routes::list_projects,
         crate::routes::create_project,
     ),

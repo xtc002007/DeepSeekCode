@@ -80,7 +80,7 @@ impl WindowManager {
                     .project_dir
                     .as_ref()
                     .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "(home)".into());
+                    .unwrap_or_else(|| deepseekcode_i18n::t("home.empty"));
                 (w.id, path)
             })
             .collect()
@@ -91,7 +91,7 @@ impl WindowManager {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Maximized(bounds)),
             titlebar: Some(TitlebarOptions {
-                title: Some("DeepSeekCode".into()),
+                title: Some(deepseekcode_i18n::t("app.name").into()),
                 appears_transparent: true,
                 ..Default::default()
             }),
@@ -118,7 +118,13 @@ impl WindowManager {
             // Never `panic!` in a UI callback: it aborts the whole GPUI event
             // loop without cleanup. Surface the error and keep the existing
             // windows alive.
-            eprintln!("DeepSeekCode failed to open workspace window: {e}");
+            eprintln!(
+                "{}: {e}",
+                deepseekcode_i18n::tr!(
+                    "error.startup_window",
+                    "app" => deepseekcode_i18n::t("app.name")
+                )
+            );
         }
     }
 }

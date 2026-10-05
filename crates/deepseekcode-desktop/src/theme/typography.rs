@@ -25,8 +25,15 @@ pub struct TypographyScale {
 impl Default for TypographyScale {
     fn default() -> Self {
         Self {
-            font_ui: ".SystemUIFont".into(),
-            font_mono: "Cascadia Mono, Consolas, monospace".into(),
+            // UI stack: system font first, then CJK + Cyrillic coverage.
+            // Windows: Microsoft YaHei / SimSun; macOS: PingFang / Hiragino;
+            // Linux: Noto CJK. Cyrillic is covered by Segoe UI / system fonts,
+            // kept explicit so a missing primary never falls back to tofu.
+            font_ui: ".SystemUIFont, Segoe UI, Microsoft YaHei, PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Noto Sans, sans-serif".into(),
+            // Mono stack: Latin mono first, then CJK mono, then generic.
+            // The previous `"Cascadia Mono, Consolas, monospace"` had no Han
+            // glyphs, so CJK fell back unpredictably per machine.
+            font_mono: "Cascadia Mono, Consolas, Microsoft YaHei UI, PingFang SC, Hiragino Sans GB, Noto Sans Mono CJK SC, Noto Sans Mono, monospace".into(),
             text_xs: px(11.),
             text_sm: px(12.),
             text_base: px(13.),

@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use deepseekcode_config::LoggingConfig;
 use deepseekcode_schema::session::{CreateSessionRequest, PromptDelivery, PromptRequest};
 use deepseekcode_sdk::{client::DeepSeekCodeClient, EmbeddedEngine};
@@ -7,6 +7,8 @@ use deepseekcode_types::{MessageId, SessionId};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
+
+mod cli_locale;
 
 /// P1-4: one-line per-turn cache receipt from a `MessageCompleted` payload.
 /// Delegates to the single shared formatter in `deepseekcode-core` (the same
@@ -45,6 +47,10 @@ struct Cli {
     /// Server password for remote `--url` (or DEEPSEEKCODE_SERVER_PASSWORD).
     #[arg(long, global = true, env = "DEEPSEEKCODE_SERVER_PASSWORD")]
     password: Option<String>,
+    /// Interface language tag (`auto`, `en`, `zh-Hans`, …). The catalog
+    /// rewrites clap help after this is read, so help itself is translated.
+    #[arg(long, global = true, value_name = "LOCALE")]
+    lang: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -453,9 +459,27 @@ enum ProjectDirectoryCommands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Language first: translated `--help` and translated command output must
+    // observe the same locale. The directory hint is recovered from the raw
+    // arguments because `clap` has not parsed yet.
+    let raw_args = cli_locale::raw_args_after_program();
+    cli_locale::init_cli_locale(&raw_args);
+
     // P1-11: honor `--directory` for logging config (previously hardcoded `.`).
     // Parse args first for the directory hint, then init logging.
-    let pre = Cli::parse();
+    let mut command = Cli::command();
+    cli_locale::localize_command(&mut command);
+    let matches = command
+        .try_get_matches_from(
+            std::iter::once(
+                std::env::args()
+                    .next()
+                    .unwrap_or_else(|| "deepseekcode".into()),
+            )
+            .chain(raw_args.into_iter()),
+        )
+        .unwrap_or_else(|e| e.exit());
+    let pre = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     let log_dir = directory_hint(&pre);
     let (logging, config_error) = load_logging_config_for(&log_dir);
     // Top-level boundary: every command failure is logged with run_id +
@@ -557,6 +581,7 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
     let Cli {
         url: global_url,
         password: global_password,
+        lang: _,
         command,
     } = cli;
     let (url, password) = (global_url, global_password);
@@ -705,7 +730,9 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                                     }
                                     EventKind::SessionIdle => return Ok(()),
                                     EventKind::SessionInterrupted => {
-                                        return Err(anyhow::anyhow!("session interrupted"));
+                                        return Err(anyhow::anyhow!(deepseekcode_i18n::tr!(
+                                            "cli.err.session_interrupted"
+                                        )));
                                     }
                                     _ => {}
                                 }
@@ -716,7 +743,9 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                         break;
                     }
                 }
-                Err(anyhow::anyhow!("event stream ended before session idle"))
+                Err(anyhow::anyhow!(deepseekcode_i18n::tr!(
+                    "cli.err.stream_ended"
+                )))
             })
             .await;
             match result {
@@ -726,7 +755,7 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                     std::process::exit(1);
                 }
                 Err(_) => {
-                    eprintln!("timed out waiting for session idle");
+                    eprintln!("{}", deepseekcode_i18n::tr!("cli.err.timeout"));
                     std::process::exit(1);
                 }
             }
@@ -785,41 +814,75 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                                     .get("version")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("unknown");
-                                let download = manifest
-                                    .get("url")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
+                                let download =
+                                    manifest.get("url").and_then(|v| v.as_str()).unwrap_or("");
                                 if latest == current {
-                                    println!("DeepSeekCode {current} — up to date");
+                                    println!(
+                                        "{}",
+                                        deepseekcode_i18n::tr!("cli.out.up_to_date", "current" => current)
+                                    );
                                 } else {
                                     println!(
-                                        "DeepSeekCode {current} — update available: {latest} ({download})"
+                                        "{}",
+                                        deepseekcode_i18n::tr!(
+                                            "cli.out.update_available",
+                                            "current" => current,
+                                            "latest" => latest,
+                                            "download" => download
+                                        )
                                     );
                                     if !check_only {
-                                        println!("Download the installer above or use your package manager.");
+                                        println!(
+                                            "{}",
+                                            deepseekcode_i18n::tr!("cli.out.download_hint")
+                                        );
                                     }
                                 }
                             }
                             Err(e) => println!(
-                                "DeepSeekCode {current} — update check failed to parse manifest: {e}"
+                                "{}",
+                                deepseekcode_i18n::tr!(
+                                    "cli.out.manifest_parse_failed",
+                                    "current" => current,
+                                    "error" => e.to_string()
+                                )
                             ),
                         },
                         Err(e) => println!(
-                            "DeepSeekCode {current} — update check failed (offline?): {e}"
+                            "{}",
+                            deepseekcode_i18n::tr!(
+                                "cli.out.check_failed_offline",
+                                "current" => current,
+                                "error" => e.to_string()
+                            )
                         ),
                     },
-                    Err(e) => println!("DeepSeekCode {current} — update check failed: {e}"),
+                    Err(e) => println!(
+                        "{}",
+                        deepseekcode_i18n::tr!(
+                            "cli.out.check_failed",
+                            "current" => current,
+                            "error" => e.to_string()
+                        )
+                    ),
                 }
             } else if check_only {
                 println!(
-                    "DeepSeekCode {current} — no update channel configured (set DEEPSEEKCODE_UPDATE_URL to a latest.json)"
+                    "{}",
+                    deepseekcode_i18n::tr!("cli.out.no_channel", "current" => current)
                 );
             } else {
-                println!("Auto-update requires a release channel (DEEPSEEKCODE_UPDATE_URL); use package manager for now.");
+                println!(
+                    "{}",
+                    deepseekcode_i18n::tr!("cli.out.auto_update_unavailable")
+                );
             }
         }
         Commands::SessionList { directory } => {
-            eprintln!("warning: `session-list` is deprecated; use `session list`");
+            eprintln!(
+                "{}",
+                deepseekcode_i18n::tr!("cli.out.deprecated_session_list")
+            );
             let (engine, client) =
                 scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
             for s in client.list_sessions().await? {
@@ -838,8 +901,14 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                             path = %path.display(),
                             "diagnostics export succeeded"
                         );
-                        println!("Exported diagnostics to {}", path.display());
-                        println!("run_id: {}", run_ctx.run_id);
+                        println!(
+                            "{}",
+                            deepseekcode_i18n::tr!("cli.out.exported_diagnostics", "path" => path.display().to_string())
+                        );
+                        println!(
+                            "{}",
+                            deepseekcode_i18n::tr!("cli.out.run_id", "run_id" => run_ctx.run_id.as_str())
+                        );
                     }
                     Err(e) => {
                         tracing::error!(
@@ -873,7 +942,10 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                     }
                     Err(e) => {
                         println!("build\nplan\ngeneral");
-                        eprintln!("warning: failed to load config, showing defaults: {e}");
+                        eprintln!(
+                            "{}",
+                            deepseekcode_i18n::tr!("cli.out.config_defaults", "error" => e.to_string())
+                        );
                     }
                 }
             }
@@ -908,7 +980,10 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                 client
                     .update_model(session_id, Some(&agent), &model, &provider)
                     .await?;
-                println!("agent set to {agent}");
+                println!(
+                    "{}",
+                    deepseekcode_i18n::tr!("cli.out.agent_set", "agent" => agent.as_str())
+                );
                 shutdown_opt(engine).await;
             }
         },
@@ -936,7 +1011,10 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                 client
                     .update_model(session_id, None, &model, &provider_id)
                     .await?;
-                println!("model set to {model}");
+                println!(
+                    "{}",
+                    deepseekcode_i18n::tr!("cli.out.model_set", "model" => model.as_str())
+                );
                 shutdown_opt(engine).await;
             }
         },
@@ -960,7 +1038,10 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                 client
                     .connect_provider(&provider, api_key, base_url)
                     .await?;
-                println!("connected {provider}");
+                println!(
+                    "{}",
+                    deepseekcode_i18n::tr!("cli.out.provider_connected", "provider" => provider.as_str())
+                );
                 shutdown_opt(engine).await;
             }
             ProviderCommands::Disconnect {
@@ -970,7 +1051,10 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                 let (engine, client) =
                     scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 client.disconnect_provider(&provider).await?;
-                println!("disconnected {provider}");
+                println!(
+                    "{}",
+                    deepseekcode_i18n::tr!("cli.out.provider_disconnected", "provider" => provider.as_str())
+                );
                 shutdown_opt(engine).await;
             }
         },
@@ -997,7 +1081,7 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                     resume,
                 })
                 .await?;
-            println!("prompt submitted");
+            println!("{}", deepseekcode_i18n::tr!("cli.out.prompt_submitted"));
             shutdown_opt(engine).await;
         }
         Commands::Session { command } => match command {
@@ -1019,7 +1103,10 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                 let session_id = SessionId::from_str(&session)?;
                 let until_id = until.as_deref().map(MessageId::from_str).transpose()?;
                 let forked = client.fork_session(session_id, until_id).await?;
-                println!("forked session {}", forked.id);
+                println!(
+                    "{}",
+                    deepseekcode_i18n::tr!("cli.out.session_forked", "session" => forked.id.to_string())
+                );
                 shutdown_opt(engine).await;
             }
             SessionCommands::Export {
@@ -1035,7 +1122,10 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                     .export_session_with_sanitize(session_id, !no_sanitize)
                     .await?;
                 std::fs::write(&output, serde_json::to_string_pretty(&data)?)?;
-                println!("exported to {}", output.display());
+                println!(
+                    "{}",
+                    deepseekcode_i18n::tr!("cli.out.exported_to", "path" => output.display().to_string())
+                );
                 shutdown_opt(engine).await;
             }
             SessionCommands::Revert {
@@ -1048,7 +1138,10 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                 let session_id = SessionId::from_str(&session)?;
                 let message_id = MessageId::from_str(&message)?;
                 client.revert_stage(session_id, message_id).await?;
-                println!("revert staged at {message}");
+                println!(
+                    "{}",
+                    deepseekcode_i18n::tr!("cli.out.revert_staged", "message" => message.as_str())
+                );
                 shutdown_opt(engine).await;
             }
             SessionCommands::Compact { directory, session } => {
@@ -1059,9 +1152,9 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                 println!(
                     "{}",
                     if installed {
-                        "compaction checkpoint installed"
+                        deepseekcode_i18n::tr!("cli.out.compaction_installed")
                     } else {
-                        "nothing to compact"
+                        deepseekcode_i18n::tr!("cli.out.nothing_to_compact")
                     }
                 );
                 shutdown_opt(engine).await;
@@ -1075,7 +1168,10 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                     scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 let session_id = SessionId::from_str(&session)?;
                 client.move_session(session_id, &target).await?;
-                println!("session moved to {target}");
+                println!(
+                    "{}",
+                    deepseekcode_i18n::tr!("cli.out.session_moved", "target" => target.as_str())
+                );
                 shutdown_opt(engine).await;
             }
             SessionCommands::Interrupt { directory, session } => {
@@ -1083,7 +1179,10 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                     scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 let session_id = SessionId::from_str(&session)?;
                 client.interrupt(session_id).await?;
-                println!("session {session_id} interrupted");
+                println!(
+                    "{}",
+                    deepseekcode_i18n::tr!("cli.out.session_interrupted", "session" => session_id.to_string())
+                );
                 shutdown_opt(engine).await;
             }
             SessionCommands::Delete { directory, session } => {
@@ -1091,7 +1190,10 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                     scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 let session_id = SessionId::from_str(&session)?;
                 client.delete_session(session_id).await?;
-                println!("session {session_id} deleted");
+                println!(
+                    "{}",
+                    deepseekcode_i18n::tr!("cli.out.session_deleted", "session" => session_id.to_string())
+                );
                 shutdown_opt(engine).await;
             }
             SessionCommands::Todo { directory, session } => {
@@ -1123,7 +1225,7 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                     scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 let session_id = SessionId::from_str(&session)?;
                 client.submit_question_answer(session_id, &text).await?;
-                println!("answer submitted");
+                println!("{}", deepseekcode_i18n::tr!("cli.out.answer_submitted"));
                 shutdown_opt(engine).await;
             }
             SessionCommands::RevertCommit { directory, session } => {
@@ -1141,7 +1243,7 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                     scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 let session_id = SessionId::from_str(&session)?;
                 client.revert_clear(session_id).await?;
-                println!("revert cleared");
+                println!("{}", deepseekcode_i18n::tr!("cli.out.revert_cleared"));
                 shutdown_opt(engine).await;
             }
         },
@@ -1158,14 +1260,20 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                 let (engine, client) =
                     scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 client.connect_mcp(&name).await?;
-                println!("mcp {name} connected");
+                println!(
+                    "{}",
+                    deepseekcode_i18n::tr!("cli.out.mcp_connected", "name" => name.as_str())
+                );
                 shutdown_opt(engine).await;
             }
             McpCommands::Disconnect { directory, name } => {
                 let (engine, client) =
                     scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 client.disconnect_mcp(&name).await?;
-                println!("mcp {name} disconnected");
+                println!(
+                    "{}",
+                    deepseekcode_i18n::tr!("cli.out.mcp_disconnected", "name" => name.as_str())
+                );
                 shutdown_opt(engine).await;
             }
         },
@@ -1189,14 +1297,17 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                 let (engine, client) =
                     scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 client.remove_worktree(&path).await?;
-                println!("removed worktree {path}");
+                println!(
+                    "{}",
+                    deepseekcode_i18n::tr!("cli.out.worktree_removed", "path" => path.as_str())
+                );
                 shutdown_opt(engine).await;
             }
             WorktreeCommands::Prune { directory } => {
                 let (engine, client) =
                     scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 client.prune_worktrees().await?;
-                println!("pruned stale worktrees");
+                println!("{}", deepseekcode_i18n::tr!("cli.out.worktrees_pruned"));
                 shutdown_opt(engine).await;
             }
         },
@@ -1313,7 +1424,10 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                 let (engine, client) =
                     scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
                 client.delete_policy_grant(&id).await?;
-                println!("grant {id} deleted");
+                println!(
+                    "{}",
+                    deepseekcode_i18n::tr!("cli.out.grant_deleted", "id" => id.as_str())
+                );
                 shutdown_opt(engine).await;
             }
             PolicyCommands::Reply {
@@ -1325,7 +1439,10 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                 use deepseekcode_schema::policy::{PolicyReply, PolicyReplyKind};
                 // Validate ULID id early (previously raw String passed through).
                 if deepseekcode_types::PermissionId::from_str(&id).is_err() {
-                    anyhow::bail!("invalid policy id: {id}");
+                    anyhow::bail!(
+                        "{}",
+                        deepseekcode_i18n::tr!("cli.err.invalid_policy_id", "id" => id.as_str())
+                    );
                 }
                 let kind = match reply.to_ascii_lowercase().as_str() {
                     "once" => PolicyReplyKind::Once,
@@ -1333,7 +1450,10 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
                     "permit" => PolicyReplyKind::Once,
                     "project" | "always" => PolicyReplyKind::Project,
                     "reject" | "deny" => PolicyReplyKind::Reject,
-                    other => anyhow::bail!("unknown reply kind: {other}"),
+                    other => anyhow::bail!(
+                        "{}",
+                        deepseekcode_i18n::tr!("cli.err.unknown_reply_kind", "kind" => other)
+                    ),
                 };
                 let (engine, client) =
                     scoped_client(url.as_deref(), password.as_deref(), &directory).await?;
@@ -1402,7 +1522,7 @@ async fn resolve_session(
     let latest = sessions
         .into_iter()
         .max_by_key(|s| s.updated_at)
-        .ok_or_else(|| anyhow::anyhow!("no sessions — create one first"))?;
+        .ok_or_else(|| anyhow::anyhow!(deepseekcode_i18n::tr!("cli.err.no_sessions")))?;
     Ok(latest.id)
 }
 
@@ -1413,7 +1533,7 @@ fn load_logging_config_for(directory: &str) -> (LoggingConfig, Option<String>) {
         Err(e) => {
             // Stage one: telemetry not yet initialized, stderr only.
             // Stage two (in `run` after `init`) persists the same to app.log.
-            let msg = format!("config load failed for '{directory}' ({e}); using default logging");
+            let msg = deepseekcode_i18n::tr!("cli.err.config_load_failed", "directory" => directory, "error" => e.to_string());
             eprintln!("deepseekcode: {msg}");
             (Default::default(), Some(msg))
         }
@@ -1426,14 +1546,22 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn receipt_prefers_server_bytes_and_gates_display() {
+    fn receipt_ignores_stored_english_and_gates_display() {
+        // A stored English receipt must not leak into a non-English CLI: the
+        // numeric fields are the source of truth and are rendered for the
+        // active locale.
         let payload = json!({
             "input_tokens": 12000u64,
             "output_tokens": 100u64,
             "cache_receipt": " (10800 cached / 1200 new)",
+            "cache_hit": 10800u64,
+            "cache_miss": 1200u64,
         });
         let line = turn_receipt_line(&payload, true).expect("receipt");
-        assert!(line.contains("10800 cached") && line.contains("out 100"));
+        assert!(
+            line.contains("10,800") && line.contains("out 100"),
+            "{line}"
+        );
         assert_eq!(turn_receipt_line(&payload, false), None);
     }
 
@@ -1447,7 +1575,10 @@ mod tests {
             "cache_write": 300u64,
         });
         let line = turn_receipt_line(&payload, true).expect("receipt");
-        assert!(line.contains("10800 cached") && line.contains("300 write"));
+        assert!(
+            line.contains("10,800") && line.contains("300 write"),
+            "{line}"
+        );
     }
 
     #[test]

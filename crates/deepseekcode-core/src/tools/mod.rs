@@ -1,3 +1,4 @@
+pub mod agent_pty;
 pub mod builtin;
 pub mod display;
 pub mod list;

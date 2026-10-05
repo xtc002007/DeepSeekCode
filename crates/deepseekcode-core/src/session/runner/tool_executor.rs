@@ -180,6 +180,11 @@ impl SessionRunner {
                 Some(self.session_id),
                 json!({
                     "tool_call_id": tool_call_id,
+                    // Progress chunks (and the agent-PTY handshake) travel
+                    // under the INTERNAL id (`ctx.tool_call_id`), which
+                    // differs whenever the provider id is not ULID-shaped.
+                    // Consumers join the three phases through this alias.
+                    "internal_tool_call_id": internal_tool_call_id.to_string(),
                     "tool_name": tool_call.name,
                     "input": normalized_input,
                     "title": preview_title,

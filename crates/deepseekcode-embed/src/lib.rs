@@ -4,6 +4,7 @@
 //! `pty.rs` (PTY lifecycle + `latency_ms`), `app.rs`/`request_id.rs` (serve + HTTP).
 pub mod app;
 pub mod auth;
+pub mod language;
 pub mod openapi;
 pub mod pty;
 pub mod request_id;
