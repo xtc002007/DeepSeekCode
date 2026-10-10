@@ -24,6 +24,7 @@ impl PermissionDock {
         reject_expanded: bool,
         patterns_expanded: bool,
         reject_input: Entity<PromptInput>,
+        inflight: bool,
     ) -> impl IntoElement {
         let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
         let id = prompt.id.clone();
@@ -61,7 +62,20 @@ impl PermissionDock {
                             "tool" => tool.as_str(),
                             "queue_label" => queue_label.as_str()
                         )),
-                ),
+                )
+                // P2: FIFO note so queued-behind is explicit (previously
+                // later prompts were invisible with no explanation).
+                .when(prompt.queue_total > 1, |el| {
+                    el.child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(theme.text_muted)
+                            .child(format!(
+                                "+{} queued (FIFO)",
+                                prompt.queue_total - prompt.queue_index - 1
+                            )),
+                    )
+                }),
             )
             .child(
                 div()
@@ -126,13 +140,37 @@ impl PermissionDock {
             .when(reject_expanded, |el| {
                 el.child(
                     div()
-                        .text_xs()
-                        .text_color(theme.text_secondary)
-                        .child(deepseekcode_i18n::t("policy.feedback")),
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.text_secondary)
+                                .child(if inflight {
+                                    deepseekcode_i18n::t("policy.sending")
+                                } else {
+                                    deepseekcode_i18n::t("policy.feedback")
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.text_muted)
+                                .cursor_pointer()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.cancel_policy_reject(cx);
+                                    }),
+                                )
+                                .child(deepseekcode_i18n::t("common.cancel")),
+                        ),
                 )
                 .child(
                     div()
-                        .min_h(px(36.))
+                        .min_h(px(48.))
                         .px_2()
                         .py_1()
                         .rounded_md()
@@ -147,23 +185,47 @@ impl PermissionDock {
                     .justify_end()
                     .child(
                         div()
+                            .id(ElementId::Name(format!("policy-deny-{id}").into()))
                             .px_3()
                             .py_1()
                             .rounded_md()
-                            .bg(theme.error)
+                            .bg(if inflight {
+                                theme.text_disabled
+                            } else {
+                                theme.error
+                            })
                             .text_xs()
                             .text_color(theme.text_on_accent)
-                            .cursor_pointer()
-                            .on_mouse_down(MouseButton::Left, {
-                                let id = id.clone();
-                                cx.listener(move |this, _, _, cx| {
-                                    this.handle_policy_deny_click(id.clone(), cx);
+                            .when(!inflight, |el| el.cursor_pointer())
+                            .when(inflight, |el| el.opacity(0.6))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| crate::git_panel::GitFileTooltip {
+                                    text: if reject_expanded {
+                                        deepseekcode_i18n::t("policy.deny_confirm").into()
+                                    } else {
+                                        deepseekcode_i18n::t("policy.deny_expand").into()
+                                    },
+                                })
+                                .into()
+                            })
+                            .when(!inflight, |el| {
+                                el.on_mouse_down(MouseButton::Left, {
+                                    let id = id.clone();
+                                    cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.handle_policy_deny_click(id.clone(), window, cx);
+                                    })
                                 })
                             })
-                            .child(deepseekcode_i18n::t("common.deny")),
+                            .child(if reject_expanded {
+                                deepseekcode_i18n::t("policy.deny_confirm")
+                            } else {
+                                deepseekcode_i18n::t("common.deny")
+                            }),
                     )
                     .child(
                         div()
+                            .id(ElementId::Name(format!("policy-always-{id}").into()))
                             .px_3()
                             .py_1()
                             .rounded_md()
@@ -172,28 +234,56 @@ impl PermissionDock {
                             .border_color(theme.border_default)
                             .text_xs()
                             .text_color(theme.text_primary)
-                            .cursor_pointer()
-                            .on_mouse_down(MouseButton::Left, {
-                                let id = id.clone();
-                                cx.listener(move |this, _, _, cx| {
-                                    this.respond_policy_project(id.clone(), cx);
+                            .when(!inflight, |el| el.cursor_pointer())
+                            .when(inflight, |el| el.opacity(0.6))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| crate::git_panel::GitFileTooltip {
+                                    text: deepseekcode_i18n::t("policy.always_hint").into(),
+                                })
+                                .into()
+                            })
+                            .when(!inflight, |el| {
+                                el.on_mouse_down(MouseButton::Left, {
+                                    let id = id.clone();
+                                    cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.respond_policy_project(id.clone(), cx);
+                                    })
                                 })
                             })
                             .child(deepseekcode_i18n::t("common.always_project")),
                     )
                     .child(
                         div()
+                            .id(ElementId::Name(format!("policy-allow-{id}").into()))
                             .px_3()
                             .py_1()
                             .rounded_md()
-                            .bg(theme.accent)
+                            // P2: both branches Rgba (accent is Hsla and would
+                            // mismatch text_disabled). accent_muted keeps the
+                            // blue family with the right type.
+                            .bg(if inflight {
+                                theme.text_disabled
+                            } else {
+                                theme.accent_muted
+                            })
                             .text_xs()
                             .text_color(theme.text_on_accent)
-                            .cursor_pointer()
-                            .on_mouse_down(MouseButton::Left, {
-                                let id = id.clone();
-                                cx.listener(move |this, _, _, cx| {
-                                    this.respond_policy_once(id.clone(), cx);
+                            .when(!inflight, |el| el.cursor_pointer())
+                            .when(inflight, |el| el.opacity(0.6))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| crate::git_panel::GitFileTooltip {
+                                    text: deepseekcode_i18n::t("policy.allow_once_hint").into(),
+                                })
+                                .into()
+                            })
+                            .when(!inflight, |el| {
+                                el.on_mouse_down(MouseButton::Left, {
+                                    let id = id.clone();
+                                    cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.respond_policy_once(id.clone(), cx);
+                                    })
                                 })
                             })
                             .child(deepseekcode_i18n::t("common.allow_once")),

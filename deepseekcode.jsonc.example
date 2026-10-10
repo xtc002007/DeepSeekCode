@@ -24,7 +24,11 @@
   },
 
   // Read-only cost attribution for `GET /session/{id}/cache-status`
-  // (`estimated_cost`); never gates requests. Defaults shown.
+  // (`estimated_cost`, `models[]`) and `GET /billing/rates`; never gates
+  // requests. Known models use the official per-model book (DeepSeek Flash
+  // CNY 0.04/2/8 peak, Pro 0.30/9/27 peak, off-peak half; LongCat/MiMo/Claude
+  // static rows — see `core::pricing::official_catalog`); the block below is
+  // only the fallback for unknown models. Defaults shown.
   // "billing": {
   //   "currency": "CNY",
   //   "cache_hit_per_1m": 0.10,
@@ -92,6 +96,16 @@
       // "example": {
       //   "command": "npx",
       //   "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"],
+      //   "enabled": true
+      // }
+      // Windows desktop automation (windows-mcp style stdio server):
+      // a server exposing screenshot/snapshot/click/type/powershell over
+      // MCP JSON-RPC line protocol. See
+      // crates/deepseekcode-core/tests/support/mcp_windows_server.py for a
+      // minimal protocol-correct example, and docs/plugin-migration.md.
+      // "windows-desktop": {
+      //   "command": "python",
+      //   "args": ["D:/tools/windows-mcp-server.py"],
       //   "enabled": true
       // }
     }

@@ -14,6 +14,15 @@ pub struct ContextUsageState {
     /// P1-4: last turn cache receipt (` (H cached / M new)`). Empty when
     /// `ui.show_turn_usage` is off — accounting still runs server-side.
     pub last_receipt: String,
+    /// Per-turn cost line (`¥0.0123`), priced with the official per-model row
+    /// at occurrence time (Reasonix catalog rule). Empty when unpriced.
+    pub last_cost: String,
+    /// Current model id for the price hint (`deepseek-flash`, …).
+    pub last_model: String,
+    /// Session totals so the user sees money spent at a glance.
+    pub session_cost: f64,
+    pub session_currency: String,
+    pub session_turns: u64,
 }
 
 impl ContextUsageState {
@@ -64,9 +73,17 @@ impl ContextUsageMeter {
             .rounded_md()
             .cursor_pointer()
             .hover(|s| s.bg(theme.bg_hover))
-            .on_mouse_down(
+            .tooltip(move |_, cx| {
+                cx.new(|_| crate::git_panel::GitFileTooltip {
+                    text: deepseekcode_i18n::t("context.title").into(),
+                })
+                .into()
+            })
+            // P1-1 release-to-confirm + P1-2 stop.
+            .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
                     this.toggle_context_usage_detail(cx);
                 }),
             )
@@ -141,6 +158,28 @@ impl ContextUsageMeter {
                 "value" => state.last_receipt.as_str()
             ));
         }
+        if !state.last_model.is_empty() {
+            panel = panel.child(deepseekcode_i18n::tr!(
+                "context.model",
+                "value" => state.last_model.as_str()
+            ));
+        }
+        if !state.last_cost.is_empty() {
+            panel = panel.child(deepseekcode_i18n::tr!(
+                "context.cost",
+                "value" => state.last_cost.as_str()
+            ));
+        }
+        if state.session_turns > 0 {
+            panel = panel.child(deepseekcode_i18n::tr!(
+                "context.session_cost",
+                "value" => deepseekcode_core::pricing::format_cost(
+                    if state.session_currency.is_empty() { "CNY" } else { state.session_currency.as_str() },
+                    state.session_cost,
+                ).as_str(),
+                "count" => state.session_turns
+            ));
+        }
         panel
     }
 
@@ -154,6 +193,7 @@ impl ContextUsageMeter {
 
         let mut panel = div()
             .id("context-usage")
+            .relative()
             .flex()
             .items_center()
             .gap_2()
@@ -162,9 +202,10 @@ impl ContextUsageMeter {
             .rounded_md()
             .cursor_pointer()
             .hover(|s| s.bg(theme.bg_hover))
-            .on_mouse_down(
+            .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
                     this.toggle_context_usage_detail(cx);
                 }),
             )
@@ -199,6 +240,8 @@ impl ContextUsageMeter {
 
         if state.expanded {
             let mut detail = div()
+                .id("context-usage-detail")
+                .occlude()
                 .absolute()
                 .top(px(36.))
                 .right_0()
@@ -208,11 +251,16 @@ impl ContextUsageMeter {
                 .bg(theme.bg_surface)
                 .border_1()
                 .border_color(theme.border_default)
+                .shadow_lg()
                 .flex()
                 .flex_col()
                 .gap_1()
                 .text_xs()
                 .text_color(theme.text_secondary)
+                // P1-6: swallow clicks inside the popup so selecting/copying
+                // numbers never bubbles to the parent toggle and collapses it.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(deepseekcode_i18n::tr!(
                     "context.input",
                     "value" => deepseekcode_i18n::count(state.input_tokens as u64)
@@ -230,6 +278,28 @@ impl ContextUsageMeter {
                 detail = detail.child(deepseekcode_i18n::tr!(
                     "context.cache",
                     "value" => state.last_receipt.as_str()
+                ));
+            }
+            if !state.last_model.is_empty() {
+                detail = detail.child(deepseekcode_i18n::tr!(
+                    "context.model",
+                    "value" => state.last_model.as_str()
+                ));
+            }
+            if !state.last_cost.is_empty() {
+                detail = detail.child(deepseekcode_i18n::tr!(
+                    "context.cost",
+                    "value" => state.last_cost.as_str()
+                ));
+            }
+            if state.session_turns > 0 {
+                detail = detail.child(deepseekcode_i18n::tr!(
+                    "context.session_cost",
+                    "value" => deepseekcode_core::pricing::format_cost(
+                        if state.session_currency.is_empty() { "CNY" } else { state.session_currency.as_str() },
+                        state.session_cost,
+                    ).as_str(),
+                    "count" => state.session_turns
                 ));
             }
             panel = panel.child(detail);

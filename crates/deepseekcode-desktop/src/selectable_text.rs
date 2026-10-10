@@ -34,9 +34,18 @@ const TAP_DRAG_THRESHOLD_PX: f32 = 6.0;
 /// measurement. Corrected on the next frame via [`Window::refresh`].
 const FIRST_ESTIMATE_WIDTH: f32 = 480.0;
 
-/// Selection highlight, shared with the prompt input convention.
-fn selection_color() -> Rgba {
-    rgba(0x3a5a8acc)
+/// Selection surface: which panel a text block belongs to.
+///
+/// The layout registry is global, but a drag that starts in one surface must
+/// never highlight blocks in another (e.g. selecting LLM output must not
+/// light up the editor's markdown preview, and vice versa).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextSurface {
+    /// Session timeline (assistant output, tool rows, user messages…).
+    #[default]
+    Timeline,
+    /// Editor markdown preview pane.
+    Editor,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -58,6 +67,8 @@ pub struct TextBlockLayout {
     pub fragments: Vec<TextFragment>,
     /// Byte ranges carrying clickable URLs (link/image runs).
     pub links: Vec<(Range<usize>, String)>,
+    /// Owning panel; selection never spans surfaces.
+    pub surface: TextSurface,
 }
 
 /// Horizontal offset of a fragment origin under the block alignment.
@@ -195,6 +206,7 @@ pub fn selectable_text(
     theme: &crate::theme::ThemeTokens,
     style: &SelectableStyle,
     wrap: bool,
+    surface: TextSurface,
 ) -> SelectableText {
     let (text, runs) = build_runs(inline, theme, style);
     SelectableText {
@@ -206,6 +218,10 @@ pub fn selectable_text(
         line_height: style.line_height,
         align: style.align,
         wrap,
+        surface,
+        // Theme selection color (was a hardcoded blue that matched neither
+        // the dark nor the light theme).
+        selection: theme.bg_selected,
     }
 }
 
@@ -220,6 +236,8 @@ pub fn selectable_plain(
     size: Pixels,
     line_height: Pixels,
     wrap: bool,
+    surface: TextSurface,
+    selection: Rgba,
 ) -> SelectableText {
     SelectableText {
         view: view.clone(),
@@ -238,6 +256,8 @@ pub fn selectable_plain(
         line_height,
         align: TextAlign::Left,
         wrap,
+        surface,
+        selection,
     }
 }
 
@@ -630,6 +650,8 @@ pub(crate) struct SelectableText {
     line_height: Pixels,
     align: TextAlign,
     wrap: bool,
+    surface: TextSurface,
+    selection: Rgba,
 }
 
 pub(crate) struct SelectablePrepaint {
@@ -831,6 +853,7 @@ impl Element for SelectableText {
                 .as_ref()
                 .map(|entry| entry.width != bounds.size.width)
                 .unwrap_or(true);
+            let surface = self.surface;
             self.view.update(cx, |view, _| {
                 view.timeline_text_layouts.insert(
                     self.block.to_string(),
@@ -843,6 +866,7 @@ impl Element for SelectableText {
                         text: self.text.to_string(),
                         fragments: fragments.clone(),
                         links,
+                        surface,
                     },
                 );
             });
@@ -903,7 +927,7 @@ impl Element for SelectableText {
                                 point(origin.x + x0, origin.y),
                                 point(origin.x + x1, origin.y + self.line_height),
                             ),
-                            selection_color(),
+                            self.selection,
                         ));
                     }
                 }
@@ -935,7 +959,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         self.timeline_text_focus.clone().focus(window, cx);
-        let block = match find_block_at(&self.timeline_text_layouts, pos) {
+        let block = match find_block_at(&self.timeline_text_layouts, pos, None) {
             Some(block) => block,
             None => return,
         };
@@ -985,15 +1009,19 @@ impl WorkspaceView {
             _ => return,
         };
         // Anchor must still exist; otherwise the drag has no origin.
-        if !self.timeline_text_layouts.contains_key(&anchor_block) {
-            return;
-        }
+        let anchor_surface = match self.timeline_text_layouts.get(&anchor_block) {
+            Some(layout) => layout.surface,
+            None => return,
+        };
         // Multi-block drag: the cursor may sit in gaps (padding, icons,
         // markers) or over another block. Fall back to the nearest block by
         // visual distance so crossing paragraphs/list items/tables keeps
         // extending the selection instead of stalling at the origin block.
-        let focus_block = match find_block_at(&self.timeline_text_layouts, pos)
-            .or_else(|| find_nearest_block(&self.timeline_text_layouts, pos))
+        // The lookup stays on the anchor's surface so a drag never crosses
+        // into another panel (timeline vs editor preview).
+        let surface = Some(anchor_surface);
+        let focus_block = match find_block_at(&self.timeline_text_layouts, pos, surface)
+            .or_else(|| find_nearest_block(&self.timeline_text_layouts, pos, surface))
         {
             Some(block) => block,
             None => return,
@@ -1192,6 +1220,13 @@ pub fn selection_range_for_block(
     let anchor_layout = layouts.get(&selection.anchor_block)?;
     let focus_layout = layouts.get(&selection.focus_block)?;
     let self_layout = layouts.get(block)?;
+    // A selection never spans surfaces (e.g. a timeline drag must not
+    // highlight editor preview blocks sitting at the same Y). Cross-surface
+    // states only arise from stale layouts: paint nothing.
+    let anchor_surface = anchor_layout.surface;
+    if focus_layout.surface != anchor_surface || self_layout.surface != anchor_surface {
+        return None;
+    }
     if self_layout.text.is_empty() {
         return None;
     }
@@ -1266,6 +1301,11 @@ pub fn collect_selection_text(
     let Some(focus_layout) = layouts.get(&selection.focus_block) else {
         return String::new();
     };
+    // Copy stays on the anchor's surface; cross-surface states are stale.
+    let anchor_surface = anchor_layout.surface;
+    if focus_layout.surface != anchor_surface {
+        return String::new();
+    }
     let anchor_pos = layout_pos(anchor_layout);
     let focus_pos = layout_pos(focus_layout);
     let (start_block, start_offset, start_pos, end_block, end_offset) =
@@ -1308,7 +1348,11 @@ pub fn collect_selection_text(
     let mut prev_h: Option<f32> = None;
     let mut out = String::new();
     for (key, layout) in ordered[lo..=hi].iter() {
-        // Skip blocks outside the Y interval (stale hidden layouts).
+        // Skip other surfaces (stale) and blocks outside the Y interval
+        // (stale hidden layouts).
+        if layout.surface != anchor_surface {
+            continue;
+        }
         let (y, _) = layout_pos(layout);
         let in_y = if start_pos.0 <= end_pos.0 {
             y >= start_pos.0 - 0.5 && y <= end_pos.0 + block_height(layout) + 0.5
@@ -1363,12 +1407,16 @@ fn block_height(layout: &TextBlockLayout) -> f32 {
 fn find_nearest_block(
     layouts: &std::collections::HashMap<String, TextBlockLayout>,
     pos: Point<Pixels>,
+    surface: Option<TextSurface>,
 ) -> Option<String> {
     let px: f32 = pos.x.into();
     let py: f32 = pos.y.into();
     let mut best: Option<(f32, String)> = None;
     for (key, layout) in layouts.iter() {
         if layout.fragments.is_empty() {
+            continue;
+        }
+        if surface.is_some_and(|s| layout.surface != s) {
             continue;
         }
         let ox: f32 = layout.origin.x.into();
@@ -1399,12 +1447,17 @@ fn find_nearest_block(
 }
 
 /// Block key under a window-space point (row padding included).
+/// `surface` restricts the lookup so a drag never crosses panels.
 fn find_block_at(
     layouts: &std::collections::HashMap<String, TextBlockLayout>,
     pos: Point<Pixels>,
+    surface: Option<TextSurface>,
 ) -> Option<String> {
     layouts.iter().find_map(|(key, layout)| {
         if layout.fragments.is_empty() {
+            return None;
+        }
+        if surface.is_some_and(|s| layout.surface != s) {
             return None;
         }
         let height = layout.line_height * layout.fragments.len() as f32;
@@ -1426,7 +1479,7 @@ mod tests {
         breakable_before, collect_selection_text, forbidden_line_leader, hard_line_ranges,
         is_break_after_punct, is_cjk, is_closing_punct, is_opening_punct, is_wide_char,
         normalize_range, selection_range_for_block, snap_to_grapheme, word_bounds_at,
-        TextBlockLayout, TimelineTextSelection,
+        TextBlockLayout, TextSurface, TimelineTextSelection,
     };
 
     #[test]
@@ -1486,7 +1539,19 @@ mod tests {
             text: text.to_string(),
             fragments: Vec::new(),
             links: Vec::new(),
+            surface: TextSurface::Timeline,
         }
+    }
+
+    fn mock_layout_on_surface(
+        y: f32,
+        x: f32,
+        text: &str,
+        surface: TextSurface,
+    ) -> TextBlockLayout {
+        let mut layout = mock_layout(y, x, text);
+        layout.surface = surface;
+        layout
     }
 
     fn three_blocks() -> std::collections::HashMap<String, TextBlockLayout> {
@@ -1533,6 +1598,51 @@ mod tests {
             Some(0.."第二行内容".len())
         );
         assert_eq!(selection_range_for_block(&rev, "c", &layouts), Some(0..6));
+    }
+
+    #[test]
+    fn selection_never_spans_surfaces() {
+        // Timeline drag from `a` to `c`; an editor block sits between them
+        // at the same Y. It must not highlight, and copy must skip it.
+        let mut layouts = three_blocks();
+        layouts.insert(
+            "ed".to_string(),
+            mock_layout_on_surface(20.0, 800.0, "编辑器预览文本", TextSurface::Editor),
+        );
+        let sel = TimelineTextSelection {
+            anchor_block: "a".to_string(),
+            anchor_offset: 3,
+            focus_block: "c".to_string(),
+            focus_offset: 6,
+        };
+        assert_eq!(selection_range_for_block(&sel, "ed", &layouts), None);
+        assert_eq!(
+            selection_range_for_block(&sel, "b", &layouts),
+            Some(0.."第二行内容".len())
+        );
+        let copied = collect_selection_text(&sel, &layouts);
+        assert!(!copied.contains("编辑器预览文本"));
+        assert!(copied.contains("第二行内容"));
+    }
+
+    #[test]
+    fn cross_surface_selection_paints_and_copies_nothing() {
+        // Stale state (anchor timeline, focus editor): defensive collapse.
+        let mut layouts = three_blocks();
+        layouts.insert(
+            "ed".to_string(),
+            mock_layout_on_surface(20.0, 800.0, "编辑器预览文本", TextSurface::Editor),
+        );
+        let sel = TimelineTextSelection {
+            anchor_block: "a".to_string(),
+            anchor_offset: 3,
+            focus_block: "ed".to_string(),
+            focus_offset: 3,
+        };
+        assert_eq!(selection_range_for_block(&sel, "a", &layouts), None);
+        assert_eq!(selection_range_for_block(&sel, "ed", &layouts), None);
+        assert_eq!(selection_range_for_block(&sel, "b", &layouts), None);
+        assert_eq!(collect_selection_text(&sel, &layouts), String::new());
     }
 
     #[test]

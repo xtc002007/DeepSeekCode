@@ -1467,6 +1467,31 @@ impl SessionRunner {
             cache_miss,
             cache_write,
         };
+        // Per-model cost stamping (Reasonix catalog rule): price the current
+        // model in the configured display currency; unknown models fall back
+        // to the global BillingConfig card so history never goes unpriced.
+        let (rate_card, rate_band) = crate::pricing::rate_for(
+            &model,
+            &self.config.billing.currency,
+        )
+        .map(|(c, b)| (c, b.to_string()))
+        .unwrap_or_else(|| {
+            (
+                crate::cache_status::RateCard::from(&self.config.billing),
+                String::new(),
+            )
+        });
+        let turn_cost = {
+            let hit = cache_hit.unwrap_or(0) as f64;
+            let mut miss = cache_miss.unwrap_or_else(|| input_tokens.saturating_sub(cache_hit.unwrap_or(0))) as f64;
+            if hit + miss == 0.0 {
+                miss = input_tokens as f64;
+            }
+            (hit * rate_card.cache_hit_per_1m
+                + miss * rate_card.input_per_1m
+                + output_tokens as f64 * rate_card.output_per_1m)
+                / 1_000_000.0
+        };
         self.events
             .append(
                 EventKind::MessageCompleted,
@@ -1476,6 +1501,11 @@ impl SessionRunner {
                     "content": content,
                     "reasoning": if reasoning.is_empty() { None } else { Some(&reasoning) },
                     "has_tool_calls": !calls.is_empty(),
+                    "provider": provider,
+                    "model": model,
+                    "currency": rate_card.currency,
+                    "rate_band": rate_band,
+                    "estimated_cost": turn_cost,
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "reasoning_tokens": reasoning_tokens,

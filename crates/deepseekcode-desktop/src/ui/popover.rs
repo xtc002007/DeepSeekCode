@@ -6,12 +6,27 @@ use gpui::*;
 use super::dropdown::{DropDirection, DropdownOption};
 
 pub fn menu_width_for_labels(labels: impl IntoIterator<Item = impl AsRef<str>>) -> Pixels {
-    let max_chars = labels
+    // P2 CJK: Chinese/emoji glyphs are ~2x wider than Latin. Count CJK-ish
+    // chars at 14px and others at 7.2px so localized menus don't wrap/clip.
+    let max_width_px = labels
         .into_iter()
-        .map(|s| s.as_ref().chars().count())
-        .max()
-        .unwrap_or(8);
-    px((max_chars as f32 * 7.2 + 28.0).clamp(120.0, 420.0))
+        .map(|s| {
+            let s = s.as_ref();
+            let mut w = 0.0f32;
+            for ch in s.chars() {
+                let wide = matches!(ch,
+                    '\u{2E80}'..='\u{9FFF}'
+                    | '\u{AC00}'..='\u{D7AF}'
+                    | '\u{F900}'..='\u{FAFF}'
+                    | '\u{FF00}'..='\u{FFEF}'
+                    | '\u{1F000}'..='\u{1FAFF}'
+                    | '\u{2600}'..='\u{27BF}');
+                w += if wide { 14.0 } else { 7.2 };
+            }
+            w
+        })
+        .fold(0.0f32, f32::max);
+    px((max_width_px + 28.0).clamp(120.0, 420.0))
 }
 
 pub fn menu_width_for_options(options: &[DropdownOption]) -> Pixels {
@@ -23,7 +38,9 @@ pub fn menu_top_for_direction(
     direction: DropDirection,
     item_count: usize,
 ) -> Pixels {
-    let row_h = px(28.);
+    // P2: real rows are py_1p5/py_2 text_xs (~30-32px), not 28px. Use 32px so
+    // Up menus don't overlap the anchor, and clamp both edges.
+    let row_h = px(32.);
     let padding = px(8.);
     let menu_h = row_h * item_count as f32 + padding;
     match direction {
@@ -58,13 +75,15 @@ pub fn render_menu_panel(
         .top(top)
         .w(width)
         .max_h(px(320.))
+        .overflow_y_scroll()
         .flex()
         .flex_col()
         .py_1()
         .rounded_md()
         .bg(theme.bg_elevated)
         .border_1()
-        .border_color(theme.border_default);
+        .border_color(theme.border_default)
+        .shadow_lg();
 
     for opt in options {
         let id = opt.id.clone();
@@ -89,13 +108,19 @@ pub fn render_menu_panel(
                     theme.bg_elevated
                 })
                 .hover(|s| {
-                    s.bg(if active {
-                        theme.bg_selected
+                    if disabled {
+                        s
+                    } else if active {
+                        s.bg(theme.bg_selected)
                     } else {
-                        theme.bg_hover
-                    })
+                        s.bg(theme.bg_hover)
+                    }
                 })
-                .cursor_pointer()
+                .cursor(if disabled {
+                    CursorStyle::Arrow
+                } else {
+                    CursorStyle::PointingHand
+                })
                 .when(!disabled, |el| {
                     el.on_mouse_down(MouseButton::Left, {
                         let id = id.clone();
@@ -144,14 +169,18 @@ pub fn render_project_remove_row(
                 .text_xs()
                 .text_color(theme.error)
                 .cursor_pointer()
+                .hover(|s| s.bg(theme.bg_hover))
+                .hover(|s| s.bg(theme.bg_hover))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |_this, _, window, cx| {
                         cx.stop_propagation();
                         let path = path.clone();
                         cx.defer_in(window, move |this, _, cx| {
-                            this.close_project_context_menu(cx);
-                            this.remove_project_from_sidebar(path, cx);
+                            // P0-6: arm confirm, don't remove immediately.
+                            // Keep popover_anchor for the confirm dialog.
+                            this.project_context_menu = None;
+                            this.request_remove_project(path, cx);
                         });
                     }),
                 )
@@ -193,7 +222,9 @@ pub fn render_session_delete_row(
                     cx.listener(move |_this, _, window, cx| {
                         cx.stop_propagation();
                         cx.defer_in(window, move |this, _, cx| {
-                            this.delete_session_by_id(session_id, cx);
+                            // P0-6: arm confirm, don't delete immediately.
+                            this.session_context_menu = None;
+                            this.request_delete_session(session_id, cx);
                         });
                     }),
                 )
@@ -253,12 +284,186 @@ pub fn render_dismiss_layer(cx: &mut Context<crate::workspace::WorkspaceView>) -
         .id("popover-dismiss")
         .absolute()
         .inset_0()
+        .occlude()
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|_this, _, window, cx| {
+                // P1-2: swallow the click so closing a popover never also
+                // activates the tab/button underneath.
+                cx.stop_propagation();
                 cx.defer_in(window, |this, _, cx| {
                     this.close_popover(cx);
                 });
             }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(|_this, _, window, cx| {
+                cx.stop_propagation();
+                cx.defer_in(window, |this, _, cx| {
+                    this.close_popover(cx);
+                });
+            }),
+        )
+}
+
+pub fn render_session_delete_confirm(
+    session_id: deepseekcode_types::SessionId,
+    anchor: Point<Pixels>,
+    cx: &mut Context<crate::workspace::WorkspaceView>,
+) -> impl IntoElement {
+    let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
+    let width = menu_width_for_labels([
+        deepseekcode_i18n::t("sidebar.confirm_delete_session"),
+        deepseekcode_i18n::t("common.confirm"),
+    ]);
+    // P2: clamp to viewport so the confirm never overflows the right edge.
+    let left = anchor.x;
+    div()
+        .id("popover-delete-confirm")
+        .occlude()
+        .absolute()
+        .left(left)
+        .top(anchor.y + px(4.))
+        .w(width)
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_2()
+        .rounded_md()
+        .bg(theme.bg_elevated)
+        .border_1()
+        .border_color(theme.border_default)
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.text_primary)
+                .child(deepseekcode_i18n::t("sidebar.confirm_delete_session")),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .justify_end()
+                .child(
+                    div()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_md()
+                        .text_xs()
+                        .text_color(theme.text_muted)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.bg_hover))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_this, _, window, cx| {
+                                cx.stop_propagation();
+                                cx.defer_in(window, |this, _, cx| {
+                                    this.cancel_pending_delete(cx);
+                                });
+                            }),
+                        )
+                        .child(deepseekcode_i18n::t("common.cancel")),
+                )
+                .child(
+                    div()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_md()
+                        .bg(theme.error)
+                        .text_xs()
+                        .text_color(theme.text_on_accent)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.error))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |_this, _, window, cx| {
+                                cx.stop_propagation();
+                                cx.defer_in(window, move |this, _, cx| {
+                                    this.delete_session_by_id(session_id, cx);
+                                });
+                            }),
+                        )
+                        .child(deepseekcode_i18n::t("common.confirm")),
+                ),
+        )
+}
+
+pub fn render_project_remove_confirm(
+    _path: String,
+    anchor: Point<Pixels>,
+    cx: &mut Context<crate::workspace::WorkspaceView>,
+) -> impl IntoElement {
+    let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
+    let width = menu_width_for_labels([
+        deepseekcode_i18n::t("sidebar.confirm_remove_project"),
+        deepseekcode_i18n::t("common.confirm"),
+    ]);
+    div()
+        .id("popover-remove-confirm")
+        .occlude()
+        .absolute()
+        .left(anchor.x)
+        .top(anchor.y + px(4.))
+        .w(width)
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_2()
+        .rounded_md()
+        .bg(theme.bg_elevated)
+        .border_1()
+        .border_color(theme.border_default)
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.text_primary)
+                .child(deepseekcode_i18n::t("sidebar.confirm_remove_project")),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .justify_end()
+                .child(
+                    div()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_md()
+                        .text_xs()
+                        .text_color(theme.text_muted)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.bg_hover))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_this, _, window, cx| {
+                                cx.stop_propagation();
+                                cx.defer_in(window, |this, _, cx| {
+                                    this.cancel_pending_delete(cx);
+                                });
+                            }),
+                        )
+                        .child(deepseekcode_i18n::t("common.cancel")),
+                )
+                .child(
+                    div()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_md()
+                        .bg(theme.error)
+                        .text_xs()
+                        .text_color(theme.text_on_accent)
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_this, _, window, cx| {
+                                cx.stop_propagation();
+                                cx.defer_in(window, |this, _, cx| {
+                                    this.confirm_remove_project(cx);
+                                });
+                            }),
+                        )
+                        .child(deepseekcode_i18n::t("common.confirm")),
+                ),
         )
 }

@@ -42,11 +42,15 @@ fn variant_colors(variant: ButtonVariant, theme: &ThemeTokens) -> (Rgba, Rgba, R
             theme.text_secondary,
             None,
         ),
-        ButtonVariant::Danger => (btn.danger_bg, btn.danger_bg, btn.danger_text, None),
+        // P2: Danger hover must differ from rest, otherwise zero feedback.
+        ButtonVariant::Danger => (btn.danger_bg, theme.error, btn.danger_text, None),
     }
 }
 
-/// Styled button shell — attach `.on_mouse_down(cx.listener(...))` at the call site.
+/// Styled button shell — attach `.on_mouse_up(cx.listener(...))` at the call site.
+/// P1-1: prefer release-to-confirm (mouse-up) over press-to-fire so
+/// press-drag-release never mis-fires. Always `stop_propagation` in the
+/// handler so a button inside a clickable row doesn't double-fire.
 pub fn button_shell(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -78,17 +82,22 @@ pub fn button_shell(
         .text_color(text)
         .text_sm()
         .font_weight(FontWeight::MEDIUM)
+        // P2: stable 1px border always — focus only recolors, never resizes,
+        // so toggling focus doesn't reflow the row by 2px.
+        .border_1()
+        .border_color(if focused {
+            border_focus
+        } else if let Some(b) = border {
+            b
+        } else {
+            gpui::hsla(0., 0., 0., 0.).into()
+        })
         .when(disabled, |s| s.opacity(0.5).cursor_default())
         .when(!disabled, |s| {
             s.cursor_pointer()
                 .hover(|s| s.bg(bg_hover))
                 .active(|s| s.bg(bg_active))
-        })
-        .when(focused, |s| s.border_2().border_color(border_focus));
-
-    if let Some(border) = border {
-        el = el.border_1().border_color(border);
-    }
+        });
 
     if let Some(icon_name) = icon {
         el = el.child(render_icon_rgba(icon_name, px(14.), text));
@@ -114,11 +123,15 @@ where
     if disabled {
         shell
     } else {
-        shell.on_mouse_down(MouseButton::Left, move |_, _, cx| on_click(cx))
+        // P1-1: release-to-confirm.
+        shell.on_mouse_up(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            on_click(cx)
+        })
     }
 }
 
-/// Icon-only button shell — attach `.on_mouse_down(cx.listener(...))` at the call site.
+/// Icon-only button shell — attach `.on_mouse_up(cx.listener(...))` at the call site.
 pub fn icon_button_shell(
     id: impl Into<ElementId>,
     icon: IconName,
@@ -141,7 +154,13 @@ pub fn icon_button_shell(
     } else {
         hsla(0., 0., 0., 0.).into()
     };
-    let bg_hover = theme.bg_hover;
+    let bg_hover = if active {
+        // P2: active hover must stay in the selected family, otherwise hover
+        // reads as "unselected".
+        theme.bg_selected
+    } else {
+        theme.bg_hover
+    };
     let bg_active = theme.bg_active;
     let border_focus = theme.border_focus;
 
@@ -156,7 +175,12 @@ pub fn icon_button_shell(
         .cursor_pointer()
         .hover(|s| s.bg(bg_hover))
         .active(|s| s.bg(bg_active))
-        .when(focused, |s| s.border_2().border_color(border_focus))
+        .border_1()
+        .border_color(if focused {
+            border_focus
+        } else {
+            gpui::hsla(0., 0., 0., 0.).into()
+        })
         .child(render_icon_rgba(icon, px(16.), icon_color))
 }
 
@@ -172,6 +196,11 @@ pub fn render_icon_button<F>(
 where
     F: Fn(&mut App) + 'static,
 {
-    icon_button_shell(id, icon, theme, size, active, danger, false)
-        .on_mouse_down(MouseButton::Left, move |_, _, cx| on_click(cx))
+    icon_button_shell(id, icon, theme, size, active, danger, false).on_mouse_up(
+        MouseButton::Left,
+        move |_, _, cx| {
+            cx.stop_propagation();
+            on_click(cx)
+        },
+    )
 }

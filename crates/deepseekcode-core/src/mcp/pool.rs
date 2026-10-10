@@ -123,6 +123,15 @@ impl McpConnectionPool {
             })??;
             (McpConnection::Local(connection), tools)
         } else if let Some(url) = cfg.url.as_deref() {
+            // Fail fast on non-HTTP(S) URLs (my-notebook `validate_http_url`):
+            // otherwise a typo'd `file://` URL surfaces as a confusing
+            // reqwest builder error deep inside `initialize`.
+            let lower = url.trim_start().to_ascii_lowercase();
+            if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+                return Err(DeepSeekCodeError::Other(format!(
+                    "mcp server {name} has unsupported url scheme (expected http:// or https://)"
+                )));
+            }
             let client = RemoteMcpClient::new(url);
             client.initialize().await?;
             let tools = client.list_tools().await.unwrap_or_default();
@@ -260,15 +269,26 @@ impl McpConnectionPool {
         match connection {
             McpConnection::Remote(client) => client.call_tool(tool, arguments).await,
             McpConnection::Local(client) => {
+                // 30s wall-clock budget per local tool call (my-notebook
+                // `STDIO_TIMEOUT`): `LocalMcpClient::request` only checks its
+                // deadline *between* `read_line` calls, so a fully silent
+                // server would otherwise block this `spawn_blocking` slot —
+                // and the session turn — forever.
                 let tool = tool.to_string();
-                tokio::task::spawn_blocking(move || {
+                let join = tokio::task::spawn_blocking(move || {
                     let mut locked = client
                         .lock()
                         .map_err(|_| DeepSeekCodeError::Other("mcp client lock poisoned".into()))?;
                     locked.call_tool(&tool, arguments)
-                })
-                .await
-                .map_err(|e| DeepSeekCodeError::Other(format!("mcp local call join failed: {e}")))?
+                });
+                match tokio::time::timeout(Duration::from_secs(30), join).await {
+                    Ok(joined) => joined.map_err(|e| {
+                        DeepSeekCodeError::Other(format!("mcp local call join failed: {e}"))
+                    })?,
+                    Err(_) => Err(DeepSeekCodeError::Other(format!(
+                        "no MCP response from {server} within 30s"
+                    ))),
+                }
             }
         }
     }

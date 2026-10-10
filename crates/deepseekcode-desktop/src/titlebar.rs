@@ -66,9 +66,32 @@ impl TitlebarView {
                             .px_3()
                             .child(
                                 div()
+                                    .id("titlebar-health")
                                     .flex()
                                     .items_center()
                                     .gap_1()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme.bg_hover))
+                                    .tooltip(move |_, cx| {
+                                        cx.new(|_| crate::git_panel::GitFileTooltip {
+                                            text: if health_ok {
+                                                deepseekcode_i18n::t("titlebar.connected").into()
+                                            } else {
+                                                deepseekcode_i18n::t("settings.health_desc").into()
+                                            },
+                                        })
+                                        .into()
+                                    })
+                                    .on_mouse_up(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            // P2 T4: health is actionable — click
+                                            // retries the health poll instead of
+                                            // being a dead indicator.
+                                            cx.stop_propagation();
+                                            this.refresh_health(cx);
+                                        }),
+                                    )
                                     .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(
                                         if health_ok {
                                             theme.success
@@ -94,9 +117,16 @@ impl TitlebarView {
                                     false,
                                     false,
                                 )
-                                .on_mouse_down(
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| crate::git_panel::GitFileTooltip {
+                                        text: deepseekcode_i18n::t("titlebar.settings").into(),
+                                    })
+                                    .into()
+                                })
+                                .on_mouse_up(
                                     MouseButton::Left,
                                     cx.listener(|this, _, _, cx| {
+                                        cx.stop_propagation();
                                         this.open_settings(
                                             crate::settings::SettingsSection::General,
                                             cx,
@@ -159,6 +189,8 @@ fn caption_button(
     is_close: bool,
     theme: &crate::theme::ThemeTokens,
 ) -> impl IntoElement {
+    // P2: Segoe Fluent Icons may be missing (tofu blocks) — fall back to a
+    // text glyph via font stack so the control stays legible.
     div()
         .id(id)
         .occlude()
@@ -168,6 +200,7 @@ fn caption_button(
         .w(px(46.))
         .h_full()
         .text_size(px(10.))
+        .font_family("Segoe Fluent Icons, Segoe UI Symbol, sans-serif")
         .text_color(theme.text_secondary)
         .hover(|style| {
             if is_close {

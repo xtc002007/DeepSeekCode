@@ -616,16 +616,17 @@ impl TerminalPanel {
             .and_then(|k| transcripts.get(k));
 
         // --- Vertical tab rail (equal-width rows) ---------------------------
-        // Titles carry the running command (`Bash #2 · dir /b …`); overlong
-        // titles ellipsize to a single line and hovering reveals the full
-        // command via tooltip. Rows are `w_full` so every tab is the same
-        // width no matter how long its title is.
+        // Narrow on purpose: the output keeps the remaining width. Titles
+        // carry the running command (`Bash #2 · dir /b …`); overlong titles
+        // ellipsize to a single line and hovering reveals the full command
+        // via tooltip. Rows are `w_full` so every tab is the same width no
+        // matter how long its title is.
         let mut tab_rail = div()
             .id("terminal-tab-rail")
             .flex()
             .flex_col()
             .flex_shrink_0()
-            .w(px(148.))
+            .w(px(104.))
             .py_1()
             .px_1()
             .gap_0p5()

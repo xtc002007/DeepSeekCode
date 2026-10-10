@@ -10,14 +10,17 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagE
 /// repeated renders (one per timeline message) never collide. Pass a stable
 /// per-message key (leaf id / detail key) to keep scroll positions stable.
 /// `view` backs drag-selectable text blocks.
+/// `surface` partitions the global text-selection registry so drags never
+/// cross panels (timeline vs editor preview).
 pub fn render_markdown(
     source: &str,
     theme: &ThemeTokens,
     salt: &str,
     view: &Entity<WorkspaceView>,
+    surface: crate::selectable_text::TextSurface,
 ) -> impl IntoElement {
     let parsed = parse_blocks(source);
-    let blocks = BlockRenderer::new(theme, salt, view).render(parsed);
+    let blocks = BlockRenderer::new(theme, salt, view, surface).render(parsed);
     let leading = crate::theme::leading_relaxed(theme);
     let mut container = div()
         .w_full()
@@ -826,16 +829,23 @@ struct BlockRenderer<'a> {
     theme: &'a ThemeTokens,
     view: Entity<WorkspaceView>,
     salt: String,
+    surface: crate::selectable_text::TextSurface,
     scroll_seq: usize,
     text_seq: usize,
 }
 
 impl<'a> BlockRenderer<'a> {
-    fn new(theme: &'a ThemeTokens, salt: &str, view: &Entity<WorkspaceView>) -> Self {
+    fn new(
+        theme: &'a ThemeTokens,
+        salt: &str,
+        view: &Entity<WorkspaceView>,
+        surface: crate::selectable_text::TextSurface,
+    ) -> Self {
         Self {
             theme,
             view: view.clone(),
             salt: salt.to_string(),
+            surface,
             scroll_seq: 0,
             text_seq: 0,
         }
@@ -879,7 +889,15 @@ impl<'a> BlockRenderer<'a> {
         wrap: bool,
     ) -> SelectableText {
         let key = self.next_text_key();
-        selectable_text(&self.view, key, &runs, self.theme, &style, wrap)
+        selectable_text(
+            &self.view,
+            key,
+            &runs,
+            self.theme,
+            &style,
+            wrap,
+            self.surface,
+        )
     }
 
     fn render(&mut self, blocks: Vec<ParsedBlock>) -> Vec<Block> {
@@ -950,8 +968,15 @@ impl<'a> BlockRenderer<'a> {
         // Issue #1: one selectable element wraps all runs, so mixed styles
         // (text + code + link) stay on one logical line and stay selectable.
         let key = self.next_text_key();
+        let surface = self.surface;
         el.child(selectable_text(
-            &self.view, key, &runs, self.theme, &style, true,
+            &self.view,
+            key,
+            &runs,
+            self.theme,
+            &style,
+            true,
+            surface,
         ))
         .into_any_element()
     }
@@ -1055,6 +1080,7 @@ impl<'a> BlockRenderer<'a> {
                 align: TextAlign::Left,
             };
             let key = self.next_text_key();
+            let surface = self.surface;
             content = content.child(div().cursor(CursorStyle::IBeam).child(selectable_text(
                 &self.view,
                 key,
@@ -1066,6 +1092,7 @@ impl<'a> BlockRenderer<'a> {
                 self.theme,
                 &style,
                 false,
+                surface,
             )));
         }
         outer.child(content).into_any_element()
@@ -1192,7 +1219,16 @@ impl<'a> BlockRenderer<'a> {
                 style.weight = FontWeight::SEMIBOLD;
             }
             let key = self.next_text_key();
-            let el = selectable_text(&self.view, key, cell, self.theme, &style, true);
+            let surface = self.surface;
+            let el = selectable_text(
+                &self.view,
+                key,
+                cell,
+                self.theme,
+                &style,
+                true,
+                surface,
+            );
             row = row.child(cell_el.child(el));
         }
         row

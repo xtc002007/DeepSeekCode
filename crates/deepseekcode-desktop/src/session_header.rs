@@ -1,5 +1,6 @@
 //! Session header above the timeline in the center column.
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 pub struct SessionHeaderView;
@@ -36,12 +37,25 @@ impl SessionHeaderView {
             deepseekcode_i18n::t("session.select_or_create")
         };
 
+        // P2: status colors keyed on raw (English) state ids — display text is
+        // localized via localize_session_status, so match the raw id here.
         let status_color = if session_busy {
             theme.success
         } else if session_status == "Ready" {
             theme.text_muted
-        } else if session_status == "Error" || session_status == "Interrupted" {
+        } else if session_status == "Error"
+            || session_status == "Interrupted"
+            || session_status.starts_with("Error")
+        {
             theme.error
+        } else if session_status.contains("Loading")
+            || session_status.contains("Compacting")
+            || session_status.contains("Waiting")
+            || session_status.contains("Running")
+            || session_status.contains("Thinking")
+            || session_status.contains("Generating")
+        {
+            theme.warning
         } else {
             theme.text_secondary
         };
@@ -85,9 +99,11 @@ impl SessionHeaderView {
                                     .text_xs()
                                     .cursor_pointer()
                                     .bg(theme.accent_muted)
-                                    .on_mouse_down(
+                                    .hover(|s| s.bg(theme.bg_hover))
+                                    .on_mouse_up(
                                         MouseButton::Left,
                                         cx.listener(|this, _, _, cx| {
+                                            cx.stop_propagation();
                                             this.save_session_title(cx);
                                         }),
                                     )
@@ -101,9 +117,11 @@ impl SessionHeaderView {
                                     .text_xs()
                                     .cursor_pointer()
                                     .text_color(theme.text_muted)
-                                    .on_mouse_down(
+                                    .hover(|s| s.bg(theme.bg_hover))
+                                    .on_mouse_up(
                                         MouseButton::Left,
                                         cx.listener(|this, _, _, cx| {
+                                            cx.stop_propagation();
                                             this.cancel_session_title_edit(cx);
                                         }),
                                     )
@@ -112,18 +130,30 @@ impl SessionHeaderView {
                             .into_any_element()]
                     } else {
                         vec![div()
+                            .id("session-title")
                             .text_sm()
                             .line_height(crate::theme::leading_sm(&theme))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.text_primary)
                             .overflow_hidden()
                             .text_ellipsis()
-                            .cursor_pointer()
-                            .on_mouse_down(MouseButton::Left, {
+                            // P2 SH3: no pointer affordance when there's no
+                            // session (previously a hand cursor that did nothing).
+                            .when(has_session, |el| {
+                                el.cursor_pointer().tooltip(move |_, cx| {
+                                    cx.new(|_| crate::git_panel::GitFileTooltip {
+                                        text: deepseekcode_i18n::t("session.title_placeholder")
+                                            .into(),
+                                    })
+                                    .into()
+                                })
+                            })
+                            .on_mouse_up(MouseButton::Left, {
                                 let has_session = has_session;
-                                cx.listener(move |this, _, _, cx| {
+                                cx.listener(move |this, _, window, cx| {
                                     if has_session {
-                                        this.start_session_title_edit(cx);
+                                        cx.stop_propagation();
+                                        this.start_session_title_edit(window, cx);
                                     }
                                 })
                             })
@@ -133,13 +163,16 @@ impl SessionHeaderView {
             )
             .children(if has_session {
                 let mut status_row = div().flex().items_center().gap_2();
-                if plan_count > 0 {
+                // P2 SH4: always render the plans entry so the feature is
+                // discoverable at count==0 (previously the entry vanished).
+                {
                     let label = deepseekcode_i18n::tr!(
                         "session.plans_count",
                         "count" => plan_count as u64
                     );
                     status_row = status_row.child(
                         div()
+                            .id("session-plans-pill")
                             .flex_shrink_0()
                             .px_2()
                             .py_1()
@@ -152,11 +185,23 @@ impl SessionHeaderView {
                             .border_1()
                             .border_color(theme.border_subtle)
                             .text_xs()
-                            .text_color(theme.text_primary)
+                            .text_color(if plan_count > 0 {
+                                theme.text_primary
+                            } else {
+                                theme.text_muted
+                            })
                             .cursor_pointer()
-                            .on_mouse_down(
+                            .hover(|s| s.bg(theme.bg_hover))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| crate::git_panel::GitFileTooltip {
+                                    text: deepseekcode_i18n::t("plan.ready_title").into(),
+                                })
+                                .into()
+                            })
+                            .on_mouse_up(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {
+                                    cx.stop_propagation();
                                     this.toggle_session_plans_menu(cx);
                                 }),
                             )
@@ -241,7 +286,7 @@ pub fn render_session_menu_panel(
                 cx,
                 deepseekcode_i18n::t("session.fork_from_message"),
                 |this, cx| {
-                    this.fork_current_session(cx);
+                    this.fork_current_session_from_message(cx);
                 },
                 &theme,
             )
@@ -301,11 +346,17 @@ fn menu_item(
         .text_xs()
         .text_color(theme.text_primary)
         .cursor_pointer()
+        .hover(|s| s.bg(theme.bg_hover))
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |this, _, _, cx| {
-                this.close_session_menu(cx);
-                action(this, cx);
+            cx.listener(move |_this, _, window, cx| {
+                // P1-2: stop + defer so the action never races the dismiss
+                // layer underneath (which would double-notify / flicker).
+                cx.stop_propagation();
+                cx.defer_in(window, move |this, _, cx| {
+                    this.close_session_menu(cx);
+                    action(this, cx);
+                });
             }),
         )
         .child(label)

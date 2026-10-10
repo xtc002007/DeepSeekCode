@@ -10,7 +10,7 @@ pub struct TabItem {
     pub icon: IconName,
 }
 
-/// Single tab item shell — attach `.on_mouse_down(cx.listener(...))` at the call site.
+/// Single tab item shell — attach `.on_mouse_up(cx.listener(...))` at the call site.
 pub fn tab_item_shell(tab: TabItem, active: bool, theme: &ThemeTokens) -> Stateful<Div> {
     let theme = theme.clone();
     let text_color = if active {
@@ -24,9 +24,12 @@ pub fn tab_item_shell(tab: TabItem, active: bool, theme: &ThemeTokens) -> Statef
     let bg_hover = theme.bg_hover;
 
     div()
+        // P2: namespace the id per surface to avoid GPUI state crosstalk when
+        // two bars share a label (e.g. Files/Editor in different panels).
         .id(ElementId::Name(SharedString::from(format!(
-            "tab-{}",
-            tab.id
+            "tab-{}-{}",
+            tab.id,
+            if active { "a" } else { "i" }
         ))))
         .flex()
         .items_center()
@@ -35,11 +38,9 @@ pub fn tab_item_shell(tab: TabItem, active: bool, theme: &ThemeTokens) -> Statef
         .py(px(6.))
         .cursor_pointer()
         .text_xs()
-        .font_weight(if active {
-            FontWeight::SEMIBOLD
-        } else {
-            FontWeight::NORMAL
-        })
+        // P2: stable weight — active is signaled by color + underline only, so
+        // switching tabs never reflows the bar by 1-3px.
+        .font_weight(FontWeight::MEDIUM)
         .text_color(text_color)
         .border_b_2()
         .when(active, |s| s.border_color(accent_border))
@@ -69,10 +70,15 @@ where
 
     for (index, (tab, on_click)) in tabs.into_iter().enumerate() {
         let is_active = index == active;
-        bar = bar.child(
-            tab_item_shell(tab, is_active, &theme)
-                .on_mouse_down(MouseButton::Left, move |_, _, cx| on_click(cx)),
-        );
+        // P1-1: release-to-confirm; P1-2: stop so a tab switch never bubbles
+        // to a parent clickable row.
+        bar = bar.child(tab_item_shell(tab, is_active, &theme).on_mouse_up(
+            MouseButton::Left,
+            move |_, _, cx| {
+                cx.stop_propagation();
+                on_click(cx)
+            },
+        ));
     }
 
     bar

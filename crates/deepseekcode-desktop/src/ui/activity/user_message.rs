@@ -22,6 +22,8 @@ pub fn render_user_message_card(
         theme.typography.text_xs,
         crate::theme::leading_relaxed(&theme),
         true,
+        crate::selectable_text::TextSurface::Timeline,
+        theme.bg_selected,
     );
     div()
         .w_full()

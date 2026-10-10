@@ -519,7 +519,8 @@ impl EntityInputHandler for PromptInput {
         self.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
+            // P2 IME: both ends are relative to the insertion start.
+            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
         cx.notify();
     }
@@ -551,9 +552,11 @@ impl EntityInputHandler for PromptInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
+        // P2 IME: localize already yields element-relative coords — don't
+        // subtract origin twice (previously offset by bounds.left).
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
-        let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
+        let utf8_index = last_layout.index_for_x(line_point.x)?;
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -917,6 +920,7 @@ impl ComposerView {
         prompt_input: &Entity<PromptInput>,
         session_busy: bool,
         input_blocked: bool,
+        stopping: bool,
         agent_label: &str,
         model_label: &str,
         attachments: &[PromptAttachment],
@@ -927,8 +931,10 @@ impl ComposerView {
         context_usage: &ContextUsageState,
     ) -> impl IntoElement {
         let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
-        let send_icon = if session_busy {
+        let send_icon = if session_busy && !stopping {
             crate::ui::icon::IconName::Square
+        } else if stopping {
+            crate::ui::icon::IconName::Loader
         } else {
             crate::ui::icon::IconName::ArrowRight
         };
@@ -937,11 +943,28 @@ impl ComposerView {
         // Gating it made the square inert (`opacity(0.45)`, click returned),
         // which is the reported "stop does nothing" failure.
         // `composer_button_action` owns the rule and is unit-tested.
-        let button_action = crate::logic::composer_button_action(session_busy, input_blocked);
-        let send_interactive = button_action != crate::logic::ComposerAction::None;
-        let send_bg = if session_busy {
+        // P0-2: `stopping` disables the button while the interrupt RPC is in
+        // flight so a rapid second click cannot flip Stop->Send.
+        // P1-4: visible disabled state for empty drafts (previously an empty
+        // click silently returned and read as "button broken").
+        let prompt_text = prompt_input.read(cx).text();
+        let is_empty_draft =
+            prompt_text.trim().is_empty() && attachments.is_empty();
+        let button_action =
+            crate::logic::composer_button_action(session_busy, input_blocked, stopping);
+        // Empty Send becomes None (disabled) with an explanatory tooltip.
+        let effective_action = match button_action {
+            crate::logic::ComposerAction::Send if is_empty_draft => {
+                crate::logic::ComposerAction::None
+            }
+            other => other,
+        };
+        let send_interactive = effective_action != crate::logic::ComposerAction::None;
+        let send_bg = if stopping {
+            theme.text_disabled
+        } else if session_busy {
             theme.error
-        } else if input_blocked {
+        } else if input_blocked || is_empty_draft {
             theme.text_disabled
         } else {
             Rgba {
@@ -962,26 +985,55 @@ impl ComposerView {
             .rounded_full()
             .bg(send_bg)
             .when(send_interactive, |el| {
-                el.cursor_pointer().hover(|s| {
-                    s.bg(if session_busy {
-                        theme.error
-                    } else {
-                        Rgba {
-                            r: 0x17 as f32 / 255.0,
-                            g: 0x65 as f32 / 255.0,
-                            b: 0xcc as f32 / 255.0,
-                            a: 1.0,
-                        }
+                el.cursor_pointer()
+                    .hover(|s| {
+                        s.bg(if session_busy {
+                            theme.error
+                        } else {
+                            Rgba {
+                                r: 0x17 as f32 / 255.0,
+                                g: 0x65 as f32 / 255.0,
+                                b: 0xcc as f32 / 255.0,
+                                a: 1.0,
+                            }
+                        })
                     })
+                    // P2: enabled buttons also explain themselves.
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| crate::git_panel::GitFileTooltip {
+                            text: if session_busy {
+                                deepseekcode_i18n::t("workspace.stopping").into()
+                            } else {
+                                deepseekcode_i18n::t("common.submit").into()
+                            },
+                        })
+                        .into()
+                    })
+            })
+            .when(!send_interactive, |el| {
+                el.opacity(0.45).tooltip(move |_, cx| {
+                    cx.new(|_| crate::git_panel::GitFileTooltip {
+                        text: if stopping {
+                            deepseekcode_i18n::t("workspace.stopping").into()
+                        } else if input_blocked {
+                            deepseekcode_i18n::t("composer.waiting_approval").into()
+                        } else {
+                            deepseekcode_i18n::t("workspace.empty_prompt").into()
+                        },
+                    })
+                    .into()
                 })
             })
-            .when(!send_interactive, |el| el.opacity(0.45))
-            .on_mouse_down(
+            // P1-1: release-to-confirm so drag-through never sends.
+            .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(move |this, _, _, cx| match button_action {
-                    crate::logic::ComposerAction::Stop => this.interrupt_session(cx),
-                    crate::logic::ComposerAction::Send => this.submit_prompt(cx),
-                    crate::logic::ComposerAction::None => {}
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    match effective_action {
+                        crate::logic::ComposerAction::Stop => this.interrupt_session(cx),
+                        crate::logic::ComposerAction::Send => this.submit_prompt(cx),
+                        crate::logic::ComposerAction::None => {}
+                    }
                 }),
             )
             .child(crate::ui::icon::render_icon_rgba(
@@ -1124,6 +1176,7 @@ impl ComposerView {
                                                     .cursor_pointer()
                                                     .on_mouse_down(MouseButton::Left, {
                                                         cx.listener(move |this, _, _, cx| {
+                                                            cx.stop_propagation();
                                                             this.remove_attachment(idx, cx);
                                                         })
                                                     })
@@ -1172,6 +1225,7 @@ impl ComposerView {
                                                     .cursor_pointer()
                                                     .on_mouse_down(MouseButton::Left, {
                                                         cx.listener(move |this, _, _, cx| {
+                                                            cx.stop_propagation();
                                                             this.remove_attachment(idx, cx);
                                                         })
                                                     })
@@ -1245,16 +1299,27 @@ impl ComposerView {
                                     .child(
                                         icon_button_shell(
                                             "composer-mic",
-                                            IconName::Mic,
+                                            // P1-5: no voice input exists — use a pencil
+                                            // glyph instead of a mic so users don't
+                                            // report "mic does nothing".
+                                            IconName::Pencil,
                                             &theme,
                                             px(24.),
                                             false,
                                             false,
                                             false,
                                         )
-                                        .on_mouse_down(
+                                        .tooltip(move |_, cx| {
+                                            cx.new(|_| crate::git_panel::GitFileTooltip {
+                                                text: deepseekcode_i18n::t("composer.focus_input")
+                                                    .into(),
+                                            })
+                                            .into()
+                                        })
+                                        .on_mouse_up(
                                             MouseButton::Left,
                                             cx.listener(|this, _, window, cx| {
+                                                cx.stop_propagation();
                                                 this.focus_prompt_input(window, cx);
                                             }),
                                         ),
@@ -1481,7 +1546,20 @@ pub fn composer_dropdown_selected_id(
     match kind {
         "agent" => agent_label.to_string(),
         "model" => {
-            let _ = providers;
+            // P2: match by label suffix ("Provider — Model") back to the
+            // `provider:model` id so the active row actually highlights.
+            // Falls back to the raw label when no provider matches.
+            for p in providers {
+                for m in &p.models {
+                    let label = format!("{} — {}", p.name, m.name);
+                    if label == model_label {
+                        return format!("{}:{}", p.id, m.id);
+                    }
+                    if m.id == model_label || m.name == model_label {
+                        return format!("{}:{}", p.id, m.id);
+                    }
+                }
+            }
             model_label.to_string()
         }
         _ => String::new(),
@@ -1498,6 +1576,11 @@ pub fn bind_prompt_keys(cx: &mut App) {
         KeyBinding::new("shift-left", PromptSelectLeft, Some("PromptInput")),
         KeyBinding::new("shift-right", PromptSelectRight, Some("PromptInput")),
         KeyBinding::new("ctrl-a", PromptSelectAll, Some("PromptInput")),
+        // P2: macOS Cmd equivalents (previously Ctrl-only, Cmd was dead).
+        KeyBinding::new("cmd-a", PromptSelectAll, Some("PromptInput")),
+        KeyBinding::new("cmd-v", PromptPaste, Some("PromptInput")),
+        KeyBinding::new("cmd-c", PromptCopy, Some("PromptInput")),
+        KeyBinding::new("cmd-x", PromptCut, Some("PromptInput")),
         KeyBinding::new("ctrl-v", PromptPaste, Some("PromptInput")),
         KeyBinding::new("paste", PromptPaste, Some("PromptInput")),
         KeyBinding::new("shift-insert", PromptPaste, Some("PromptInput")),
@@ -1505,6 +1588,9 @@ pub fn bind_prompt_keys(cx: &mut App) {
         KeyBinding::new("ctrl-x", PromptCut, Some("PromptInput")),
         KeyBinding::new("home", PromptHome, Some("PromptInput")),
         KeyBinding::new("end", PromptEnd, Some("PromptInput")),
+        // P2: shift-home/end extend selection (previously dead).
+        KeyBinding::new("shift-home", PromptSelectAll, Some("PromptInput")),
+        KeyBinding::new("shift-end", PromptSelectAll, Some("PromptInput")),
         KeyBinding::new("enter", PromptSubmit, Some("PromptInput")),
         KeyBinding::new("enter", SessionTitleSave, Some("SessionTitleInput")),
         KeyBinding::new("escape", SessionTitleCancel, Some("SessionTitleInput")),

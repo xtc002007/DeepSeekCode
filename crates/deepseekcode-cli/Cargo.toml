@@ -30,6 +30,7 @@ deepseekcode-config = { workspace = true }
 deepseekcode-i18n = { workspace = true }
 deepseekcode-telemetry = { workspace = true }
 deepseekcode-sdk = { path = "../deepseekcode-sdk", default-features = false }
+deepseekcode-llm = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

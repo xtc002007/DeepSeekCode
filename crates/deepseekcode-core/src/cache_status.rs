@@ -280,6 +280,134 @@ pub fn format_turn_receipt(usage: &TokenUsage, show: bool) -> String {
     )
 }
 
+/// One-line turn receipt with a pre-computed cost suffix (`· ¥0.0123`).
+/// `cost_display` is already formatted (e.g. via `pricing::format_cost`);
+/// `None`/empty means no suffix so old callers stay byte-identical.
+pub fn format_turn_receipt_with_cost(
+    usage: &TokenUsage,
+    show: bool,
+    cost_display: Option<&str>,
+) -> String {
+    let base = format_turn_receipt(usage, show);
+    match cost_display {
+        Some(c) if show && !base.is_empty() && !c.is_empty() => format!("{base} · {c}"),
+        _ => base,
+    }
+}
+
+/// Single-turn cost from a `MessageCompleted` payload + resolved card.
+/// Mirrors `estimated_cost` for one turn so CLI/desktop never diverge.
+pub fn turn_cost_from_payload(payload: &serde_json::Value, card: &RateCard) -> f64 {
+    let hit = payload.get("cache_hit").and_then(|v| v.as_u64()).unwrap_or(0) as f64;
+    let mut miss = payload
+        .get("cache_miss")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as f64)
+        .unwrap_or_else(|| {
+            let input = payload.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as f64;
+            input - hit.min(input)
+        });
+    if hit + miss == 0.0 {
+        miss = payload.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as f64;
+    }
+    let completion = payload.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as f64;
+    (hit * card.cache_hit_per_1m + miss * card.input_per_1m + completion * card.output_per_1m)
+        / 1_000_000.0
+}
+
+/// Per-model session slice for `GET /cache-status.models[]`.
+/// Groups by payload `model` (fallback `"unknown"` for history written
+/// before model stamping), prices each group with its official row when
+/// known, else the global fallback card.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ModelCost {
+    pub model: String,
+    pub turns: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_hit: u64,
+    pub cache_miss: u64,
+    pub currency: String,
+    pub estimated_cost: f64,
+    pub rate_band: String,
+}
+
+pub fn aggregate_by_model(
+    payloads: &[serde_json::Value],
+    display_currency: &str,
+    fallback: &RateCard,
+) -> Vec<ModelCost> {
+    use std::collections::BTreeMap;
+    #[derive(Default)]
+    struct Acc {
+        turns: u64,
+        input: u64,
+        output: u64,
+        hit: u64,
+        miss: u64,
+    }
+    let mut groups: BTreeMap<String, Acc> = BTreeMap::new();
+    for p in payloads {
+        if p.get("interrupted").and_then(|v| v.as_bool()).unwrap_or(false)
+            && p.get("input_tokens").and_then(|v| v.as_u64()).is_none()
+        {
+            continue;
+        }
+        let model = p
+            .get("model")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("unknown")
+            .to_string();
+        let acc = groups.entry(model).or_default();
+        acc.turns += 1;
+        acc.input += p.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        acc.output += p.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let hit = p.get("cache_hit").and_then(|v| v.as_u64()).unwrap_or(0);
+        let miss = p
+            .get("cache_miss")
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                p.get("input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .map(|i| i.saturating_sub(hit))
+            })
+            .unwrap_or(0);
+        acc.hit += hit;
+        acc.miss += miss;
+    }
+    let mut out = Vec::new();
+    for (model, acc) in groups {
+        let (card, band) = if model == "unknown" {
+            (fallback.clone(), String::new())
+        } else {
+            match crate::pricing::rate_for(&model, display_currency) {
+                Some((c, b)) => (c, b.to_string()),
+                None => (fallback.clone(), String::new()),
+            }
+        };
+        let (mut h, mut m) = (acc.hit as f64, acc.miss as f64);
+        if h + m == 0.0 {
+            m = acc.input as f64;
+        }
+        let cost = (h * card.cache_hit_per_1m + m * card.input_per_1m + acc.output as f64 * card.output_per_1m)
+            / 1_000_000.0;
+        let _ = &mut h;
+        out.push(ModelCost {
+            model,
+            turns: acc.turns,
+            input_tokens: acc.input,
+            output_tokens: acc.output,
+            cache_hit: acc.hit,
+            cache_miss: acc.miss,
+            currency: card.currency.clone(),
+            estimated_cost: cost,
+            rate_band: band,
+        });
+    }
+    out
+}
+
 /// One-line turn receipt rendered for an explicit locale.
 ///
 /// The HTTP server uses this to answer a request in the client's

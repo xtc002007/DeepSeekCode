@@ -16,6 +16,7 @@ pub mod memory;
 pub mod permission;
 pub mod plan;
 pub mod policy;
+pub mod pricing;
 pub mod process;
 pub mod project_context;
 pub mod provider;

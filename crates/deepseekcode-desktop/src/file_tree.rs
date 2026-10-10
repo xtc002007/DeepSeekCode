@@ -124,12 +124,19 @@ impl FileTreeView {
                                     false,
                                     false,
                                 )
-                                .on_mouse_down(
+                                .on_mouse_up(
                                     MouseButton::Left,
                                     cx.listener(|this, _, _, cx| {
+                                        cx.stop_propagation();
                                         this.refresh_file_tree(cx);
                                     }),
-                                ),
+                                )
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| crate::git_panel::GitFileTooltip {
+                                        text: deepseekcode_i18n::t("common.refresh").into(),
+                                    })
+                                    .into()
+                                }),
                             )
                             .child(
                                 icon_button_shell(
@@ -141,12 +148,19 @@ impl FileTreeView {
                                     false,
                                     false,
                                 )
-                                .on_mouse_down(
+                                .on_mouse_up(
                                     MouseButton::Left,
                                     cx.listener(|this, _, _, cx| {
+                                        cx.stop_propagation();
                                         this.add_project_directory(cx);
                                     }),
-                                ),
+                                )
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| crate::git_panel::GitFileTooltip {
+                                        text: deepseekcode_i18n::t("common.add").into(),
+                                    })
+                                    .into()
+                                }),
                             ),
                     ),
             );
@@ -191,9 +205,10 @@ impl FileTreeView {
                         .text_color(theme.info)
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.bg_hover))
-                        .on_mouse_down(MouseButton::Left, {
+                        .on_mouse_up(MouseButton::Left, {
                             let dir = project_dir.to_string();
                             cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
                                 this.load_more_directory(&dir, cx);
                             })
                         })
@@ -259,9 +274,11 @@ fn render_entries(
             .gap_1()
             .hover(|s| s.bg(theme.bg_hover))
             .cursor_pointer()
-            .on_mouse_down(MouseButton::Left, {
+            // P1-10: stop so file clicks never bubble to a parent popover.
+            .on_mouse_up(MouseButton::Left, {
                 let path = path.clone();
                 cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
                     if is_dir {
                         this.toggle_directory(&path, cx);
                     } else {
@@ -292,19 +309,27 @@ fn render_entries(
         }
         if changed {
             let path_for_diff = path.clone();
+            let diff_tip_id = format!("file-diff-tip-{path}");
             row = row.child(
                 div()
+                    .id(ElementId::Name(diff_tip_id.into()))
                     .ml_auto()
                     .px_1()
                     .text_xs()
                     .text_color(theme.info)
                     .cursor_pointer()
                     .hover(|s| s.text_color(theme.text_link))
-                    .on_mouse_down(MouseButton::Left, {
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| crate::git_panel::GitFileTooltip {
+                            text: deepseekcode_i18n::t("files.diff").into(),
+                        })
+                        .into()
+                    })
+                    .on_mouse_up(MouseButton::Left, {
                         let path_for_diff = path_for_diff.clone();
                         cx.listener(move |this, _, _, cx| {
-                            this.open_file_diff(&path_for_diff, cx);
                             cx.stop_propagation();
+                            this.open_file_diff(&path_for_diff, cx);
                         })
                     })
                     .child(deepseekcode_i18n::t("files.diff")),

@@ -799,6 +799,7 @@ fn render_summary_node(
                             theme,
                             &leaf.id,
                             &cx.entity(),
+                            crate::selectable_text::TextSurface::Timeline,
                         )),
                 )
                 .child(crate::ui::copy_button::render_copy_button(
@@ -890,6 +891,8 @@ fn selectable_label(
         theme.typography.text_xs,
         leading,
         true,
+        crate::selectable_text::TextSurface::Timeline,
+        theme.bg_selected,
     );
     div().cursor(CursorStyle::IBeam).child(element)
 }
@@ -1092,6 +1095,7 @@ fn render_node(
                                         &theme,
                                         &leaf_id,
                                         &cx.entity(),
+                                        crate::selectable_text::TextSurface::Timeline,
                                     )),
                             )
                             .child(crate::ui::copy_button::render_copy_button(

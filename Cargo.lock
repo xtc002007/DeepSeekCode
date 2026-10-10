@@ -1771,6 +1771,7 @@ dependencies = [
  "deepseekcode-config",
  "deepseekcode-core",
  "deepseekcode-i18n",
+ "deepseekcode-llm",
  "deepseekcode-schema",
  "deepseekcode-sdk",
  "deepseekcode-server",

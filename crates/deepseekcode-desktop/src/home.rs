@@ -1,5 +1,6 @@
 //! Home screen: recent projects and open-folder entry.
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::path::PathBuf;
 
@@ -104,22 +105,35 @@ impl Render for HomeView {
         } else {
             for project in &self.recent {
                 let path = project.path.clone();
+                let tooltip_path: SharedString = path.clone().into();
+                let row_id = format!("home-recent-{path}");
                 list = list.child(
                     div()
+                        .id(ElementId::Name(row_id.into()))
                         .px_3()
                         .py_2()
                         .rounded_md()
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.bg_hover))
-                        .on_mouse_down(MouseButton::Left, {
+                        // P1-1 release-to-confirm so scroll-drags never open.
+                        .on_mouse_up(MouseButton::Left, {
                             cx.listener(move |_, _, _, cx| {
                                 cx.emit(HomeEvent::OpenProject(path.clone()));
                             })
+                        })
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| crate::git_panel::GitFileTooltip {
+                                text: tooltip_path.clone(),
+                            })
+                            .into()
                         })
                         .child(
                             div()
                                 .text_sm()
                                 .text_color(theme.text_primary)
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
                                 .child(project.path.clone()),
                         ),
                 );
@@ -156,20 +170,30 @@ impl Render for HomeView {
                     )
                     .child(
                         div()
+                            .id("home-open-folder")
                             .px_4()
                             .py_2()
                             .rounded_md()
                             .bg(theme.accent_rgba())
                             .text_color(theme.text_on_accent)
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.accent_hover_rgba()))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|_, _, _, cx| {
-                                    cx.emit(HomeEvent::PickFolder);
-                                }),
-                            )
-                            .child(deepseekcode_i18n::t("home.open_folder")),
+                            .when(self.loading, |el| el.opacity(0.5))
+                            .when(!self.loading, |el| {
+                                el.cursor_pointer()
+                                    .hover(|s| s.bg(theme.accent_hover_rgba()))
+                            })
+                            .when(!self.loading, |el| {
+                                el.on_mouse_up(
+                                    MouseButton::Left,
+                                    cx.listener(|_, _, _, cx| {
+                                        cx.emit(HomeEvent::PickFolder);
+                                    }),
+                                )
+                            })
+                            .child(if self.loading {
+                                deepseekcode_i18n::t("home.loading_projects")
+                            } else {
+                                deepseekcode_i18n::t("home.open_folder")
+                            }),
                     )
                     .child(
                         div()

@@ -111,6 +111,7 @@ impl SettingsView {
             .id("settings-overlay")
             .absolute()
             .inset_0()
+            .occlude()
             // Translucent scrim: the workspace behind stays visible around
             // the centered panel (opaque `bg_overlay` hid the whole page).
             .bg(rgba(0x00000099))
@@ -122,6 +123,7 @@ impl SettingsView {
             // instead of focusing the tapped control. Children (front-most)
             // still receive the event first; only behind elements are cut off.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
                     .id("settings-panel")

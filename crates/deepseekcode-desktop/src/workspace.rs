@@ -14,6 +14,7 @@ use deepseekcode_schema::todo::TodoItem;
 use deepseekcode_sdk::{client::DeepSeekCodeClient, EmbeddedEngine, EventStreamItem};
 use deepseekcode_types::{MessageId, SessionId, DIAGNOSTICS_ARCHIVE_PREFIX, SESSION_EXPORT_PREFIX};
 use futures::{SinkExt, StreamExt};
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -34,11 +35,14 @@ use crate::home::{HomeEvent, HomeView, RecentProject};
 use crate::layout::{LayoutState, ProjectNavItem, RightPanelTab};
 use crate::logic::{
     activity_visible_row_index, agent_selector_for_kind, ancestor_group_ids_for_leaf,
-    classify_git_porcelain, estimate_tokens, extract_tool_path, find_todo_leaf_id_for_index,
+    classify_git_porcelain, commit_placeholder, estimate_tokens, extract_tool_path,
+    find_todo_leaf_id_for_index,
     first_user_message_text, git_unified_diff, git_worktree_file_content,
-    implement_prompt_from_plan_path, pick_latest_by_timestamp, revert_files_preview,
-    sessions_for_project, summarize_permission_request, toggle_activity_group_expansion,
-    token_usage_from_payload, truncate_preview, ACTIVITY_ROW_HEIGHT_PX,
+    implement_prompt_from_plan_path, parse_branch_vv, parse_log_pretty, parse_remotes,
+    parse_stash_list, pick_latest_by_timestamp, revert_files_preview, sessions_for_project,
+    summarize_permission_request, toggle_activity_group_expansion, token_usage_from_payload,
+    truncate_preview, GitBranch, GitCommitNode, GitRemote, GitReviewIssue, GitStashEntry,
+    GitStatusEntry, ACTIVITY_ROW_HEIGHT_PX,
 };
 use crate::multi_window::{engine_client_for, shared_engine, WindowManager};
 use crate::panel_resize::PanelResizeEdge;
@@ -60,6 +64,9 @@ use crate::terminal::TerminalTab;
 use crate::titlebar::TitlebarView;
 use deepseekcode_config::PolicyMode;
 use deepseekcode_schema::policy::PolicyAction;
+
+actions!(question_dialog, [QuestionCancel]);
+actions!(overlay, [CloseOverlay]);
 
 async fn lock_sdk_client(
     slot: &Arc<Mutex<Option<DeepSeekCodeClient>>>,
@@ -110,6 +117,25 @@ async fn prefetch_session_prompts(
     }
 }
 
+/// Destructive git action awaiting explicit user confirmation (P5 safety).
+#[derive(Clone, Debug)]
+pub struct GitConfirm {
+    pub title: String,
+    pub detail: String,
+    pub action: GitConfirmAction,
+}
+
+#[derive(Clone, Debug)]
+pub enum GitConfirmAction {
+    DiscardAll,
+    DiscardPaths(Vec<String>),
+    DeleteBranch { name: String, force: bool },
+    /// Dropping a stash permanently destroys its diff.
+    DropStash { ref_name: String },
+    /// Force-with-lease rewrites remote history for everyone tracking it.
+    ForcePush,
+}
+
 #[derive(Clone, Debug)]
 pub struct QuestionPromptState {
     pub question: String,
@@ -135,6 +161,10 @@ pub struct WorkspaceView {
     pending_policies: VecDeque<PolicyPromptState>,
     policy_reject_expanded: bool,
     policy_patterns_expanded: bool,
+    /// P0-5: in-flight policy reply ids. Prevents double-click / keyboard+mouse
+    /// concurrent replies for the same prompt (second RPC would fail and
+    /// resurrect the dock via rollback).
+    pending_policy_reply: HashSet<String>,
     policy_rule_rows: Vec<PolicyRuleRow>,
     policy_auto_mode: bool,
     /// P1-4: mirrors `ui.show_turn_usage` (default true). Gates the per-turn
@@ -194,13 +224,33 @@ pub struct WorkspaceView {
     bash_transcripts: HashMap<String, crate::activity_timeline::BashTranscript>,
     terminal_focus: FocusHandle,
     pub(crate) session_busy: bool,
+    /// P0-2: true between Stop click and interrupt RPC completion.
+    /// While set the composer send button is disabled (no Stop->Send flip
+    /// on rapid double-click).
+    pub(crate) stopping: bool,
     session_status: SharedString,
     session_scroll: ScrollHandle,
     sidebar_scroll: ScrollHandle,
     terminal_scroll: ScrollHandle,
-    session_context_menu: Option<SessionId>,
-    project_context_menu: Option<String>,
+    pub(crate) session_context_menu: Option<SessionId>,
+    pub(crate) project_context_menu: Option<String>,
     popover_anchor: Option<Point<Pixels>>,
+    /// P0-6: two-stage delete confirm. First click arms the confirm, second
+    /// click executes. Prevents one-click data loss on session/project rows.
+    pub(crate) pending_session_delete: Option<SessionId>,
+    pub(crate) pending_project_remove: Option<String>,
+    /// P0-8: plan Implement overwrite confirm (plan_id awaiting decision) +
+    /// debounce timestamp. Prevents one-click draft loss and double-fire.
+    pub(crate) pending_plan_confirm: Option<String>,
+    pub(crate) last_plan_implement_at: Option<std::time::Instant>,
+    /// P2: true while an editor fs_write is in flight (debounces Ctrl+S).
+    pub(crate) editor_saving: bool,
+    /// P1-1: press-origin for click-confirm. `on_mouse_down` arms the id,
+    /// `on_mouse_up` fires only if the same id is still armed — so a
+    /// press-drag-release across rows never mis-fires (native click semantics).
+    pub(crate) pressed_row: Option<String>,
+    /// P1-8: active scrollbar thumb drag (start_y_px, start_offset_y_px).
+    pub(crate) scrollbar_drag: Option<(f32, f32)>,
     session_follow_tail: bool,
     pending_scroll_to_tail: bool,
     pending_scroll_to_activity_leaf: Option<String>,
@@ -238,12 +288,67 @@ pub struct WorkspaceView {
     child_projection_generation: Arc<AtomicU64>,
     last_sse_notify_at: Option<std::time::Instant>,
     session_todos: Vec<TodoItem>,
-    git_staged: Vec<crate::logic::GitStatusEntry>,
-    git_unstaged: Vec<crate::logic::GitStatusEntry>,
-    git_untracked: Vec<crate::logic::GitStatusEntry>,
-    git_diff_summary: Option<String>,
-    git_status_message: Option<String>,
-    git_log: Vec<String>,
+    pub(crate) git_staged: Vec<GitStatusEntry>,
+    pub(crate) git_unstaged: Vec<GitStatusEntry>,
+    pub(crate) git_untracked: Vec<GitStatusEntry>,
+    pub(crate) git_conflicted: Vec<GitStatusEntry>,
+    pub(crate) git_diff_summary: Option<String>,
+    pub(crate) git_status_message: Option<String>,
+    pub(crate) git_log: Vec<String>,
+    // Cursor-parity extended state (P0-P5).
+    pub(crate) git_branches: Vec<GitBranch>,
+    pub(crate) git_commits: Vec<GitCommitNode>,
+    pub(crate) git_stashes: Vec<GitStashEntry>,
+    pub(crate) git_remotes: Vec<GitRemote>,
+    pub(crate) git_tags: Vec<String>,
+    pub(crate) git_current_branch: Option<String>,
+    pub(crate) git_head_sha: Option<String>,
+    pub(crate) git_ahead: u32,
+    pub(crate) git_behind: u32,
+    pub(crate) git_busy: bool,
+    /// Short verdict line (e.g. "Commit failed"). Full hook output lives in
+    /// `git_error_detail` so the panel stays usable after a failure.
+    pub(crate) git_error: Option<String>,
+    pub(crate) git_error_detail: Option<String>,
+    pub(crate) git_error_expanded: bool,
+    pub(crate) git_notice: Option<String>,
+    pub(crate) git_commit_input: Entity<PromptInput>,
+    pub(crate) git_filter_input: Entity<PromptInput>,
+    pub(crate) git_branch_input: Entity<PromptInput>,
+    pub(crate) git_stash_input: Entity<PromptInput>,
+    pub(crate) git_selected: HashSet<String>,
+    pub(crate) git_changes_expanded: bool,
+    pub(crate) git_staged_expanded: bool,
+    pub(crate) git_conflict_expanded: bool,
+    pub(crate) git_untracked_expanded: bool,
+    pub(crate) git_graph_expanded: bool,
+    pub(crate) git_review_expanded: bool,
+    pub(crate) git_stash_expanded: bool,
+    pub(crate) git_remotes_expanded: bool,
+    pub(crate) git_show_tree: bool,
+    pub(crate) git_commit_no_verify: bool,
+    pub(crate) git_include_untracked_stash: bool,
+    pub(crate) git_review_scope: String,
+    pub(crate) git_review_scope_input: Entity<PromptInput>,
+    pub(crate) git_review_issues: Vec<GitReviewIssue>,
+    pub(crate) git_review_busy: bool,
+    pub(crate) git_ai_busy: bool,
+    pub(crate) git_graph_limit: usize,
+    pub(crate) git_hunks: HashMap<String, Vec<String>>,
+    pub(crate) git_hunks_expanded: HashSet<String>,
+    pub(crate) git_hunks_loading: HashSet<String>,
+    pub(crate) git_pending_confirm: Option<GitConfirm>,
+    /// Hovered change-row key (`"<group>/<path>"`) for the Cursor-style
+    /// floating action overlay. `None` renders compact rows with no overlay.
+    pub(crate) git_hovered_row: Option<String>,
+    /// Verdict title consumed by the next completing op (commit only):
+    /// proves the message box clears on success, never on failure.
+    pub(crate) git_pending_commit_ui: Option<String>,
+    /// Cursor-style split-button dropdowns (Commit ▾ / Find Issues ▾ /
+    /// branch box). Closed by default to match Cursor's minimal look.
+    pub(crate) git_commit_menu_open: bool,
+    pub(crate) git_review_scope_open: bool,
+    pub(crate) git_branch_box_open: bool,
     selected_detail_key: Option<String>,
     highlighted_todo_leaf_id: Option<String>,
     pub(crate) timeline_text_selection: Option<crate::selectable_text::TimelineTextSelection>,
@@ -313,16 +418,19 @@ impl WorkspaceView {
         });
         let file_editor_input = cx.new(crate::file_editor_input::FileEditorInput::new);
         cx.subscribe(&file_editor_input, |this, _, event, cx| {
-            if matches!(
-                event,
-                crate::file_editor_input::FileEditorInputEvent::Edited
-            ) {
-                if let Some(path) = this.editor.path.clone() {
-                    let content = this.file_editor_input.read(cx).text();
-                    this.editor_buffers.insert(path.clone(), content);
-                    this.editor_dirty.insert(path);
+            use crate::file_editor_input::FileEditorInputEvent as EditEvent;
+            match event {
+                EditEvent::Edited => {
+                    if let Some(path) = this.editor.path.clone() {
+                        let content = this.file_editor_input.read(cx).text();
+                        this.editor_buffers.insert(path.clone(), content);
+                        this.editor_dirty.insert(path);
+                    }
+                    cx.notify();
                 }
-                cx.notify();
+                EditEvent::SaveRequested => {
+                    this.save_editor_file(cx);
+                }
             }
         })
         .detach();
@@ -351,6 +459,7 @@ impl WorkspaceView {
         let question_input = cx.new(|cx| {
             let mut input = PromptInput::new(cx);
             input.set_element_id("question-input", cx);
+            input.set_key_context("QuestionInput", cx);
             input.set_placeholder(deepseekcode_i18n::t("workspace.answer_placeholder"), cx);
             input
         });
@@ -358,6 +467,56 @@ impl WorkspaceView {
             let mut input = PromptInput::new(cx);
             input.set_element_id("policy-pattern-input", cx);
             input.set_placeholder(deepseekcode_i18n::t("workspace.pattern_placeholder"), cx);
+            input
+        });
+        let git_commit_input = cx.new(|cx| {
+            let mut input = PromptInput::new(cx);
+            input.set_element_id("git-commit-input", cx);
+            input.set_placeholder(deepseekcode_i18n::t("git.commit_message"), cx);
+            input.set_key_context("GitCommitInput", cx);
+            // Cursor-style single-line box: small text, no padded shell
+            // (the panel draws its own bordered container).
+            input.set_small_text(true, cx);
+            input.set_compact(true, cx);
+            input
+        });
+        // All git inputs render compact (no 48px min-height shell): the
+        // panel draws its own fixed-height bordered containers instead.
+        let git_filter_input = cx.new(|cx| {
+            let mut input = PromptInput::new(cx);
+            input.set_element_id("git-filter-input", cx);
+            input.set_placeholder(deepseekcode_i18n::t("git.search_placeholder"), cx);
+            input.set_key_context("GitFilterInput", cx);
+            input.set_small_text(true, cx);
+            input.set_compact(true, cx);
+            input
+        });
+        let git_branch_input = cx.new(|cx| {
+            let mut input = PromptInput::new(cx);
+            input.set_element_id("git-branch-input", cx);
+            input.set_placeholder(deepseekcode_i18n::t("git.create_branch"), cx);
+            input.set_key_context("GitBranchInput", cx);
+            input.set_small_text(true, cx);
+            input.set_compact(true, cx);
+            input
+        });
+        let git_stash_input = cx.new(|cx| {
+            let mut input = PromptInput::new(cx);
+            input.set_element_id("git-stash-input", cx);
+            input.set_placeholder(deepseekcode_i18n::t("git.stash_push"), cx);
+            input.set_key_context("GitStashInput", cx);
+            input.set_small_text(true, cx);
+            input.set_compact(true, cx);
+            input
+        });
+        let git_review_scope_input = cx.new(|cx| {
+            let mut input = PromptInput::new(cx);
+            input.set_element_id("git-review-scope-input", cx);
+            input.set_placeholder("master", cx);
+            input.set_key_context("GitReviewScopeInput", cx);
+            input.set_text("master", cx);
+            input.set_small_text(true, cx);
+            input.set_compact(true, cx);
             input
         });
         let home_view = cx.new(HomeView::new);
@@ -383,6 +542,7 @@ impl WorkspaceView {
             pending_policies: VecDeque::new(),
             policy_reject_expanded: false,
             policy_patterns_expanded: false,
+            pending_policy_reply: HashSet::new(),
             policy_rule_rows: Vec::new(),
             policy_auto_mode: false,
             show_turn_usage: true,
@@ -431,6 +591,7 @@ impl WorkspaceView {
             bash_transcripts: HashMap::new(),
             terminal_focus: cx.focus_handle(),
             session_busy: false,
+            stopping: false,
             session_status: "Ready".into(),
             session_scroll: ScrollHandle::new(),
             sidebar_scroll: ScrollHandle::new(),
@@ -438,6 +599,13 @@ impl WorkspaceView {
             session_context_menu: None,
             project_context_menu: None,
             popover_anchor: None,
+            pending_session_delete: None,
+            pending_project_remove: None,
+            pending_plan_confirm: None,
+            last_plan_implement_at: None,
+            pressed_row: None,
+            editor_saving: false,
+            scrollbar_drag: None,
             session_follow_tail: true,
             pending_scroll_to_tail: false,
             pending_scroll_to_activity_leaf: None,
@@ -477,9 +645,55 @@ impl WorkspaceView {
             git_staged: Vec::new(),
             git_unstaged: Vec::new(),
             git_untracked: Vec::new(),
+            git_conflicted: Vec::new(),
             git_diff_summary: None,
             git_status_message: None,
             git_log: Vec::new(),
+            git_branches: Vec::new(),
+            git_commits: Vec::new(),
+            git_stashes: Vec::new(),
+            git_remotes: Vec::new(),
+            git_tags: Vec::new(),
+            git_current_branch: None,
+            git_head_sha: None,
+            git_ahead: 0,
+            git_behind: 0,
+            git_busy: false,
+            git_error: None,
+            git_error_detail: None,
+            git_error_expanded: true,
+            git_notice: None,
+            git_commit_input,
+            git_filter_input,
+            git_branch_input,
+            git_stash_input,
+            git_selected: HashSet::new(),
+            git_changes_expanded: true,
+            git_staged_expanded: true,
+            git_conflict_expanded: true,
+            git_untracked_expanded: true,
+            git_graph_expanded: true,
+            git_review_expanded: true,
+            git_stash_expanded: true,
+            git_remotes_expanded: false,
+            git_show_tree: false,
+            git_commit_no_verify: false,
+            git_include_untracked_stash: false,
+            git_review_scope: "master".to_string(),
+            git_review_scope_input,
+            git_review_issues: Vec::new(),
+            git_review_busy: false,
+            git_ai_busy: false,
+            git_graph_limit: 200,
+            git_hunks: HashMap::new(),
+            git_hunks_expanded: HashSet::new(),
+            git_hunks_loading: HashSet::new(),
+            git_pending_confirm: None,
+            git_hovered_row: None,
+            git_pending_commit_ui: None,
+            git_commit_menu_open: false,
+            git_review_scope_open: false,
+            git_branch_box_open: false,
             selected_detail_key: None,
             highlighted_todo_leaf_id: None,
             timeline_text_selection: None,
@@ -548,7 +762,7 @@ impl WorkspaceView {
             home.add_recent(path.clone());
             home.refresh_recent();
         });
-        self.reset_session_workspace_state();
+        self.reset_session_workspace_state(cx);
         self.session_nav_visible
             .insert(path.display().to_string(), 5);
         self.expanded_projects
@@ -573,7 +787,54 @@ impl WorkspaceView {
         }
     }
 
-    fn reset_session_workspace_state(&mut self) {
+    /// Clear per-session VIEW state (timeline, todos, prompts, selections).
+    ///
+    /// Called on session switch AND new-session creation so the incoming
+    /// session never inherits the previous session's UI. Does NOT touch
+    /// `session_id`, generations, editor buffers, or project state.
+    fn clear_session_view_state(&mut self, cx: &mut Context<Self>) {
+        self.session_plans.clear();
+        self.plan_picker_expanded = false;
+        self.activity.session_events.clear();
+        self.activity.session_messages.clear();
+        self.activity.child_session_projections.clear();
+        self.child_projection_generation
+            .fetch_add(1, Ordering::SeqCst);
+        self.activity.activity_tree = ActivityTree::default();
+        self.activity.detail_store = crate::activity_timeline::DetailStore::default();
+        self.activity.expanded_activity_groups.clear();
+        self.activity.collapsed_activity_groups.clear();
+        self.activity.expanded_activity_leaves.clear();
+        self.highlighted_todo_leaf_id = None;
+        self.highlighted_todo_index = None;
+        self.bash_output_detail_ref = None;
+        self.session_todos.clear();
+        self.composer_todo_expanded = false;
+        self.selected_detail_key = None;
+        self.pending_question = None;
+        self.question_input.update(cx, |input, cx| input.clear(cx));
+        self.pending_policies.clear();
+        self.policy_reject_expanded = false;
+        self.session_menu_open = false;
+        self.activity.since_seq = 0;
+        self.selected_message_id = None;
+        self.context_usage = ContextUsageState::default();
+        self.timeline_text_selection = None;
+        self.timeline_text_layouts.clear();
+        self.timeline_text_press = None;
+        self.timeline_row_press = None;
+        // Stale-run guards and the deferred queue belong to the previous
+        // session's run; a fresh session starts with small seq numbers that
+        // must never be mistaken for stale.
+        self.activity.ignore_stale_run_events = false;
+        self.activity.stale_run_cutoff_seq = None;
+        self.activity.pending_hydration_events.clear();
+        // In-flight editor file loads belong to the previous context.
+        self.open_generation = self.open_generation.wrapping_add(1);
+        self.session_follow_tail = true;
+    }
+
+    fn reset_session_workspace_state(&mut self, cx: &mut Context<Self>) {
         let pending_new = self.pending_new_session;
         let pending_switch = self.pending_switch_session;
         self.hydrate_generation.fetch_add(1, Ordering::SeqCst);
@@ -581,18 +842,12 @@ impl WorkspaceView {
         self.activity.timeline_render_generation =
             self.activity.timeline_render_generation.wrapping_add(1);
         self.session_id = None;
-        self.activity.since_seq = 0;
-        self.selected_message_id = None;
-        self.session_follow_tail = true;
-        self.context_usage = ContextUsageState::default();
+        self.clear_session_view_state(cx);
         self.active_session_ids.clear();
         self.activity.session_events_enabled = false;
-        self.activity.ignore_stale_run_events = false;
-        self.activity.stale_run_cutoff_seq = None;
         self.backup_dirty_editor_buffers();
         self.editor_buffers.clear();
         self.editor_dirty.clear();
-        self.open_generation = self.open_generation.wrapping_add(1);
         self.pending_new_session = false;
         self.pending_switch_session = None;
         self.set_session_busy(false, "Ready");
@@ -603,6 +858,15 @@ impl WorkspaceView {
     pub(crate) fn toggle_context_usage_detail(&mut self, cx: &mut Context<Self>) {
         self.context_usage.expanded = !self.context_usage.expanded;
         cx.notify();
+    }
+
+    pub(crate) fn close_context_usage_detail(&mut self, cx: &mut Context<Self>) {
+        // P1-6: external close (Esc / overlay) so the popup can't stack with
+        // composer dropdowns forever.
+        if self.context_usage.expanded {
+            self.context_usage.expanded = false;
+            cx.notify();
+        }
     }
 
     pub(crate) fn close_revert_dock(&mut self, cx: &mut Context<Self>) {
@@ -735,26 +999,55 @@ impl WorkspaceView {
     }
 
     pub(crate) fn fork_current_session(&mut self, cx: &mut Context<Self>) {
+        // P2 SH7: plain Fork forks the whole session (until=None).
+        self.fork_session_with_until(None, cx);
+    }
+
+    pub(crate) fn fork_current_session_from_message(&mut self, cx: &mut Context<Self>) {
+        // P2 SH7: Fork-from-message honors the timeline selection.
+        let until_message_id = self.selected_message_id;
+        self.fork_session_with_until(until_message_id, cx);
+    }
+
+    fn fork_session_with_until(
+        &mut self,
+        until_message_id: Option<deepseekcode_types::MessageId>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(session_id) = self.session_id else {
             return;
         };
-        let until_message_id = self.selected_message_id;
         let client_slot = Arc::clone(&self.client);
         cx.spawn(async move |view, cx| {
             let client = lock_sdk_client(&client_slot).await;
             let Some(client) = client else {
-                return;
-            };
-            if let Ok(session) = client.fork_session(session_id, until_message_id).await {
                 let _ = view.update(cx, |this, cx| {
-                    this.session_id = Some(session.id);
-                    this.activity.since_seq = 0;
-                    this.hydrate_session_from_api(cx, true);
+                    this.composer_error = Some(deepseekcode_i18n::t("workspace.stop_unreachable"));
                     cx.notify();
                 });
-                let _ = view.update(cx, |this, cx| {
-                    this.refresh_project_nav_from_client(cx);
-                });
+                return;
+            };
+            match client.fork_session(session_id, until_message_id).await {
+                Ok(session) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.session_id = Some(session.id);
+                        this.activity.since_seq = 0;
+                        this.hydrate_session_from_api(cx, true);
+                        cx.notify();
+                    });
+                    let _ = view.update(cx, |this, cx| {
+                        this.refresh_project_nav_from_client(cx);
+                    });
+                }
+                Err(e) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.composer_error = Some(deepseekcode_i18n::tr!(
+                            "workspace.delete_failed",
+                            "error" => e.to_string()
+                        ));
+                        cx.notify();
+                    });
+                }
             }
         })
         .detach();
@@ -762,28 +1055,49 @@ impl WorkspaceView {
 
     pub(crate) fn export_current_session(&mut self, cx: &mut Context<Self>) {
         let Some(session_id) = self.session_id else {
+            self.composer_error = Some(deepseekcode_i18n::t("workspace.no_active_session"));
+            cx.notify();
             return;
         };
         let sanitize = self.export_sanitize;
         let client_slot = Arc::clone(&self.client);
-        cx.spawn(async move |_view, _cx| {
+        cx.spawn(async move |view, cx| {
             let client = lock_sdk_client(&client_slot).await;
             let Some(client) = client else {
+                let _ = view.update(cx, |this, cx| {
+                    this.composer_error =
+                        Some(deepseekcode_i18n::t("workspace.stop_unreachable"));
+                    cx.notify();
+                });
                 return;
             };
             let export_result = client
                 .export_session_with_sanitize(session_id, sanitize)
                 .await;
-            if let Ok(data) = export_result {
-                let default_name = format!("{SESSION_EXPORT_PREFIX}-{session_id}.json");
-                let dest = rfd::FileDialog::new()
-                    .set_file_name(&default_name)
-                    .save_file();
-                let Some(path) = dest else {
+            let data = match export_result {
+                Ok(d) => d,
+                Err(e) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.composer_error = Some(deepseekcode_i18n::tr!(
+                            "workspace.delete_failed",
+                            "error" => e.to_string()
+                        ));
+                        cx.notify();
+                    });
                     return;
-                };
-                if let Ok(json) = serde_json::to_string_pretty(&data) {
-                    if std::fs::write(&path, json).is_ok() {
+                }
+            };
+            let default_name = format!("{SESSION_EXPORT_PREFIX}-{session_id}.json");
+            let dest = rfd::FileDialog::new()
+                .set_file_name(&default_name)
+                .save_file();
+            let Some(path) = dest else {
+                // User cancelled — not an error, stay silent.
+                return;
+            };
+            match serde_json::to_string_pretty(&data) {
+                Ok(json) => match std::fs::write(&path, json) {
+                    Ok(()) => {
                         tracing::info!(
                             target: deepseekcode_telemetry::DESKTOP,
                                 run_id = %deepseekcode_telemetry::current_run_id(),
@@ -799,6 +1113,24 @@ impl WorkspaceView {
                             ))
                             .show();
                     }
+                    Err(e) => {
+                        let _ = view.update(cx, |this, cx| {
+                            this.composer_error = Some(deepseekcode_i18n::tr!(
+                                "workspace.delete_failed",
+                                "error" => e.to_string()
+                            ));
+                            cx.notify();
+                        });
+                    }
+                },
+                Err(e) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.composer_error = Some(deepseekcode_i18n::tr!(
+                            "workspace.delete_failed",
+                            "error" => e.to_string()
+                        ));
+                        cx.notify();
+                    });
                 }
             }
         })
@@ -895,15 +1227,22 @@ impl WorkspaceView {
                     }
                     this.ensure_session_visible_in_nav(session.id);
                     this.hydrate_generation.fetch_add(1, Ordering::SeqCst);
+                    this.event_stream_generation.fetch_add(1, Ordering::SeqCst);
                     this.session_id = Some(session.id);
+                    // Same full cleanup as a session switch: the new session
+                    // must not inherit the previous session's timeline,
+                    // todos, pending approvals, or text selection.
+                    this.clear_session_view_state(cx);
+                    this.sync_agent_from_nav(session.id);
                     // New session owns no tabs yet: pin the cursor so the
                     // post-hydrate shell guarantee becomes the active tab.
                     this.fix_active_terminal_visible();
-                    this.activity.since_seq = 0;
-                    this.context_usage = ContextUsageState::default();
                     this.sync_context_window();
-                    this.set_session_busy(false, "Ready");
+                    this.set_session_busy(false, "Loading session…");
+                    this.schedule_session_loading_repaint(cx);
                     this.hydrate_session_from_api(cx, true);
+                    this.refresh_revert_staged(cx);
+                    this.refresh_session_plans(cx);
                     this.refresh_project_nav_from_client(cx);
                     cx.notify();
                 });
@@ -918,42 +1257,16 @@ impl WorkspaceView {
         }
         self.ensure_session_visible_in_nav(session_id);
         self.hydrate_generation.fetch_add(1, Ordering::SeqCst);
+        self.event_stream_generation.fetch_add(1, Ordering::SeqCst);
         self.session_id = Some(session_id);
         self.sync_agent_from_nav(session_id);
-        self.session_plans.clear();
-        self.plan_picker_expanded = false;
-        self.activity.session_events.clear();
-        self.activity.session_messages.clear();
-        self.activity.child_session_projections.clear();
-        self.activity.activity_tree = ActivityTree::default();
-        self.activity.detail_store = crate::activity_timeline::DetailStore::default();
-        self.activity.expanded_activity_groups.clear();
-        self.activity.collapsed_activity_groups.clear();
-        self.activity.expanded_activity_leaves.clear();
-        self.highlighted_todo_leaf_id = None;
-        self.highlighted_todo_index = None;
-        self.bash_output_detail_ref = None;
-        self.session_todos.clear();
-        self.composer_todo_expanded = false;
-        self.selected_detail_key = None;
-        self.pending_question = None;
-        self.question_input.update(cx, |input, cx| input.clear(cx));
-        self.pending_policies.clear();
-        self.policy_reject_expanded = false;
-        self.activity.since_seq = 0;
-        self.selected_message_id = None;
-        self.context_usage = ContextUsageState::default();
-        self.timeline_text_selection = None;
-        self.timeline_text_layouts.clear();
-        self.timeline_text_press = None;
-        self.timeline_row_press = None;
+        self.clear_session_view_state(cx);
         self.sync_context_window();
         self.set_session_busy(false, "Loading session…");
         self.schedule_session_loading_repaint(cx);
         self.hydrate_session_from_api(cx, true);
         self.refresh_revert_staged(cx);
         self.refresh_session_plans(cx);
-        self.session_menu_open = false;
         // Tabs are session-scoped: land the cursor on this session's tab so
         // input/render never address the previous session's terminals.
         self.fix_active_terminal_visible();
@@ -1194,17 +1507,39 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// P1-1: arm a press-origin for click-confirm semantics.
+    pub(crate) fn arm_click(&mut self, id: String, cx: &mut Context<Self>) {
+        self.pressed_row = Some(id);
+        cx.notify();
+    }
+
+    /// P1-1: confirm a release matches the armed press-origin. Returns true
+    /// only for a genuine click (down+up on the same row); drag-through and
+    /// scroll releases return false. Always disarms.
+    pub(crate) fn confirm_click(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let ok = self.pressed_row.as_deref() == Some(id);
+        self.pressed_row = None;
+        if !ok {
+            cx.notify();
+        }
+        ok
+    }
+
     pub(crate) fn close_popover(&mut self, cx: &mut Context<Self>) {
         let changed = self.session_context_menu.is_some()
             || self.project_context_menu.is_some()
             || self.session_menu_open
             || self.composer_dropdown.is_some()
-            || self.popover_anchor.is_some();
+            || self.popover_anchor.is_some()
+            || self.pending_session_delete.is_some()
+            || self.pending_project_remove.is_some();
         self.session_context_menu = None;
         self.project_context_menu = None;
         self.session_menu_open = false;
         self.composer_dropdown = None;
         self.popover_anchor = None;
+        self.pending_session_delete = None;
+        self.pending_project_remove = None;
         if changed {
             cx.notify();
         }
@@ -1226,21 +1561,59 @@ impl WorkspaceView {
         self.close_popover(cx);
     }
 
+    pub(crate) fn request_delete_session(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
+        // P0-6: arm a two-stage confirm instead of deleting immediately.
+        self.session_context_menu = None;
+        self.pending_session_delete = Some(session_id);
+        // Keep popover_anchor so the confirm renders in the overlay.
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_pending_delete(&mut self, cx: &mut Context<Self>) {
+        self.pending_session_delete = None;
+        self.pending_project_remove = None;
+        self.popover_anchor = None;
+        self.session_context_menu = None;
+        self.project_context_menu = None;
+        cx.notify();
+    }
+
+    pub(crate) fn request_remove_project(&mut self, path: String, cx: &mut Context<Self>) {
+        // P0-6: arm a two-stage confirm instead of removing immediately.
+        self.project_context_menu = None;
+        self.pending_project_remove = Some(path);
+        cx.notify();
+    }
+
     pub(crate) fn delete_session_by_id(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
+        self.pending_session_delete = None;
         self.close_session_context_menu(cx);
         let deleting_active = self.session_id == Some(session_id);
         let client_slot = Arc::clone(&self.client);
         cx.spawn(async move |view, cx| {
             let client = lock_sdk_client(&client_slot).await;
+            let mut delete_err: Option<String> = None;
             if let Some(client) = client {
-                let _ = client.delete_session(session_id).await;
+                if let Err(e) = client.delete_session(session_id).await {
+                    delete_err = Some(e.to_string());
+                }
             }
             let _ = view.update(cx, |this, cx| {
+                if let Some(err) = delete_err {
+                    // P0-6: surface failure instead of silently refreshing.
+                    this.composer_error = Some(deepseekcode_i18n::tr!(
+                        "workspace.delete_failed",
+                        "error" => err
+                    ));
+                    cx.notify();
+                    return;
+                }
                 if deleting_active {
                     this.session_id = None;
                     this.activity.since_seq = 0;
                     this.selected_message_id = None;
                     this.session_busy = false;
+                    this.stopping = false;
                     this.session_status = "Ready".into();
                 }
                 this.session_first_prompts.remove(&session_id);
@@ -1276,6 +1649,15 @@ impl WorkspaceView {
                 break;
             }
         }
+    }
+
+    pub(crate) fn confirm_remove_project(&mut self, cx: &mut Context<Self>) {
+        // P0-6: execute the armed project removal.
+        if let Some(path) = self.pending_project_remove.take() {
+            self.remove_project_from_sidebar(path, cx);
+        }
+        self.popover_anchor = None;
+        cx.notify();
     }
 
     pub(crate) fn remove_project_from_sidebar(&mut self, path: String, cx: &mut Context<Self>) {
@@ -1510,6 +1892,26 @@ impl WorkspaceView {
         .detach();
     }
 
+    pub(crate) fn refresh_health(&mut self, cx: &mut Context<Self>) {
+        // P2 T4: manual retry for the titlebar health indicator.
+        let client_slot = Arc::clone(&self.client);
+        cx.spawn(async move |view, cx| {
+            let ok = {
+                let client = lock_sdk_client(&client_slot).await;
+                match client {
+                    Some(c) => c.health().await.is_ok(),
+                    None => false,
+                }
+            };
+            let _ = view.update(cx, |this, cx| {
+                this.health_ok = ok;
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn schedule_session_loading_repaint(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |view, cx| loop {
             tokio::time::sleep(std::time::Duration::from_millis(120)).await;
@@ -1611,7 +2013,7 @@ impl WorkspaceView {
             let child_ids = task_child_session_ids(&session_events);
             let expanded_group = last_provider_turn_group_id(&activity_tree);
             let git_status = if let Some(dir) = project_dir {
-                tokio::task::spawn_blocking(move || collect_git_status(&dir))
+                tokio::task::spawn_blocking(move || collect_git_status(&dir, 200))
                     .await
                     .ok()
             } else {
@@ -2190,8 +2592,19 @@ Describe this project so the AI assistant has context.\n\n\
         }
     }
 
+    /// Drop editor-preview text layouts: their block keys are path-namespaced,
+    /// so a previous file's stale rects must never capture drags in the new
+    /// file's preview (timeline layouts are untouched).
+    fn clear_editor_text_layouts(&mut self) {
+        self.timeline_text_layouts
+            .retain(|_, layout| layout.surface != crate::selectable_text::TextSurface::Editor);
+    }
+
     fn load_editor_buffer(&mut self, path: &str, content: String, cx: &mut Context<Self>) {
         self.editor.path = Some(path.to_string());
+        // Opening a file always lands in Code view; Preview is opt-in.
+        self.editor.md_preview = false;
+        self.clear_editor_text_layouts();
         self.editor.set_content(content.clone());
         let file_input = self.file_editor_input.clone();
         let editor_text = content;
@@ -2262,6 +2675,8 @@ Describe this project so the AI assistant has context.\n\n\
                     }
                     let text = content.unwrap_or_default();
                     this.editor.path = Some(path.clone());
+                    this.editor.md_preview = false;
+                    this.clear_editor_text_layouts();
                     this.editor.set_content(text.clone());
                     this.editor.diff_hunks = diff;
                     this.editor_buffers.insert(path.clone(), text.clone());
@@ -2296,7 +2711,7 @@ Describe this project so the AI assistant has context.\n\n\
             home.add_recent(path.clone());
             home.refresh_recent();
         });
-        self.reset_session_workspace_state();
+        self.reset_session_workspace_state(cx);
         self.session_nav_visible
             .insert(path.display().to_string(), 5);
         self.expanded_projects
@@ -2356,8 +2771,16 @@ Describe this project so the AI assistant has context.\n\n\
 
     pub(crate) fn show_more_project_sessions(&mut self, path: String, cx: &mut Context<Self>) {
         const PAGE: usize = 5;
-        let next = self.session_nav_visible.get(&path).copied().unwrap_or(PAGE) + PAGE;
-        self.session_nav_visible.insert(path, next);
+        // P2 S9: normalize the key — sidebar looks up by project_path_key,
+        // raw display strings would miss and reset the limit to 5.
+        let key = project_path_key(&path);
+        let next = self
+            .session_nav_visible
+            .get(&key)
+            .copied()
+            .unwrap_or(PAGE)
+            + PAGE;
+        self.session_nav_visible.insert(key, next);
         cx.notify();
     }
 
@@ -2378,9 +2801,10 @@ Describe this project so the AI assistant has context.\n\n\
         };
         const PAGE: usize = 5;
         let need = index + 1;
-        let current = self.session_nav_visible.get(&path).copied().unwrap_or(PAGE);
+        let key = project_path_key(&path);
+        let current = self.session_nav_visible.get(&key).copied().unwrap_or(PAGE);
         if need > current {
-            self.session_nav_visible.insert(path, need);
+            self.session_nav_visible.insert(key, need);
         }
     }
 
@@ -2551,8 +2975,7 @@ Describe this project so the AI assistant has context.\n\n\
             // server validates the PTY against its own cwd and rejects the
             // upgrade (403/404) whenever the app was launched elsewhere —
             // a shell that looks idle but can never receive input.
-            let ws_request =
-                crate::terminal_vscode::pty_ws_request(&ws_url, client.directory());
+            let ws_request = crate::terminal_vscode::pty_ws_request(&ws_url, client.directory());
 
             let _ = view.update(cx, |this, cx| {
                 if let Some(tab) = this.terminals.iter_mut().find(|t| t.id == tab_id) {
@@ -2734,11 +3157,7 @@ Describe this project so the AI assistant has context.\n\n\
     ) {
         let tab_idx = self.ensure_bash_terminal_tab(detail_key, cx, session);
         let (grid, buffer, tab_id) = match self.terminals.get(tab_idx) {
-            Some(tab) => (
-                Arc::clone(&tab.grid),
-                Arc::clone(&tab.buffer),
-                tab.id,
-            ),
+            Some(tab) => (Arc::clone(&tab.grid), Arc::clone(&tab.buffer), tab.id),
             None => return,
         };
         if let Some(tab) = self.terminals.get_mut(tab_idx) {
@@ -2776,8 +3195,7 @@ Describe this project so the AI assistant has context.\n\n\
             // Agent PTYs need no ticket (REST auth middleware covers the
             // route); the project directory header is the ownership proof.
             let ws_url = client.ws_url(&format!("/api/v1/agent-pty/{pty_id}/connect"));
-            let ws_request =
-                crate::terminal_vscode::pty_ws_request(&ws_url, client.directory());
+            let ws_request = crate::terminal_vscode::pty_ws_request(&ws_url, client.directory());
             let ws = match connect_async(ws_request).await {
                 Ok((ws, _)) => ws,
                 Err(e) => {
@@ -3370,13 +3788,69 @@ Describe this project so the AI assistant has context.\n\n\
                     token_usage_from_payload(&event.payload)
                 {
                     self.apply_token_usage(input, output, reasoning_tokens);
-                    // P1-4: per-turn cache receipt, gated by `ui.show_turn_usage`.
+                    // Per-turn receipt + per-model cost, gated by `ui.show_turn_usage`.
                     // Display-only: the server always records the fields.
                     self.context_usage.last_receipt =
                         deepseekcode_core::cache_status::receipt_from_payload(
                             &event.payload,
                             self.show_turn_usage,
                         );
+                    let model = event.payload
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    self.context_usage.last_model = model.clone();
+                    // Prefer server-stamped cost; fall back to local catalog so
+                    // old events still show money instead of going blind.
+                    let (cost, currency) = match (
+                        event.payload.get("estimated_cost").and_then(|v| v.as_f64()),
+                        event.payload.get("currency").and_then(|v| v.as_str()),
+                    ) {
+                        (Some(c), Some(cur)) => (c, cur.to_string()),
+                        (Some(c), None) => (c, "CNY".to_string()),
+                        _ => {
+                            let cur = event
+                                .payload
+                                .get("currency")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("CNY");
+                            match deepseekcode_core::pricing::rate_for(&model, cur) {
+                                Some((card, _)) => {
+                                    let hit = event.payload.get("cache_hit").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    let miss = event.payload.get("cache_miss").and_then(|v| v.as_u64()).unwrap_or_else(|| {
+                                        (input as u64).saturating_sub(hit)
+                                    });
+                                    let c = deepseekcode_core::pricing::cost_for_tokens(
+                                        hit,
+                                        miss,
+                                        output as u64,
+                                        &card,
+                                    );
+                                    (c, card.currency.clone())
+                                }
+                                None => (0.0, cur.to_string()),
+                            }
+                        }
+                    };
+                    if cost > 0.0 && self.show_turn_usage {
+                        self.context_usage.last_cost =
+                            deepseekcode_core::pricing::format_cost(&currency, cost);
+                    } else if !self.show_turn_usage {
+                        self.context_usage.last_cost = String::new();
+                    }
+                    // Session total accumulates so the meter is always current.
+                    if cost > 0.0 {
+                        if self.context_usage.session_currency.is_empty() {
+                            self.context_usage.session_currency = currency.clone();
+                        }
+                        // Mixed-currency sessions keep the first currency bucket;
+                        // per-model split stays exact in `/cache-status.models[]`.
+                        if self.context_usage.session_currency == currency {
+                            self.context_usage.session_cost += cost;
+                        }
+                        self.context_usage.session_turns += 1;
+                    }
                 } else {
                     self.apply_token_usage(
                         0,
@@ -3387,6 +3861,8 @@ Describe this project so the AI assistant has context.\n\n\
                     // previous receipt instead of showing a stale card next
                     // to fresh estimates.
                     self.context_usage.last_receipt = String::new();
+                    self.context_usage.last_cost = String::new();
+                    self.context_usage.last_model = String::new();
                 }
                 if has_tool_calls {
                     self.set_session_busy(true, "Running tools…");
@@ -3406,12 +3882,8 @@ Describe this project so the AI assistant has context.\n\n\
                 self.set_session_busy(true, format!("Running tool: {name}"));
                 if let Some(id) = event.payload["tool_call_id"].as_str() {
                     // Join key: progress chunks travel under the internal id.
-                    if let Some(internal) =
-                        event.payload["internal_tool_call_id"].as_str()
-                    {
-                        self.activity
-                            .detail_store
-                            .alias_tool_call(internal, id);
+                    if let Some(internal) = event.payload["internal_tool_call_id"].as_str() {
+                        self.activity.detail_store.alias_tool_call(internal, id);
                     }
                     self.activity.detail_store.insert(
                         id,
@@ -3573,8 +4045,7 @@ Describe this project so the AI assistant has context.\n\n\
                     // the placeholder tab into the real running terminal.
                     if event.payload["stream"].as_str() == Some("pty") {
                         let chunk = event.payload["chunk"].as_str().unwrap_or("");
-                        if let Some(pty_id) = crate::terminal_vscode::parse_agent_pty_id(chunk)
-                        {
+                        if let Some(pty_id) = crate::terminal_vscode::parse_agent_pty_id(chunk) {
                             self.attach_agent_pty_tab(id, &pty_id, event.session_id, cx);
                         }
                     }
@@ -3861,6 +4332,18 @@ Describe this project so the AI assistant has context.\n\n\
         // Cancel any in-flight timeline hydration so it cannot wipe the optimistic user row.
         self.hydrate_generation.fetch_add(1, Ordering::SeqCst);
         self.start_event_listener(cx);
+        // The kill above may have cancelled the hydrate that would have
+        // enabled live events (new session + immediate prompt). Never leave
+        // the session with events disabled here, or streamed output is
+        // deferred forever and the LLM reply never renders.
+        if !self.activity.session_events_enabled {
+            let head = self.activity.since_seq;
+            self.activity.enable_session_events(head);
+            let replay = self.activity.take_pending_events_after(head);
+            for event in replay {
+                self.apply_event(event, cx);
+            }
+        }
         let user_prompt = text.clone();
         let Some(session_id) = self.session_id else {
             cx.notify();
@@ -4000,6 +4483,11 @@ Describe this project so the AI assistant has context.\n\n\
     /// e.g. the `PromptAdmitted`→`wake()` admission window) left the composer
     /// pinned to "Stopping…" with a stop button that re-issued the same no-op.
     pub(crate) fn interrupt_session(&mut self, cx: &mut Context<Self>) {
+        // P0-2: debounce — a rapid second click while the interrupt RPC is in
+        // flight must not flip into Send.
+        if self.stopping {
+            return;
+        }
         let Some(session_id) = self.session_id else {
             self.composer_error = Some(deepseekcode_i18n::t("workspace.no_active_session"));
             self.set_session_busy(false, "Ready");
@@ -4019,6 +4507,7 @@ Describe this project so the AI assistant has context.\n\n\
         self.policy_reject_expanded = false;
         self.policy_patterns_expanded = false;
         self.pending_question = None;
+        self.stopping = true;
         self.set_session_busy(false, "Stopping…");
         cx.notify();
 
@@ -4028,30 +4517,36 @@ Describe this project so the AI assistant has context.\n\n\
             let Some(client) = client else {
                 // Previously a silent no-op: no request, no status change.
                 let _ = view.update(cx, |this, cx| {
+                    this.stopping = false;
                     this.composer_error = Some(deepseekcode_i18n::t("workspace.stop_unreachable"));
                     this.set_session_busy(false, "Error");
                     cx.notify();
                 });
                 return;
             };
-            if let Err(e) = client.interrupt(session_id).await {
-                tracing::error!(
-                    target: deepseekcode_telemetry::DESKTOP,
-                    run_id = %deepseekcode_telemetry::current_run_id(),
-                    session_id = %session_id,
-                    error = %e,
-                    "interrupt failed"
-                );
-                let _ = view.update(cx, |this, cx| {
+            let result = client.interrupt(session_id).await;
+            let _ = view.update(cx, |this, cx| {
+                this.stopping = false;
+                if let Err(e) = result {
+                    tracing::error!(
+                        target: deepseekcode_telemetry::DESKTOP,
+                        run_id = %deepseekcode_telemetry::current_run_id(),
+                        session_id = %session_id,
+                        error = %e,
+                        "interrupt failed"
+                    );
                     // Surface the reason: the header alone said only "Error".
                     this.composer_error = Some(deepseekcode_i18n::tr!(
                         "workspace.stop_failed",
                         "error" => e.to_string()
                     ));
                     this.set_session_busy(false, "Error");
-                    cx.notify();
-                });
-            }
+                }
+                // On success keep the local "Stopping…" state: the SSE
+                // `SessionInterrupted` event will drive Ready/Interrupted.
+                // Clearing `stopping` re-enables Send for the next prompt.
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -4091,7 +4586,14 @@ Describe this project so the AI assistant has context.\n\n\
         } else {
             Some(SharedString::from(kind))
         };
+        // P1-3: clear ALL competing popovers so the composer dropdown can
+        // never be shadowed by a stale session/project/session-menu layer
+        // (render_popover_overlay is an if/else-if priority chain).
         self.session_context_menu = None;
+        self.project_context_menu = None;
+        self.session_menu_open = false;
+        self.pending_session_delete = None;
+        self.pending_project_remove = None;
         self.composer_dropdown = next;
         self.popover_anchor = if self.composer_dropdown.is_some() {
             Some(anchor)
@@ -4359,13 +4861,32 @@ Describe this project so the AI assistant has context.\n\n\
         );
     }
 
-    pub(crate) fn handle_policy_deny_click(&mut self, id: String, cx: &mut Context<Self>) {
+    pub(crate) fn handle_policy_deny_click(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // P1-7: two-stage deny — first click expands AND focuses the reason box
+        // (previously focus stayed in the main input so typing went nowhere).
+        if self.pending_policy_reply.contains(&id) {
+            return;
+        }
         if self.policy_reject_expanded {
             self.respond_policy_reject(Some(id), cx);
         } else {
             self.policy_reject_expanded = true;
+            let handle = self.permission_deny_input.read(cx).focus_handle_clone();
+            window.focus(&handle, cx);
             cx.notify();
         }
+    }
+
+    pub(crate) fn cancel_policy_reject(&mut self, cx: &mut Context<Self>) {
+        // P1-7: collapse the reason box without sending a reply.
+        self.policy_reject_expanded = false;
+        self.clear_policy_reject_input(cx);
+        cx.notify();
     }
 
     pub(crate) fn respond_policy_reject(&mut self, id: Option<String>, cx: &mut Context<Self>) {
@@ -4392,7 +4913,15 @@ Describe this project so the AI assistant has context.\n\n\
     }
 
     fn send_policy_reply(&mut self, id: String, reply: PolicyReply, cx: &mut Context<Self>) {
+        // P0-5: debounce — ignore concurrent replies for the same prompt.
+        if self.pending_policy_reply.contains(&id) {
+            return;
+        }
+        self.pending_policy_reply.insert(id.clone());
         self.remove_policy_prompt(&id);
+        // P0-5: reset transient dock state so the next approval starts folded.
+        self.policy_reject_expanded = false;
+        self.policy_patterns_expanded = false;
         // Approving/denying unblocks the run, which continues at the bottom:
         // pin the timeline there. Otherwise the viewport stays at the removed
         // dock's old offset, which reads as "jumped to the item's top".
@@ -4412,13 +4941,19 @@ Describe this project so the AI assistant has context.\n\n\
                         "policy reply failed"
                     );
                     let _ = view.update(cx, |this, cx| {
+                        this.pending_policy_reply.remove(&id);
                         this.sync_pending_permissions(cx);
                         this.composer_error =
                             Some(deepseekcode_i18n::t("workspace.policy_reply_failed"));
                         cx.notify();
                     });
+                    return;
                 }
             }
+            let _ = view.update(cx, |this, cx| {
+                this.pending_policy_reply.remove(&id);
+                cx.notify();
+            });
             let _ = view.update(cx, |_, cx| cx.notify());
         })
         .detach();
@@ -4486,6 +5021,14 @@ Describe this project so the AI assistant has context.\n\n\
             }
         })
         .detach();
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_pending_question(&mut self, cx: &mut Context<Self>) {
+        // P0-7: every modal needs an exit. Previously the question dialog had
+        // no Cancel/X/Esc and a dead session could trap focus forever.
+        // We keep the typed text so a mis-click doesn't lose work.
+        self.pending_question = None;
         cx.notify();
     }
 
@@ -4622,6 +5165,23 @@ Describe this project so the AI assistant has context.\n\n\
     }
 
     pub(crate) fn implement_from_plan(&mut self, plan_id: &str, cx: &mut Context<Self>) {
+        // P0-8: debounce — ignore rapid double-clicks (<800ms).
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_plan_implement_at {
+            if now.duration_since(last).as_millis() < 800 {
+                return;
+            }
+        }
+        // P0-8: don't silently clobber a non-empty draft. Arm a confirm with
+        // Append / Replace / Cancel instead.
+        let draft = self.prompt_input.read(cx).text();
+        if !draft.trim().is_empty() && self.pending_plan_confirm.as_deref() != Some(plan_id) {
+            self.pending_plan_confirm = Some(plan_id.to_string());
+            cx.notify();
+            return;
+        }
+        self.pending_plan_confirm = None;
+        self.last_plan_implement_at = Some(now);
         let Some(plan) = self
             .session_plans
             .iter()
@@ -4633,14 +5193,75 @@ Describe this project so the AI assistant has context.\n\n\
         self.plan_picker_expanded = false;
         self.set_agent("build", cx);
         let prompt = implement_prompt_from_plan_path(&plan.plan_path);
+        // If a draft existed and the user confirmed Replace, overwrite;
+        // Append path is handled by confirm_plan_implement_append.
         self.prompt_input.update(cx, |input, cx| {
             input.set_text(&prompt, cx);
         });
         // Implementing implies the dock is handled: persist dismissed so it
-        // does not linger after switching to build.
+        // does not linger after switching to build. Local flag first (instant
+        // hide), server dismiss best-effort so reload doesn't resurrect it.
         if let Some(p) = self.session_plans.iter_mut().find(|p| p.plan_id == plan_id) {
             p.implement_prompt_dismissed = true;
         }
+        if let Some(session_id) = self.session_id {
+            let plan_id_owned = plan_id.to_string();
+            let client_slot = Arc::clone(&self.client);
+            cx.spawn(async move |_, _cx| {
+                if let Some(client) = lock_sdk_client(&client_slot).await {
+                    let _ = client
+                        .dismiss_plan_implement_prompt(session_id, &plan_id_owned)
+                        .await;
+                }
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn confirm_plan_implement_replace(&mut self, cx: &mut Context<Self>) {
+        if let Some(plan_id) = self.pending_plan_confirm.take() {
+            // Clear the draft guard by emptying first, then run the normal path.
+            self.prompt_input.update(cx, |input, cx| {
+                input.set_text("", cx);
+            });
+            // Reset debounce so the confirmed click isn't swallowed.
+            self.last_plan_implement_at = None;
+            self.implement_from_plan(&plan_id, cx);
+        }
+    }
+
+    pub(crate) fn confirm_plan_implement_append(&mut self, cx: &mut Context<Self>) {
+        if let Some(plan_id) = self.pending_plan_confirm.take() {
+            let now = std::time::Instant::now();
+            self.last_plan_implement_at = Some(now);
+            let plan_path = self
+                .session_plans
+                .iter()
+                .find(|p| p.plan_id == plan_id)
+                .map(|p| p.plan_path.clone())
+                .unwrap_or_default();
+            let prompt = implement_prompt_from_plan_path(&plan_path);
+            let existing = self.prompt_input.read(cx).text();
+            let merged = if existing.trim().is_empty() {
+                prompt
+            } else {
+                format!("{existing}\n\n{prompt}")
+            };
+            self.prompt_input.update(cx, |input, cx| {
+                input.set_text(&merged, cx);
+            });
+            self.plan_picker_expanded = false;
+            self.set_agent("build", cx);
+            if let Some(p) = self.session_plans.iter_mut().find(|p| p.plan_id == plan_id) {
+                p.implement_prompt_dismissed = true;
+            }
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn cancel_plan_implement_confirm(&mut self, cx: &mut Context<Self>) {
+        self.pending_plan_confirm = None;
         cx.notify();
     }
 
@@ -4650,7 +5271,14 @@ Describe this project so the AI assistant has context.\n\n\
             if candidate.is_file() {
                 candidate.display().to_string()
             } else {
-                plan_path.to_string()
+                // P0-8/P1: surface missing-file instead of silently opening an
+                // empty buffer (previously looked like "click did nothing").
+                self.composer_error = Some(deepseekcode_i18n::tr!(
+                    "workspace.delete_failed",
+                    "error" => format!("plan file not found: {plan_path}")
+                ));
+                cx.notify();
+                return;
             }
         } else {
             plan_path.to_string()
@@ -4751,7 +5379,35 @@ Describe this project so the AI assistant has context.\n\n\
     }
 
     pub(crate) fn attach_path(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        // P2: visible feedback instead of silent return (was: non-files and
+        // oversize images vanished without a word).
         if !path.is_file() {
+            self.composer_error = Some(deepseekcode_i18n::tr!(
+                "workspace.delete_failed",
+                "error" => format!("not a file: {}", path.display())
+            ));
+            cx.notify();
+            return;
+        }
+        if let Ok(meta) = std::fs::metadata(&path) {
+            const MAX_ATTACH_BYTES: u64 = 32 * 1024 * 1024;
+            if meta.len() > MAX_ATTACH_BYTES {
+                self.composer_error = Some(deepseekcode_i18n::tr!(
+                    "workspace.delete_failed",
+                    "error" => format!(
+                        "file too large ({} MB > 32 MB): {}",
+                        meta.len() / 1024 / 1024,
+                        path.display()
+                    )
+                ));
+                cx.notify();
+                return;
+            }
+        }
+        // P2: don't pile attachments while blocked — they'd sit unsendable.
+        if self.composer_blocked() {
+            self.composer_error = Some(deepseekcode_i18n::t("composer.waiting_approval"));
+            cx.notify();
             return;
         }
         let path_str = path.display().to_string();
@@ -5229,6 +5885,8 @@ Describe this project so the AI assistant has context.\n\n\
 
     pub(crate) fn move_current_session(&mut self, cx: &mut Context<Self>) {
         let Some(session_id) = self.session_id else {
+            self.composer_error = Some(deepseekcode_i18n::t("workspace.no_active_session"));
+            cx.notify();
             return;
         };
         self.close_session_menu(cx);
@@ -5240,22 +5898,36 @@ Describe this project so the AI assistant has context.\n\n\
             };
             let dir_str = directory.to_string_lossy().to_string();
             let client = lock_sdk_client(&client_slot).await;
-            if let Some(client) = client {
-                match client.move_session(session_id, &dir_str).await {
-                    Ok(()) => {
-                        let _ = view.update(cx, |this, cx| {
-                            this.refresh_project_nav_from_client(cx);
-                            cx.notify();
-                        });
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            target: deepseekcode_telemetry::DESKTOP,
-                                run_id = %deepseekcode_telemetry::current_run_id(),
-                            error = %e,
-                            "move session failed"
-                        );
-                    }
+            let Some(client) = client else {
+                let _ = view.update(cx, |this, cx| {
+                    this.composer_error =
+                        Some(deepseekcode_i18n::t("workspace.stop_unreachable"));
+                    cx.notify();
+                });
+                return;
+            };
+            match client.move_session(session_id, &dir_str).await {
+                Ok(()) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.refresh_project_nav_from_client(cx);
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(
+                        target: deepseekcode_telemetry::DESKTOP,
+                            run_id = %deepseekcode_telemetry::current_run_id(),
+                        error = %e,
+                        "move session failed"
+                    );
+                    let _ = view.update(cx, |this, cx| {
+                        // P2 SH11: surface instead of silent log.
+                        this.composer_error = Some(deepseekcode_i18n::tr!(
+                            "workspace.delete_failed",
+                            "error" => e.to_string()
+                        ));
+                        cx.notify();
+                    });
                 }
             }
         })
@@ -5324,6 +5996,7 @@ Describe this project so the AI assistant has context.\n\n\
         self.editor_dirty.remove(&removed);
         if self.editor_tabs.is_empty() {
             self.editor = EditorState::default();
+            self.clear_editor_text_layouts();
             self.active_editor_tab = 0;
         } else {
             self.active_editor_tab = self.active_editor_tab.min(self.editor_tabs.len() - 1);
@@ -5350,10 +6023,20 @@ Describe this project so the AI assistant has context.\n\n\
                     run_id = %deepseekcode_telemetry::current_run_id(),
                 "save file skipped: no active session"
             );
+            // P2: surface instead of silently dropping the save.
+            self.composer_error = Some(deepseekcode_i18n::t("workspace.no_active_session"));
+            cx.notify();
             return;
         };
+        // P2: debounce — ignore re-entrant saves while one is in flight
+        // (previously rapid Ctrl+S spammed concurrent fs_write, last-writer-wins).
+        if self.editor_saving {
+            return;
+        }
+        self.editor_saving = true;
         let content = self.file_editor_input.read(cx).text();
         self.editor.set_content(content.clone());
+        cx.notify();
         let client_slot = Arc::clone(&self.client);
         cx.spawn(async move |view, cx| {
             let client = lock_sdk_client(&client_slot).await;
@@ -5363,6 +6046,7 @@ Describe this project so the AI assistant has context.\n\n\
                         let path_for_clear = path.clone();
                         let content_for_buffer = content.clone();
                         let _ = view.update(cx, |this, cx| {
+                            this.editor_saving = false;
                             this.editor_read_only = false;
                             this.editor_buffers
                                 .insert(path_for_clear, content_for_buffer);
@@ -5378,11 +6062,23 @@ Describe this project so the AI assistant has context.\n\n\
                             "save file failed"
                         );
                         let _ = view.update(cx, |this, cx| {
+                            this.editor_saving = false;
+                            // P2: don't flip to read-only without telling the
+                            // user why their buffer just locked.
                             this.editor_read_only = true;
+                            this.composer_error = Some(deepseekcode_i18n::tr!(
+                                "workspace.delete_failed",
+                                "error" => e.to_string()
+                            ));
                             cx.notify();
                         });
                     }
                 }
+            } else {
+                let _ = view.update(cx, |this, cx| {
+                    this.editor_saving = false;
+                    cx.notify();
+                });
             }
         })
         .detach();
@@ -5515,7 +6211,11 @@ Describe this project so the AI assistant has context.\n\n\
         }
     }
 
-    pub(crate) fn start_session_title_edit(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_session_title_edit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.session_id.is_none() {
             return;
         }
@@ -5524,6 +6224,10 @@ Describe this project so the AI assistant has context.\n\n\
             input.set_text(title, cx);
         });
         self.session_title_editing = true;
+        // P2 SH3: focus the input so Enter/Esc (SessionTitleSave/Cancel,
+        // which require focus) work without a second click.
+        let handle = self.session_title_input.read(cx).focus_handle_clone();
+        window.focus(&handle, cx);
         cx.notify();
     }
 
@@ -6195,6 +6899,76 @@ impl Render for WorkspaceView {
                     this.cancel_session_title_edit(cx);
                 }
             }))
+            .on_action(
+                cx.listener(|this, _: &crate::git_panel::GitCommitSubmit, window, cx| {
+                    if this
+                        .git_commit_input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window)
+                    {
+                        this.git_commit(false, cx);
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::git_panel::GitBranchSubmit, window, cx| {
+                    if this
+                        .git_branch_input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window)
+                    {
+                        this.git_create_branch_from_input(cx);
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::git_panel::GitStashSubmit, window, cx| {
+                    if this
+                        .git_stash_input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window)
+                    {
+                        this.git_stash_push_from_input(cx);
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::git_panel::GitReviewSubmit, window, cx| {
+                    if this
+                        .git_review_scope_input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window)
+                    {
+                        this.git_find_issues(cx);
+                    }
+                }),
+            )
+            .on_action(cx.listener(|this, _: &QuestionCancel, _window, cx| {
+                // P0-7: Esc always exits the question modal.
+                if this.pending_question.is_some() {
+                    this.cancel_pending_question(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CloseOverlay, _window, cx| {
+                // P2: Esc closes the topmost overlay (priority order).
+                if this.image_preview.is_some() {
+                    this.close_image_preview(cx);
+                } else if this.api_key_dialog.is_some() {
+                    this.cancel_api_key_dialog(cx);
+                } else if this.pending_question.is_some() {
+                    this.cancel_pending_question(cx);
+                } else if this.pending_plan_confirm.is_some() {
+                    this.cancel_plan_implement_confirm(cx);
+                } else if this.context_usage.expanded {
+                    this.close_context_usage_detail(cx);
+                } else {
+                    this.close_popover(cx);
+                }
+            }))
             .child(TitlebarView::render(window, cx, self.health_ok))
             .child(
                 div()
@@ -6249,6 +7023,21 @@ impl WorkspaceView {
         let recent = self.merged_sidebar_recents(cx);
         let project_nav = self.filter_project_nav();
         let project_path = self.project_dir.as_ref().map(|p| p.display().to_string());
+        // Live markdown source for preview: dirty buffers win so typing in
+        // Code reflects immediately; fall back to loaded content.
+        let editor_preview_text = self
+            .editor
+            .path
+            .as_ref()
+            .and_then(|p| self.editor_buffers.get(p))
+            .cloned()
+            .unwrap_or_else(|| self.editor.content.clone());
+        // Save only shows once the current file is modified.
+        let editor_dirty_now = self
+            .editor
+            .path
+            .as_ref()
+            .is_some_and(|p| self.editor_dirty.contains(p));
 
         div()
             .id("workspace-shell")
@@ -6302,6 +7091,8 @@ impl WorkspaceView {
                         &self.editor_tabs,
                         self.active_editor_tab,
                         self.editor_read_only,
+                        editor_dirty_now,
+                        &editor_preview_text,
                         &self.terminals,
                         self.active_terminal,
                         self.session_id,
@@ -6310,12 +7101,7 @@ impl WorkspaceView {
                         &self.bash_transcripts,
                         "",
                         true,
-                        &self.git_staged,
-                        &self.git_unstaged,
-                        &self.git_untracked,
-                        self.git_diff_summary.as_deref(),
-                        self.git_status_message.as_deref(),
-                        &self.git_log,
+                        self,
                         self.selected_detail_key
                             .as_deref()
                             .and_then(|k| self.activity.detail_store.get(k)),
@@ -6431,6 +7217,7 @@ impl WorkspaceView {
                     .into_any_element()]
             })
             .children(if let Some(prompt) = self.pending_policies.front() {
+                let inflight = self.pending_policy_reply.contains(&prompt.id);
                 vec![div()
                     .flex_shrink_0()
                     .px_4()
@@ -6441,6 +7228,7 @@ impl WorkspaceView {
                         self.policy_reject_expanded,
                         self.policy_patterns_expanded,
                         self.permission_deny_input.clone(),
+                        inflight,
                     ))
                     .into_any_element()]
             } else {
@@ -6452,6 +7240,99 @@ impl WorkspaceView {
                     .px_4()
                     .pb_2()
                     .child(PlanImplementDock::render(cx, &prompt))
+                    .into_any_element()]
+            } else {
+                Vec::new()
+            })
+            // P0-8: overwrite confirm — shown when Implement is clicked with a
+            // non-empty draft. Append / Replace / Cancel, no silent clobber.
+            .children(if self.pending_plan_confirm.is_some() {
+                let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
+                vec![div()
+                    .flex_shrink_0()
+                    .px_4()
+                    .pb_2()
+                    .child(
+                        div()
+                            .p_3()
+                            .rounded_lg()
+                            .bg(theme.bg_elevated)
+                            .border_1()
+                            .border_color(theme.warning)
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(theme.text_primary)
+                                    .child(deepseekcode_i18n::t("plan.confirm_overwrite")),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .justify_end()
+                                    .child(
+                                        div()
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_md()
+                                            .text_xs()
+                                            .text_color(theme.text_muted)
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(theme.bg_hover))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.cancel_plan_implement_confirm(cx);
+                                                }),
+                                            )
+                                            .child(deepseekcode_i18n::t("common.cancel")),
+                                    )
+                                    .child(
+                                        div()
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(theme.bg_surface)
+                                            .border_1()
+                                            .border_color(theme.border_default)
+                                            .text_xs()
+                                            .text_color(theme.text_primary)
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(theme.bg_hover))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.confirm_plan_implement_append(cx);
+                                                }),
+                                            )
+                                            .child(deepseekcode_i18n::t("plan.append")),
+                                    )
+                                    .child(
+                                        div()
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(theme.error)
+                                            .text_xs()
+                                            .text_color(theme.text_on_accent)
+                                            .cursor_pointer()
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.confirm_plan_implement_replace(cx);
+                                                }),
+                                            )
+                                            .child(deepseekcode_i18n::t("plan.replace")),
+                                    ),
+                            ),
+                    )
                     .into_any_element()]
             } else {
                 Vec::new()
@@ -6483,6 +7364,7 @@ impl WorkspaceView {
                         &self.prompt_input,
                         self.session_busy,
                         self.composer_blocked(),
+                        self.stopping,
                         self.selected_agent.as_ref(),
                         self.selected_model.as_ref(),
                         &self.attachments,
@@ -6498,8 +7380,8 @@ impl WorkspaceView {
     fn render_popover_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::ui::dropdown::DropDirection;
         use crate::ui::popover::{
-            render_dismiss_layer, render_menu_panel, render_project_remove_row,
-            render_session_delete_row,
+            render_dismiss_layer, render_menu_panel, render_project_remove_confirm,
+            render_project_remove_row, render_session_delete_confirm, render_session_delete_row,
         };
 
         let Some(anchor) = self.popover_anchor else {
@@ -6513,7 +7395,26 @@ impl WorkspaceView {
             .child(render_dismiss_layer(cx))
             .into_any_element();
 
-        if let Some(session_id) = self.session_context_menu {
+        // P0-6: pending confirms take priority over the raw menus.
+        if let Some(session_id) = self.pending_session_delete {
+            let menu = render_session_delete_confirm(session_id, anchor, cx);
+            layer = div()
+                .id("popover-overlay")
+                .absolute()
+                .inset_0()
+                .child(render_dismiss_layer(cx))
+                .child(menu)
+                .into_any_element();
+        } else if let Some(path) = self.pending_project_remove.clone() {
+            let menu = render_project_remove_confirm(path, anchor, cx);
+            layer = div()
+                .id("popover-overlay")
+                .absolute()
+                .inset_0()
+                .child(render_dismiss_layer(cx))
+                .child(menu)
+                .into_any_element();
+        } else if let Some(session_id) = self.session_context_menu {
             let menu = render_session_delete_row(session_id, anchor, cx);
             layer = div()
                 .id("popover-overlay")
@@ -6606,6 +7507,7 @@ impl WorkspaceView {
             .id("image-preview-overlay")
             .absolute()
             .inset_0()
+            .occlude()
             .bg(rgba(0x00000099))
             .flex()
             .items_center()
@@ -6613,8 +7515,8 @@ impl WorkspaceView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    this.close_image_preview(cx);
                     cx.stop_propagation();
+                    this.close_image_preview(cx);
                 }),
             )
             .child(
@@ -6658,9 +7560,17 @@ impl WorkspaceView {
                                     .justify_center()
                                     .cursor_pointer()
                                     .hover(|s| s.bg(theme.bg_hover))
-                                    .on_mouse_down(
+                                    .tooltip(move |_, cx| {
+                                        cx.new(|_| crate::git_panel::GitFileTooltip {
+                                            text: deepseekcode_i18n::t("workspace.close_preview")
+                                                .into(),
+                                        })
+                                        .into()
+                                    })
+                                    .on_mouse_up(
                                         MouseButton::Left,
                                         cx.listener(|this, _, _, cx| {
+                                            cx.stop_propagation();
                                             this.close_image_preview(cx);
                                         }),
                                     )
@@ -6723,29 +7633,74 @@ impl WorkspaceView {
                     .child(question),
             );
         if options.is_empty() {
+            let empty_hint = self.composer_error.clone().filter(|e| e.contains("answer"));
             panel = panel
                 .child(div().mt_3().child(self.question_input.clone()))
-                .child(
-                    div().flex().gap_2().mt_3().justify_end().child(
+                .when(empty_hint.is_some(), |el| {
+                    el.child(
                         div()
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .bg(theme.info)
+                            .mt_1()
                             .text_xs()
-                            .text_color(theme.text_on_accent)
-                            .cursor_pointer()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    let answer = this.question_input.read(cx).text();
-                                    if !answer.trim().is_empty() {
-                                        this.submit_question_answer(answer, cx);
-                                    }
-                                }),
-                            )
-                            .child(deepseekcode_i18n::t("common.submit")),
-                    ),
+                            .text_color(theme.error)
+                            .child(deepseekcode_i18n::t("workspace.question_empty")),
+                    )
+                })
+                .child(
+                    div().flex().gap_2().mt_3().justify_end()
+                        .child(
+                            div()
+                                .id("question-cancel")
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(theme.text_muted)
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.bg_hover))
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| crate::git_panel::GitFileTooltip {
+                                        text: deepseekcode_i18n::t("workspace.question_cancel").into(),
+                                    })
+                                    .into()
+                                })
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.cancel_pending_question(cx);
+                                    }),
+                                )
+                                .child(deepseekcode_i18n::t("common.cancel")),
+                        )
+                        .child(
+                            div()
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(theme.info)
+                                .text_xs()
+                                .text_color(theme.text_on_accent)
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.accent_hover))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        let answer = this.question_input.read(cx).text();
+                                        if answer.trim().is_empty() {
+                                            // P1-4: visible validation instead of
+                                            // silent return ("button looks broken").
+                                            this.composer_error = Some(
+                                                deepseekcode_i18n::t("workspace.question_empty"),
+                                            );
+                                            cx.notify();
+                                        } else {
+                                            this.submit_question_answer(answer, cx);
+                                        }
+                                    }),
+                                )
+                                .child(deepseekcode_i18n::t("common.submit")),
+                        ),
                 );
         } else {
             let allow_custom = prompt.allow_custom;
@@ -6761,9 +7716,11 @@ impl WorkspaceView {
                         .text_xs()
                         .text_color(theme.text_on_accent)
                         .cursor_pointer()
+                        .hover(|s| s.bg(theme.accent_hover))
                         .on_mouse_down(MouseButton::Left, {
                             let opt = opt.clone();
                             cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
                                 this.submit_question_answer(opt.clone(), cx);
                             })
                         })
@@ -6796,26 +7753,52 @@ impl WorkspaceView {
                 );
                 panel = panel.child(opts).child(
                     div().mt_3().child(self.question_input.clone()).child(
-                        div().flex().gap_2().mt_3().justify_end().child(
-                            div()
-                                .px_3()
-                                .py_1()
-                                .rounded_md()
-                                .bg(theme.info)
-                                .text_xs()
-                                .text_color(theme.text_on_accent)
-                                .cursor_pointer()
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, _, cx| {
-                                        let answer = this.question_input.read(cx).text();
-                                        if !answer.trim().is_empty() {
-                                            this.submit_question_answer(answer, cx);
-                                        }
-                                    }),
-                                )
-                                .child(deepseekcode_i18n::t("common.submit")),
-                        ),
+                        div().flex().gap_2().mt_3().justify_end()
+                            .child(
+                                div()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(theme.text_muted)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme.bg_hover))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.cancel_pending_question(cx);
+                                        }),
+                                    )
+                                    .child(deepseekcode_i18n::t("common.cancel")),
+                            )
+                            .child(
+                                div()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(theme.info)
+                                    .text_xs()
+                                    .text_color(theme.text_on_accent)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme.accent_hover))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            let answer = this.question_input.read(cx).text();
+                                            if answer.trim().is_empty() {
+                                                this.composer_error = Some(
+                                                    deepseekcode_i18n::t("workspace.question_empty"),
+                                                );
+                                                cx.notify();
+                                            } else {
+                                                this.submit_question_answer(answer, cx);
+                                            }
+                                        }),
+                                    )
+                                    .child(deepseekcode_i18n::t("common.submit")),
+                            ),
                     ),
                 );
             } else {
@@ -6826,6 +7809,7 @@ impl WorkspaceView {
             .id("question-dialog")
             .absolute()
             .inset_0()
+            .occlude()
             .bg(rgba(0x00000099))
             .flex()
             .items_center()
@@ -6844,6 +7828,7 @@ impl WorkspaceView {
             .id("api-key-dialog")
             .absolute()
             .inset_0()
+            .occlude()
             // Translucent scrim (not opaque `bg_overlay`): the page behind —
             // including the Settings panel this dialog was opened from —
             // stays visible around the popup.
@@ -6854,6 +7839,7 @@ impl WorkspaceView {
             // Swallow clicks so they never reach the Settings panel or the
             // timeline behind (same fall-through bug as the settings overlay).
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
                     .w(px(400.))
@@ -6970,6 +7956,11 @@ impl WorkspaceView {
     fn refresh_child_session_projection(&mut self, child_id: SessionId, cx: &mut Context<Self>) {
         let client_slot = Arc::clone(&self.client);
         let child_key = child_id.to_string();
+        // Guard against landing in a different session: projections belong
+        // to the session that requested them.
+        let parent_session = self.session_id;
+        let generation = self.child_projection_generation.load(Ordering::SeqCst);
+        let generation_slot = Arc::clone(&self.child_projection_generation);
         cx.spawn(async move |view, cx| {
             let projection = if let Some(client) = lock_sdk_client(&client_slot).await {
                 let mut result = None;
@@ -6992,6 +7983,12 @@ impl WorkspaceView {
             };
             if let Some(projection) = projection {
                 let _ = view.update(cx, |this, cx| {
+                    if generation_slot.load(Ordering::SeqCst) != generation {
+                        return;
+                    }
+                    if this.session_id != parent_session {
+                        return;
+                    }
                     this.activity
                         .child_session_projections
                         .insert(child_key, projection);
@@ -7051,6 +8048,8 @@ impl WorkspaceView {
                 if let Some((content, diff)) = result {
                     let text = content.unwrap_or_default();
                     this.editor.path = Some(path.clone());
+                    this.editor.md_preview = false;
+                    this.clear_editor_text_layouts();
                     this.editor.set_content(text.clone());
                     this.editor.diff_hunks = diff;
                     this.editor.diff_stats = diff_stats;
@@ -7130,6 +8129,8 @@ impl WorkspaceView {
             let _ = view.update(cx, |this, cx| {
                 if let Some((content, diff)) = result {
                     this.editor.path = Some(path.clone());
+                    this.editor.md_preview = false;
+                    this.clear_editor_text_layouts();
                     this.editor.set_content(content.clone());
                     this.editor.diff_hunks = diff.filter(|d| !d.is_empty());
                     this.editor.diff_stats = None;
@@ -7160,15 +8161,45 @@ impl WorkspaceView {
     pub(crate) fn refresh_git_status_async(&mut self, cx: &mut Context<Self>) {
         let Some(dir) = self.project_dir.clone() else {
             self.clear_git_status();
+            cx.notify();
             return;
         };
+        if self.git_busy {
+            return;
+        }
+        self.git_busy = true;
+        cx.notify();
+        let limit = self.git_graph_limit;
         cx.spawn(async move |view, cx| {
-            let status = tokio::task::spawn_blocking(move || collect_git_status(&dir))
+            let status = tokio::task::spawn_blocking(move || collect_git_status(&dir, limit))
                 .await
                 .ok();
             if let Some(status) = status {
                 let _ = view.update(cx, |this, cx| {
+                    this.git_busy = false;
                     this.apply_git_status(status);
+                    // Seed the review-scope input from the detected default
+                    // branch on first load (input still shows "master").
+                    if this.git_review_scope == "master" {
+                        let detected = this.git_default_branch();
+                        if detected != "master" {
+                            this.git_review_scope = detected.clone();
+                            this.git_review_scope_input.update(cx, |input, cx| {
+                                input.set_text(detected, cx);
+                            });
+                        }
+                    }
+                    // Cursor-style commit placeholder names the target branch.
+                    // Placeholder-only: never touches the typed message.
+                    let branch = this.git_current_branch.clone();
+                    this.git_commit_input.update(cx, |input, cx| {
+                        input.set_placeholder(commit_placeholder(branch.as_deref()), cx);
+                    });
+                    cx.notify();
+                });
+            } else {
+                let _ = view.update(cx, |this, cx| {
+                    this.git_busy = false;
                     cx.notify();
                 });
             }
@@ -7180,18 +8211,62 @@ impl WorkspaceView {
         self.git_staged.clear();
         self.git_unstaged.clear();
         self.git_untracked.clear();
+        self.git_conflicted.clear();
         self.git_diff_summary = None;
         self.git_status_message = None;
         self.git_log.clear();
+        self.git_branches.clear();
+        self.git_commits.clear();
+        self.git_stashes.clear();
+        self.git_remotes.clear();
+        self.git_tags.clear();
+        self.git_current_branch = None;
+        self.git_head_sha = None;
+        self.git_ahead = 0;
+        self.git_behind = 0;
+        self.git_error = None;
     }
 
     fn apply_git_status(&mut self, status: GitStatusSnapshot) {
         self.git_staged = status.staged;
         self.git_unstaged = status.unstaged;
         self.git_untracked = status.untracked;
+        self.git_conflicted = status.conflicted;
         self.git_diff_summary = status.diff_summary;
         self.git_status_message = status.status_message;
         self.git_log = status.log;
+        self.git_branches = status.branches;
+        self.git_commits = status.commits;
+        self.git_stashes = status.stashes;
+        self.git_remotes = status.remotes;
+        self.git_tags = status.tags;
+        self.git_current_branch = status.current_branch;
+        self.git_head_sha = status.head_sha;
+        self.git_ahead = status.ahead;
+        self.git_behind = status.behind;
+        // Diffs changed: drop cached hunks (expanded state stays so rows
+        // re-expand with fresh content on next toggle).
+        self.git_hunks.clear();
+        self.git_hunks_loading.clear();
+        // Prune selection of files that are no longer changed.
+        if !self.git_selected.is_empty() {
+            let mut alive = HashSet::new();
+            for e in self
+                .git_staged
+                .iter()
+                .chain(self.git_unstaged.iter())
+                .chain(self.git_untracked.iter())
+                .chain(self.git_conflicted.iter())
+            {
+                if self.git_selected.contains(&e.path) {
+                    alive.insert(e.path.clone());
+                }
+            }
+            self.git_selected = alive;
+        }
+        // Hover is transient: a refresh rebuilds rows, so drop the overlay key
+        // rather than pointing at a stale row.
+        self.git_hovered_row = None;
         self.sync_file_tree_git_badges();
     }
 
@@ -7202,6 +8277,9 @@ impl WorkspaceView {
         for entry in &self.git_untracked {
             badges.insert(entry.path.clone(), GitFileBadge::Untracked);
         }
+        for entry in &self.git_conflicted {
+            badges.insert(entry.path.clone(), GitFileBadge::Modified);
+        }
         for entry in &self.git_unstaged {
             badges.insert(entry.path.clone(), GitFileBadge::from_git_raw(&entry.raw));
         }
@@ -7209,6 +8287,884 @@ impl WorkspaceView {
             badges.insert(entry.path.clone(), GitFileBadge::from_git_raw(&entry.raw));
         }
         self.file_tree.git_badges = badges;
+    }
+
+    fn git_repo_dir(&self) -> Option<PathBuf> {
+        self.project_dir.clone()
+    }
+
+    fn set_git_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
+        self.git_error = error;
+        self.git_error_detail = None;
+        self.git_notice = None;
+        cx.notify();
+    }
+
+    /// Split a failed op's output into a one-line verdict + full detail.
+    /// Hook dumps (husky/lint-staged/eslint) are multi-KB; the verdict keeps
+    /// the panel answerable ("failed, nothing committed") while the detail
+    /// stays one click away instead of flooding the sidebar.
+    fn set_git_failure(&mut self, err_title: Option<String>, raw: String) {
+        let first = raw
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("")
+            .chars()
+            .take(200)
+            .collect::<String>();
+        let title = err_title.unwrap_or(first);
+        let title = if title.trim().is_empty() {
+            deepseekcode_i18n::t("git.operation_failed")
+                .replace("{error}", "unknown error")
+        } else {
+            title
+        };
+        let detail = if raw.trim().lines().count() > 1 {
+            Some(truncate_text(raw.trim(), 8000))
+        } else {
+            None
+        };
+        self.git_error = Some(title);
+        self.git_error_detail = detail;
+        self.git_error_expanded = true;
+        self.git_notice = None;
+    }
+
+    /// Heuristic: did this failure come from a git hook (husky/lint-staged/
+    /// eslint/prettier/commitlint)? Used to offer "retry without verify".
+    pub(crate) fn git_error_looks_like_hook(&self) -> bool {
+        const MARKERS: &[&str] = &[
+            "lint-staged",
+            "husky",
+            "eslint",
+            "prettier",
+            "commitlint",
+            ".husky",
+            "githook",
+            "hook",
+        ];
+        let mut haystack = self.git_error.clone().unwrap_or_default();
+        if let Some(detail) = self.git_error_detail.clone() {
+            haystack.push('\n');
+            haystack.push_str(&detail);
+        }
+        let haystack = haystack.to_lowercase();
+        MARKERS.iter().any(|m| haystack.contains(m))
+    }
+
+    fn set_git_notice(&mut self, notice: impl Into<String>, cx: &mut Context<Self>) {
+        self.git_notice = Some(notice.into());
+        self.git_error = None;
+        cx.notify();
+    }
+
+    fn run_git_op(
+        &mut self,
+        cx: &mut Context<Self>,
+        op: impl FnOnce(PathBuf) -> std::result::Result<String, String> + Send + 'static,
+        ok_notice: Option<String>,
+    ) {
+        let Some(dir) = self.git_repo_dir() else {
+            return;
+        };
+        // Concurrency guard: never run two git mutations at once (the index
+        // lock would fail one of them). Buttons also render inert while
+        // `git_busy`, so this is a backstop, not the primary UX.
+        if self.git_busy {
+            tracing::info!(
+                target: deepseekcode_telemetry::DESKTOP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                "run_git_op dropped: another git op still in flight"
+            );
+            return;
+        }
+        self.git_busy = true;
+        self.git_error = None;
+        self.git_error_detail = None;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            let result = tokio::task::spawn_blocking(move || op(dir))
+                .await
+                .ok()
+                .unwrap_or_else(|| Err("git task cancelled".to_string()));
+            let _ = view.update(cx, |this, cx| {
+                this.git_busy = false;
+                // Commit ships a verdict title + clears the box on success
+                // only (a rejected commit keeps the typed message for retry).
+                let commit_ui = this.git_pending_commit_ui.take();
+                match result {
+                    Ok(out) => {
+                        if let Some(notice) = ok_notice {
+                            this.git_notice = Some(notice);
+                        } else if !out.trim().is_empty() {
+                            this.git_notice = Some(out.trim().to_string());
+                        } else {
+                            this.git_notice = Some(deepseekcode_i18n::t("git.operation_ok"));
+                        }
+                        this.git_error = None;
+                        this.git_error_detail = None;
+                        if commit_ui.is_some() {
+                            this.git_commit_input.update(cx, |input, cx| input.clear(cx));
+                            this.git_commit_menu_open = false;
+                        }
+                    }
+                    Err(e) => {
+                        this.set_git_failure(commit_ui, e);
+                    }
+                }
+                cx.notify();
+            });
+            let _ = view.update(cx, |this, cx| {
+                this.refresh_git_status_async(cx);
+            });
+        })
+        .detach();
+    }
+
+    // -- Staging (P0) ---------------------------------------------------------
+    pub(crate) fn git_stage_paths(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
+        let paths = self.expand_selection(paths);
+        self.run_git_op(
+            cx,
+            move |dir| {
+                deepseekcode_core::git::ops::stage_files(&dir, &paths).map_err(|e| e.to_string())
+            },
+            None,
+        );
+    }
+
+    pub(crate) fn git_unstage_paths(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
+        let paths = self.expand_selection(paths);
+        self.run_git_op(
+            cx,
+            move |dir| {
+                deepseekcode_core::git::ops::unstage_files(&dir, &paths).map_err(|e| e.to_string())
+            },
+            None,
+        );
+    }
+
+    pub(crate) fn git_discard_paths(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
+        let paths = self.expand_selection(paths);
+        // Untracked deletions go through `clean`; tracked through `restore`.
+        let untracked: Vec<String> = paths
+            .iter()
+            .filter(|p| self.git_untracked.iter().any(|u| &u.path == *p))
+            .cloned()
+            .collect();
+        let tracked: Vec<String> = paths
+            .into_iter()
+            .filter(|p| !untracked.contains(p))
+            .collect();
+        self.run_git_op(
+            cx,
+            move |dir| {
+                if !tracked.is_empty() {
+                    deepseekcode_core::git::ops::discard_files(&dir, &tracked)
+                        .map_err(|e| e.to_string())?;
+                }
+                if !untracked.is_empty() {
+                    deepseekcode_core::git::ops::clean_untracked(&dir, &untracked)
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok(String::new())
+            },
+            None,
+        );
+    }
+
+    pub(crate) fn git_stage_all(&mut self, cx: &mut Context<Self>) {
+        self.run_git_op(
+            cx,
+            |dir| deepseekcode_core::git::ops::stage_all(&dir).map_err(|e| e.to_string()),
+            None,
+        );
+    }
+
+    pub(crate) fn git_unstage_all(&mut self, cx: &mut Context<Self>) {
+        self.run_git_op(
+            cx,
+            |dir| deepseekcode_core::git::ops::unstage_all(&dir).map_err(|e| e.to_string()),
+            None,
+        );
+    }
+
+    pub(crate) fn git_discard_all(&mut self, cx: &mut Context<Self>) {
+        self.run_git_op(
+            cx,
+            |dir| deepseekcode_core::git::ops::discard_all(&dir).map_err(|e| e.to_string()),
+            None,
+        );
+    }
+
+    fn expand_selection(&self, paths: Vec<String>) -> Vec<String> {
+        if paths.is_empty() && !self.git_selected.is_empty() {
+            self.git_selected.iter().cloned().collect()
+        } else {
+            paths
+        }
+    }
+
+    pub(crate) fn git_toggle_select(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self.git_selected.contains(path) {
+            self.git_selected.remove(path);
+        } else {
+            self.git_selected.insert(path.to_string());
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn git_clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.git_selected.clear();
+        cx.notify();
+    }
+
+    pub(crate) fn git_set_hovered_row(&mut self, key: Option<String>, cx: &mut Context<Self>) {
+        if self.git_hovered_row != key {
+            self.git_hovered_row = key;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn git_toggle_tree(&mut self, cx: &mut Context<Self>) {
+        self.git_show_tree = !self.git_show_tree;
+        cx.notify();
+    }
+
+    // -- Destructive confirm flow (P5 safety) ----------------------------------
+    pub(crate) fn git_request_discard_all(&mut self, cx: &mut Context<Self>) {
+        self.git_pending_confirm = Some(GitConfirm {
+            title: deepseekcode_i18n::t("git.discard_all"),
+            detail: deepseekcode_i18n::t("git.confirm_discard_all"),
+            action: GitConfirmAction::DiscardAll,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn git_request_discard_paths(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
+        let paths = self.expand_selection(paths);
+        if paths.is_empty() {
+            return;
+        }
+        let detail = if paths.len() == 1 {
+            deepseekcode_i18n::tr!("git.confirm_discard", "path" => paths[0].clone())
+        } else {
+            deepseekcode_i18n::t("git.confirm_discard_all")
+        };
+        self.git_pending_confirm = Some(GitConfirm {
+            title: deepseekcode_i18n::t("git.discard"),
+            detail,
+            action: GitConfirmAction::DiscardPaths(paths),
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn git_request_delete_branch(
+        &mut self,
+        name: &str,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let name = name.to_string();
+        self.git_pending_confirm = Some(GitConfirm {
+            title: deepseekcode_i18n::t("git.delete_branch"),
+            detail: deepseekcode_i18n::tr!("git.confirm_delete_branch", "branch" => name.clone()),
+            action: GitConfirmAction::DeleteBranch { name, force },
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn git_request_drop_stash(&mut self, ref_: &str, cx: &mut Context<Self>) {
+        let ref_ = ref_.to_string();
+        self.git_pending_confirm = Some(GitConfirm {
+            title: deepseekcode_i18n::t("git.stash_drop"),
+            detail: deepseekcode_i18n::tr!("git.confirm_drop_stash", "ref" => ref_.clone()),
+            action: GitConfirmAction::DropStash { ref_name: ref_ },
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn git_request_force_push(&mut self, cx: &mut Context<Self>) {
+        self.git_pending_confirm = Some(GitConfirm {
+            title: deepseekcode_i18n::t("git.push"),
+            detail: deepseekcode_i18n::t("git.confirm_force_push"),
+            action: GitConfirmAction::ForcePush,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn git_cancel_confirm(&mut self, cx: &mut Context<Self>) {
+        self.git_pending_confirm = None;
+        cx.notify();
+    }
+
+    pub(crate) fn git_confirm_pending(&mut self, cx: &mut Context<Self>) {
+        let Some(confirm) = self.git_pending_confirm.take() else {
+            tracing::info!(
+                target: deepseekcode_telemetry::DESKTOP,
+                run_id = %deepseekcode_telemetry::current_run_id(),
+                "git_confirm_pending: nothing pending"
+            );
+            return;
+        };
+        tracing::info!(
+            target: deepseekcode_telemetry::DESKTOP,
+            run_id = %deepseekcode_telemetry::current_run_id(),
+            action = ?confirm.action,
+            "git_confirm_pending confirmed"
+        );
+        cx.notify();
+        match confirm.action {
+            GitConfirmAction::DiscardAll => self.git_discard_all(cx),
+            GitConfirmAction::DiscardPaths(paths) => {
+                // Paths were resolved at request time; execute directly.
+                self.git_discard_paths(paths, cx);
+            }
+            GitConfirmAction::DeleteBranch { name, force } => {
+                self.git_delete_branch(&name, force, cx)
+            }
+            GitConfirmAction::DropStash { ref_name } => self.git_stash_drop(&ref_name, cx),
+            GitConfirmAction::ForcePush => self.run_git_op(
+                cx,
+                |dir| {
+                    deepseekcode_core::git::ops::push_force_with_lease(&dir)
+                        .map_err(|e| e.to_string())
+                },
+                None,
+            ),
+        }
+    }
+
+    /// Append paths to the repo-root `.gitignore` (one per line, deduped).
+    pub(crate) fn git_ignore_paths(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
+        let paths = self.expand_selection(paths);
+        if paths.is_empty() {
+            return;
+        }
+        let Some(dir) = self.git_repo_dir() else {
+            return;
+        };
+        // Best-effort file edit, then refresh: untracked entries disappear
+        // once ignored (subject to `status.showUntrackedFiles`).
+        let ignore_path = dir.join(".gitignore");
+        let existing = std::fs::read_to_string(&ignore_path).unwrap_or_default();
+        let mut lines: Vec<String> = existing.lines().map(String::from).collect();
+        for p in &paths {
+            if !lines.iter().any(|l| l.trim() == p) {
+                lines.push(p.clone());
+            }
+        }
+        match std::fs::write(&ignore_path, lines.join("\n") + "\n") {
+            Ok(()) => self.set_git_notice(deepseekcode_i18n::t("git.operation_ok"), cx),
+            Err(e) => self.set_git_error(Some(e.to_string()), cx),
+        }
+        self.refresh_git_status_async(cx);
+    }
+
+    /// Reveal a repo-relative path in the OS file explorer.
+    pub(crate) fn git_reveal_in_explorer(&self, path: &str) {
+        let Some(dir) = self.git_repo_dir() else {
+            return;
+        };
+        let full = dir.join(path);
+        #[cfg(target_os = "windows")]
+        {
+            let mut cmd = std::process::Command::new("explorer");
+            deepseekcode_core::process::hide_console(&mut cmd);
+            let _ = cmd.arg("/select,").arg(&full).spawn();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open")
+                .arg("-R")
+                .arg(&full)
+                .spawn();
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let parent = full.parent().map(|p| p.to_path_buf()).unwrap_or(dir);
+            let _ = std::process::Command::new("xdg-open").arg(&parent).spawn();
+        }
+    }
+
+    /// Default review/compare branch: prefer `origin/HEAD`, then local
+    /// `main`/`master`, then first remote-tracking branch.
+    pub(crate) fn git_default_branch(&self) -> String {
+        for b in &self.git_branches {
+            if b.is_remote && (b.name == "origin/HEAD" || b.name.ends_with("/HEAD")) {
+                if let Some(target) = b.upstream.clone().or_else(|| {
+                    // `origin/HEAD -> origin/main` shows up in last_commit text.
+                    b.last_commit
+                        .split("->")
+                        .nth(1)
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                }) {
+                    return target
+                        .strip_prefix("origin/")
+                        .unwrap_or(&target)
+                        .to_string();
+                }
+            }
+        }
+        for want in ["main", "master"] {
+            if self
+                .git_branches
+                .iter()
+                .any(|b| !b.is_remote && b.name == want)
+            {
+                return want.to_string();
+            }
+        }
+        for b in &self.git_branches {
+            if b.is_remote && b.name.starts_with("origin/") {
+                return b.name["origin/".len()..].to_string();
+            }
+        }
+        if self.git_review_scope.trim().is_empty() {
+            "master".to_string()
+        } else {
+            self.git_review_scope.clone()
+        }
+    }
+
+    /// Sync the review-scope text input into `git_review_scope`.
+    pub(crate) fn git_sync_review_scope_from_input(&mut self, cx: &mut Context<Self>) {
+        let scope = self
+            .git_review_scope_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_string();
+        if !scope.is_empty() {
+            self.git_review_scope = scope;
+        } else {
+            self.git_review_scope = self.git_default_branch();
+        }
+        cx.notify();
+    }
+
+    // -- Hunks (P1) -------------------------------------------------------------
+    pub(crate) fn git_toggle_hunks(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self.git_hunks_expanded.contains(path) {
+            self.git_hunks_expanded.remove(path);
+            cx.notify();
+            return;
+        }
+        self.git_hunks_expanded.insert(path.to_string());
+        // Load on first expand; cached afterwards until next refresh clears it.
+        if !self.git_hunks.contains_key(path) {
+            self.git_load_hunks(path, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn git_load_hunks(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(dir) = self.git_repo_dir() else {
+            return;
+        };
+        if self.git_hunks_loading.contains(path) {
+            return;
+        }
+        self.git_hunks_loading.insert(path.to_string());
+        cx.notify();
+        let path_owned = path.to_string();
+        let path_inner = path_owned.clone();
+        cx.spawn(async move |view, cx| {
+            let hunks = tokio::task::spawn_blocking(move || {
+                deepseekcode_core::git::ops::diff_for_path(&dir, &path_inner)
+                    .map(|d| crate::logic::split_diff_hunks(&d))
+                    .unwrap_or_default()
+            })
+            .await
+            .ok()
+            .unwrap_or_default();
+            let _ = view.update(cx, |this, cx| {
+                this.git_hunks_loading.remove(&path_owned);
+                this.git_hunks.insert(path_owned, hunks);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    // -- Commit (P0) ----------------------------------------------------------
+
+    pub(crate) fn git_commit(&mut self, and_push: bool, cx: &mut Context<Self>) {
+        let message = self.git_commit_input.read(cx).text().trim().to_string();
+        if message.is_empty() {
+            self.set_git_error(Some(deepseekcode_i18n::t("git.commit_empty_error")), cx);
+            return;
+        }
+        // Smart commit (VSCode/Cursor parity): the REAL index is checked at
+        // commit time — UI state can lag behind external git tools, and a
+        // stale "staged non-empty" would send an empty index into hooks like
+        // lint-staged ("could not find any staged files"). Empty index +
+        // dirty tree => stage everything first; clean tree => clear error.
+        let no_verify = self.git_commit_no_verify;
+        self.git_commit_menu_open = false;
+        // Verdict title consumed on completion; the box clears on success
+        // only so a hook-rejected commit keeps its message for retry.
+        self.git_pending_commit_ui = Some(deepseekcode_i18n::t("git.commit_failed"));
+        self.run_git_op(
+            cx,
+            move |dir| {
+                use deepseekcode_core::git::ops as gitops;
+                let staged_now = gitops::staged_names(&dir).map_err(|e| e.to_string())?;
+                if staged_now.is_empty() {
+                    if !gitops::has_uncommitted_changes(&dir).map_err(|e| e.to_string())? {
+                        return Err(deepseekcode_i18n::t("git.no_changes"));
+                    }
+                    gitops::stage_all(&dir).map_err(|e| e.to_string())?;
+                }
+                gitops::commit(&dir, &message, no_verify)
+                    .map_err(|e| e.to_string())
+                    .and_then(|out| {
+                        if and_push {
+                            deepseekcode_core::git::ops::push(&dir)
+                                .map_err(|e| e.to_string())
+                                .map(|p| format!("{out}\n{p}"))
+                        } else {
+                            Ok(out)
+                        }
+                    })
+            },
+            None,
+        );
+    }
+
+    pub(crate) fn git_amend(&mut self, cx: &mut Context<Self>) {
+        let message = self.git_commit_input.read(cx).text().trim().to_string();
+        let message_opt = if message.is_empty() {
+            None
+        } else {
+            Some(message)
+        };
+        let no_verify = self.git_commit_no_verify;
+        self.run_git_op(
+            cx,
+            move |dir| {
+                deepseekcode_core::git::ops::commit_amend(&dir, message_opt.as_deref(), no_verify)
+                    .map_err(|e| e.to_string())
+            },
+            None,
+        );
+    }
+
+    pub(crate) fn git_undo_last_commit(&mut self, cx: &mut Context<Self>) {
+        self.run_git_op(
+            cx,
+            |dir| deepseekcode_core::git::ops::undo_last_commit(&dir).map_err(|e| e.to_string()),
+            None,
+        );
+    }
+
+    // -- Branch / sync (P2) ----------------------------------------------------
+    pub(crate) fn git_checkout_branch(&mut self, name: &str, cx: &mut Context<Self>) {
+        let name = name.to_string();
+        self.run_git_op(
+            cx,
+            move |dir| {
+                deepseekcode_core::git::ops::checkout_branch(&dir, &name).map_err(|e| e.to_string())
+            },
+            None,
+        );
+    }
+
+    pub(crate) fn git_create_branch_from_input(&mut self, cx: &mut Context<Self>) {
+        let name = self.git_branch_input.read(cx).text().trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        let input = self.git_branch_input.clone();
+        self.run_git_op(
+            cx,
+            move |dir| {
+                deepseekcode_core::git::ops::checkout_new_branch(&dir, &name, None)
+                    .map_err(|e| e.to_string())
+            },
+            None,
+        );
+        input.update(cx, |i, cx| i.clear(cx));
+    }
+
+    pub(crate) fn git_delete_branch(&mut self, name: &str, force: bool, cx: &mut Context<Self>) {
+        let name = name.to_string();
+        self.run_git_op(
+            cx,
+            move |dir| {
+                deepseekcode_core::git::ops::delete_branch(&dir, &name, force)
+                    .map_err(|e| e.to_string())
+            },
+            None,
+        );
+    }
+
+    pub(crate) fn git_fetch(&mut self, cx: &mut Context<Self>) {
+        self.run_git_op(
+            cx,
+            |dir| deepseekcode_core::git::ops::fetch_all(&dir).map_err(|e| e.to_string()),
+            None,
+        );
+    }
+
+    pub(crate) fn git_pull(&mut self, cx: &mut Context<Self>) {
+        self.run_git_op(
+            cx,
+            |dir| deepseekcode_core::git::ops::pull_rebase(&dir).map_err(|e| e.to_string()),
+            None,
+        );
+    }
+
+    pub(crate) fn git_push(&mut self, cx: &mut Context<Self>) {
+        self.run_git_op(
+            cx,
+            |dir| deepseekcode_core::git::ops::push(&dir).map_err(|e| e.to_string()),
+            None,
+        );
+    }
+
+    pub(crate) fn git_publish_current(&mut self, cx: &mut Context<Self>) {
+        let (branch, remote) = (
+            self.git_current_branch.clone().unwrap_or_default(),
+            self.git_remotes
+                .first()
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| "origin".to_string()),
+        );
+        if branch.is_empty() {
+            return;
+        }
+        self.run_git_op(
+            cx,
+            move |dir| {
+                deepseekcode_core::git::ops::push_upstream(&dir, &remote, &branch)
+                    .map_err(|e| e.to_string())
+            },
+            None,
+        );
+    }
+
+    // -- Stash (P3) ------------------------------------------------------------
+    pub(crate) fn git_stash_push_from_input(&mut self, cx: &mut Context<Self>) {
+        let message = self.git_stash_input.read(cx).text().trim().to_string();
+        let include = self.git_include_untracked_stash;
+        let input = self.git_stash_input.clone();
+        self.run_git_op(
+            cx,
+            move |dir| {
+                deepseekcode_core::git::ops::stash_push(
+                    &dir,
+                    if message.is_empty() {
+                        None
+                    } else {
+                        Some(message.as_str())
+                    },
+                    include,
+                )
+                .map_err(|e| e.to_string())
+            },
+            None,
+        );
+        input.update(cx, |i, cx| i.clear(cx));
+    }
+
+    pub(crate) fn git_stash_pop(&mut self, ref_: &str, cx: &mut Context<Self>) {
+        let ref_ = ref_.to_string();
+        self.run_git_op(
+            cx,
+            move |dir| {
+                deepseekcode_core::git::ops::stash_pop(&dir, &ref_).map_err(|e| e.to_string())
+            },
+            None,
+        );
+    }
+
+    pub(crate) fn git_stash_apply(&mut self, ref_: &str, cx: &mut Context<Self>) {
+        let ref_ = ref_.to_string();
+        self.run_git_op(
+            cx,
+            move |dir| {
+                deepseekcode_core::git::ops::stash_apply(&dir, &ref_).map_err(|e| e.to_string())
+            },
+            None,
+        );
+    }
+
+    pub(crate) fn git_stash_drop(&mut self, ref_: &str, cx: &mut Context<Self>) {
+        let ref_ = ref_.to_string();
+        self.run_git_op(
+            cx,
+            move |dir| {
+                deepseekcode_core::git::ops::stash_drop(&dir, &ref_).map_err(|e| e.to_string())
+            },
+            None,
+        );
+    }
+
+    // -- Conflicts (P1) ---------------------------------------------------------
+    pub(crate) fn git_resolve(&mut self, ours: bool, paths: Vec<String>, cx: &mut Context<Self>) {
+        let paths = self.expand_selection(paths);
+        self.run_git_op(
+            cx,
+            move |dir| {
+                if ours {
+                    deepseekcode_core::git::ops::resolve_with_ours(&dir, &paths)
+                } else {
+                    deepseekcode_core::git::ops::resolve_with_theirs(&dir, &paths)
+                }
+                .map_err(|e| e.to_string())
+            },
+            None,
+        );
+    }
+
+    pub(crate) fn git_rename_branch(&mut self, old: &str, new: &str, cx: &mut Context<Self>) {
+        let (old, new) = (old.to_string(), new.to_string());
+        if old.is_empty() || new.is_empty() {
+            return;
+        }
+        self.run_git_op(
+            cx,
+            move |dir| {
+                deepseekcode_core::git::ops::rename_branch(&dir, &old, &new)
+                    .map_err(|e| e.to_string())
+            },
+            None,
+        );
+    }
+
+    pub(crate) fn git_cherry_pick(&mut self, sha: &str, cx: &mut Context<Self>) {
+        let sha = sha.to_string();
+        self.run_git_op(
+            cx,
+            move |dir| {
+                deepseekcode_core::git::ops::cherry_pick(&dir, &sha).map_err(|e| e.to_string())
+            },
+            None,
+        );
+    }
+
+    pub(crate) fn git_revert_commit(&mut self, sha: &str, cx: &mut Context<Self>) {
+        let sha = sha.to_string();
+        self.run_git_op(
+            cx,
+            move |dir| {
+                deepseekcode_core::git::ops::revert_commit(&dir, &sha, false)
+                    .map_err(|e| e.to_string())
+            },
+            None,
+        );
+    }
+
+    /// Stage a single hunk of `path` (0-based `hunk_index` into the unified
+    /// diff). Powers the P1 hunk-level Stage action.
+    pub(crate) fn git_stage_hunk(&mut self, path: &str, hunk_index: usize, cx: &mut Context<Self>) {
+        let Some(dir) = self.git_repo_dir() else {
+            return;
+        };
+        let path = path.to_string();
+        self.git_busy = true;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            let result = tokio::task::spawn_blocking(move || {
+                let diff = deepseekcode_core::git::ops::diff_for_path(&dir, &path)
+                    .map_err(|e| e.to_string())?;
+                let hunks = crate::logic::split_diff_hunks(&diff);
+                let patch = hunks
+                    .get(hunk_index)
+                    .cloned()
+                    .ok_or_else(|| format!("hunk {hunk_index} out of range ({})", hunks.len()))?;
+                deepseekcode_core::git::ops::stage_hunk(&dir, &patch).map_err(|e| e.to_string())
+            })
+            .await
+            .ok()
+            .unwrap_or_else(|| Err("git task cancelled".to_string()));
+            let _ = view.update(cx, |this, cx| {
+                this.git_busy = false;
+                match result {
+                    Ok(_) => {
+                        this.git_notice = Some(deepseekcode_i18n::t("git.operation_ok"));
+                        this.git_error = None;
+                    }
+                    Err(e) => {
+                        this.git_error = Some(e);
+                        this.git_notice = None;
+                    }
+                }
+                cx.notify();
+            });
+            let _ = view.update(cx, |this, cx| {
+                this.refresh_git_status_async(cx);
+            });
+        })
+        .detach();
+    }
+
+    // -- AI message + review (P4, heuristic offline so panel works w/o LLM) -----
+    pub(crate) fn git_generate_message(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = self.git_repo_dir() else {
+            return;
+        };
+        if self.git_ai_busy {
+            return;
+        }
+        self.git_ai_busy = true;
+        cx.notify();
+        let input = self.git_commit_input.clone();
+        cx.spawn(async move |view, cx| {
+            let generated = tokio::task::spawn_blocking(move || heuristic_commit_message(&dir))
+                .await
+                .ok()
+                .flatten();
+            let _ = view.update(cx, |this, cx| {
+                this.git_ai_busy = false;
+                if let Some(msg) = generated {
+                    input.update(cx, |i, cx| i.set_text(msg, cx));
+                    this.git_notice = None;
+                    this.git_error = None;
+                } else {
+                    this.git_error = Some(
+                        deepseekcode_i18n::t("git.operation_failed")
+                            .replace("{error}", "empty diff"),
+                    );
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn git_find_issues(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = self.git_repo_dir() else {
+            return;
+        };
+        if self.git_review_busy {
+            return;
+        }
+        self.git_sync_review_scope_from_input(cx);
+        let scope = if self.git_review_scope.trim().is_empty() {
+            self.git_default_branch()
+        } else {
+            self.git_review_scope.clone()
+        };
+        self.git_review_busy = true;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            let issues = tokio::task::spawn_blocking(move || heuristic_review(&dir, &scope))
+                .await
+                .ok()
+                .unwrap_or_default();
+            let _ = view.update(cx, |this, cx| {
+                this.git_review_busy = false;
+                this.git_review_issues = issues;
+                this.git_review_expanded = true;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn open_external_url(&self, url: &str) {
@@ -7461,12 +9417,23 @@ struct GitStatusSnapshot {
     staged: Vec<crate::logic::GitStatusEntry>,
     unstaged: Vec<crate::logic::GitStatusEntry>,
     untracked: Vec<crate::logic::GitStatusEntry>,
+    conflicted: Vec<crate::logic::GitStatusEntry>,
     diff_summary: Option<String>,
     status_message: Option<String>,
     log: Vec<String>,
+    branches: Vec<GitBranch>,
+    commits: Vec<GitCommitNode>,
+    stashes: Vec<GitStashEntry>,
+    remotes: Vec<GitRemote>,
+    tags: Vec<String>,
+    current_branch: Option<String>,
+    head_sha: Option<String>,
+    ahead: u32,
+    behind: u32,
 }
 
-fn collect_git_status(dir: &std::path::Path) -> GitStatusSnapshot {
+fn collect_git_status(dir: &std::path::Path, graph_limit: usize) -> GitStatusSnapshot {
+    use deepseekcode_core::git::ops as gitops;
     let dir_str = dir.to_string_lossy().to_string();
     let mut is_repo_cmd = std::process::Command::new("git");
     deepseekcode_core::process::hide_console(&mut is_repo_cmd);
@@ -7481,71 +9448,226 @@ fn collect_git_status(dir: &std::path::Path) -> GitStatusSnapshot {
             ..GitStatusSnapshot::default()
         };
     }
-    let mut status_cmd = std::process::Command::new("git");
-    deepseekcode_core::process::hide_console(&mut status_cmd);
-    let output = status_cmd
-        .args(["-C", &dir_str, "status", "--porcelain"])
-        .output();
-    let lines: Vec<String> = match &output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .map(String::from)
-            .collect(),
-        Ok(o) => {
-            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            return GitStatusSnapshot {
-                status_message: Some(if err.is_empty() {
-                    deepseekcode_i18n::t("git.status_failed")
-                } else {
-                    err
-                }),
-                ..GitStatusSnapshot::default()
-            };
-        }
-        Err(e) => {
-            return GitStatusSnapshot {
-                status_message: Some(deepseekcode_i18n::tr!(
-                    "git.unavailable",
-                    "error" => e.to_string()
-                )),
-                ..GitStatusSnapshot::default()
-            };
-        }
+    // Status: prefer v2 (branch header), fall back to v1 classify.
+    let status_raw = gitops::status_porcelain_v2(dir).unwrap_or_default();
+    let lines: Vec<String> = status_raw.lines().map(String::from).collect();
+    // v2 lines start with `#` (headers) / `1`/`2`/`u` (entries); filter to
+    // classic two-column form when v2 is unavailable.
+    let classic: Vec<String> = lines
+        .iter()
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| {
+            if l.starts_with('1') || l.starts_with('2') {
+                // `1 XY ... path` -> `XY path`
+                let xy: String = l.chars().skip(2).take(2).collect();
+                let path = l
+                    .split('\t')
+                    .nth(1)
+                    .or_else(|| l.split(' ').nth(8))
+                    .unwrap_or("");
+                format!("{xy} {path}")
+            } else if l.starts_with('?') {
+                format!("?? {}", l[2..].trim())
+            } else {
+                l.clone()
+            }
+        })
+        .collect();
+    let (staged_raw, unstaged_raw, untracked) = classify_git_porcelain(&classic);
+    let (staged, unstaged, conflicted) =
+        crate::logic::partition_conflicts(staged_raw, unstaged_raw);
+    let diff_summary = gitops::diff_shortstat(dir);
+    let log = {
+        let mut log_cmd = std::process::Command::new("git");
+        deepseekcode_core::process::hide_console(&mut log_cmd);
+        log_cmd
+            .args(["-C", &dir_str, "log", "--oneline", "--decorate", "-n", "20"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
     };
-    let (staged, unstaged, untracked) = classify_git_porcelain(&lines);
-    let mut diff_cmd = std::process::Command::new("git");
-    deepseekcode_core::process::hide_console(&mut diff_cmd);
-    let diff_summary = diff_cmd
-        .args(["-C", &dir_str, "diff", "--shortstat"])
-        .output()
+    // Branches / HEAD / ahead-behind.
+    let branches = gitops::branch_list_verbose(dir)
+        .map(|s| parse_branch_vv(&s))
+        .unwrap_or_default();
+    let current_branch = gitops::current_branch(dir)
         .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty());
-    let mut log_cmd = std::process::Command::new("git");
-    deepseekcode_core::process::hide_console(&mut log_cmd);
-    let log = log_cmd
-        .args(["-C", &dir_str, "log", "--oneline", "--decorate", "-n", "20"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
+        .filter(|b| !b.is_empty() && b != "HEAD");
+    let head_sha = {
+        let mut cmd = std::process::Command::new("git");
+        deepseekcode_core::process::hide_console(&mut cmd);
+        cmd.args(["-C", &dir_str, "rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let (ahead, behind) = gitops::ahead_behind(dir);
+    // Graph log (pretty) + stashes + remotes + tags (best effort, never fail).
+    let limit = graph_limit.clamp(50, 500);
+    let commits = gitops::log_pretty(dir, limit)
+        .map(|s| parse_log_pretty(&s, head_sha.as_deref()))
+        .unwrap_or_default();
+    let stashes = gitops::stash_list(dir)
+        .map(|s| parse_stash_list(&s))
+        .unwrap_or_default();
+    let remotes = gitops::remote_list(dir)
+        .map(|s| parse_remotes(&s))
+        .unwrap_or_default();
+    let tags = gitops::tag_list(dir, 50)
+        .map(|s| {
+            s.lines()
                 .map(str::trim)
                 .filter(|l| !l.is_empty())
                 .map(String::from)
-                .collect::<Vec<_>>()
+                .collect()
         })
         .unwrap_or_default();
     GitStatusSnapshot {
         staged,
         unstaged,
         untracked,
+        conflicted,
         diff_summary,
         status_message: None,
         log,
+        branches,
+        commits,
+        stashes,
+        remotes,
+        tags,
+        current_branch,
+        head_sha,
+        ahead,
+        behind,
     }
+}
+
+/// Offline heuristic commit message from staged (or uncommitted) stat.
+/// The Agent/LLM path replaces this when a provider is connected; the
+/// heuristic keeps the ✨ button useful with zero network.
+fn heuristic_commit_message(dir: &std::path::Path) -> Option<String> {
+    use deepseekcode_core::git::ops as gitops;
+    let stat = gitops::diff_cached(dir, 4096)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            gitops::diff_uncommitted(dir, 4096)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })?;
+    // First line of --stat looks like ` file | 12 +++---`.
+    let files: Vec<String> = stat
+        .lines()
+        .take_while(|l| !l.trim_start().starts_with("diff "))
+        .filter(|l| l.contains('|'))
+        .filter_map(|l| l.split('|').next().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .take(3)
+        .collect();
+    if files.is_empty() {
+        return Some("Update working tree".to_string());
+    }
+    let scope = files
+        .first()
+        .and_then(|f| std::path::Path::new(f).parent())
+        .map(|p| p.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty() && s != ".")
+        .map(|s| format!("{s}: "))
+        .unwrap_or_default();
+    let names: Vec<String> = files
+        .iter()
+        .filter_map(|f| {
+            std::path::Path::new(f)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+        })
+        .collect();
+    Some(format!("Update {scope}{}", names.join(", ")))
+}
+
+/// Offline heuristic review over `scope...HEAD` diff: flags TODO/FIXME,
+/// over-long lines, debug prints and `unwrap()` in Rust diffs.
+fn heuristic_review(dir: &std::path::Path, scope: &str) -> Vec<GitReviewIssue> {
+    use deepseekcode_core::git::ops as gitops;
+    let range = format!("{scope}...HEAD");
+    let diff = gitops::diff_range(dir, &range, 200_000)
+        .or_else(|_| gitops::diff_uncommitted(dir, 200_000))
+        .unwrap_or_default();
+    let mut issues = Vec::new();
+    let mut current_file = String::new();
+    let mut new_line: u32 = 0;
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("+++ b/") {
+            current_file = rest.trim().to_string();
+            continue;
+        }
+        if line.starts_with("@@") {
+            // `@@ -a,b +c,d @@`
+            if let Some(plus) = line.split('+').nth(1) {
+                new_line = plus
+                    .split(|c: char| !(c.is_ascii_digit()))
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+            }
+            continue;
+        }
+        if line.starts_with('+') && !line.starts_with("+++") {
+            let body = &line[1..];
+            new_line += 1;
+            let mut flag = |severity: &str, message: String| {
+                if issues.len() < 50 {
+                    issues.push(GitReviewIssue {
+                        path: current_file.clone(),
+                        line: Some(new_line),
+                        severity: severity.to_string(),
+                        message,
+                    });
+                }
+            };
+            if body.contains("TODO") || body.contains("FIXME") {
+                flag("info", format!("TODO marker: {}", body.trim()));
+            }
+            if body.chars().count() > 160 {
+                flag(
+                    "warning",
+                    format!("long line ({} chars)", body.chars().count()),
+                );
+            }
+            if body.contains("console.log") || body.contains("dbg!") || body.contains("println!") {
+                flag("warning", "debug print left in diff".to_string());
+            }
+            if current_file.ends_with(".rs") && body.contains(".unwrap()") {
+                flag("warning", "unwrap() in changed code".to_string());
+            }
+            if body.contains("password") && body.contains('=') {
+                flag("error", "possible hardcoded secret".to_string());
+            }
+        } else if !line.starts_with('-') {
+            new_line += 1;
+        }
+    }
+    // Fall back to file-level scan when diff is empty (e.g. scope == HEAD).
+    if issues.is_empty() && !diff.trim().is_empty() {
+        issues.push(GitReviewIssue {
+            path: String::new(),
+            line: None,
+            severity: "info".to_string(),
+            message: "diff scanned: no high-signal findings".to_string(),
+        });
+    }
+    issues
 }
 
 fn last_provider_turn_group_id(

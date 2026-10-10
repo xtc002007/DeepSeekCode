@@ -91,6 +91,7 @@ impl DetailInspector {
                                         &theme,
                                         d.title.as_deref().unwrap_or("detail"),
                                         &cx.entity(),
+                                        crate::selectable_text::TextSurface::Timeline,
                                     )),
                             ),
                     );

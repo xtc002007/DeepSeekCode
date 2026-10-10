@@ -31,6 +31,38 @@ MCP servers are declared in `deepseekcode.jsonc` under `mcp.servers`:
 - **Local stdio**: `command` + `args` — long-lived subprocess with JSON-RPC 2.0
 - **Remote HTTP/SSE**: `url` — Streamable HTTP with SSE fallback (`mcp/remote.rs`)
 
+Remote hardening is ported from `my-notebook` (`crates/my_notebook_ai/src/mcp.rs`):
+60s read / 120s total HTTP timeouts (reqwest's default is none), `http(s)`-only
+URL validation, incremental SSE reads with a 60s wall deadline (never `read to
+EOF` on `text/event-stream`), 1MiB per-payload / 4MiB buffer caps, strict JSON
+(non-JSON `data:` is an error, never tool output), exact numeric `id` matching,
+`Mcp-Session-Id` passthrough, and a 30s budget on every local `call_tool`.
+
+### Windows desktop automation (windows-mcp style)
+
+Any MCP server speaking the line-protocol JSON-RPC subset (`initialize`,
+`notifications/initialized`, `tools/list`, `tools/call`) works. A minimal
+windows-mcp style example lives at
+`crates/deepseekcode-core/tests/support/mcp_windows_server.py` (tools:
+`screenshot`, `snapshot`, `click`, `type_text`, `powershell`) with coverage in
+`crates/deepseekcode-core/tests/mcp_windows_test.rs`:
+
+```jsonc
+{ "mcp": { "servers": {
+  "windows-desktop": {
+    "command": "python",
+    "args": ["D:/tools/windows-mcp-server.py"],
+    "enabled": true
+  }
+} } }
+```
+
+Then `mcp → list` shows the desktop tools and `mcp → connect windows-desktop`
+bridges them as `mcp_windows-desktop_screenshot` (or via the stable
+`use_capability` proxy: `{action: call, server: windows-desktop, ...}`). The
+test server mocks side effects (click/type/powershell only echo); point the
+command at a real desktop-automation server for live control.
+
 ### Location scope
 
 Each project directory gets its own `McpConnectionPool` when `LocationServices` is created. Servers auto-connect on location creation when `enabled` is true.

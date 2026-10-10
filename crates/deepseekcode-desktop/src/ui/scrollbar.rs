@@ -28,7 +28,7 @@ pub fn render_flex_scroll_viewport(
                 .top_0()
                 .bottom_0()
                 .left_0()
-                .right(SCROLLBAR_WIDTH)
+                .right(px(10.))
                 .track_scroll(scroll_handle)
                 .overflow_y_scroll()
                 .child(content),
@@ -54,39 +54,48 @@ pub fn render_vertical_scrollbar(
     let max_scroll = max_offset.y;
     let scrollable = max_scroll > px(0.) && viewport > px(0.);
 
-    let (thumb_height, thumb_top) = if scrollable {
-        let content_height = viewport + max_scroll;
-        let mut thumb_h = viewport * (viewport / content_height);
-        if thumb_h < SCROLLBAR_MIN_THUMB {
-            thumb_h = SCROLLBAR_MIN_THUMB;
-        }
-        if thumb_h > viewport {
-            thumb_h = viewport;
-        }
-        let progress = (-offset.y / max_scroll).clamp(0.0, 1.0);
-        let travel = viewport - thumb_h;
-        (thumb_h, travel * progress)
-    } else {
-        (viewport.max(SCROLLBAR_MIN_THUMB), px(0.))
-    };
+    // P1-8: don't render a fake slot when there's nothing to scroll —
+    // previously an empty list still showed a full-height gray bar + 6px pad.
+    if !scrollable {
+        return div().id(track_id).w(px(0.)).into_any_element();
+    }
+
+    let content_height = viewport + max_scroll;
+    let mut thumb_h = viewport * (viewport / content_height);
+    if thumb_h < SCROLLBAR_MIN_THUMB {
+        thumb_h = SCROLLBAR_MIN_THUMB;
+    }
+    if thumb_h > viewport {
+        thumb_h = viewport;
+    }
+    // P1-8: GPUI scroll offsets are negative when scrolled down; guard both
+    // signs so a future sign flip can't invert the thumb.
+    let progress = (-offset.y / max_scroll).clamp(0.0, 1.0);
+    let travel = viewport - thumb_h;
+    let thumb_top = travel * progress;
 
     let handle = scroll_handle.clone();
-    let mut track = div()
+    let handle_for_move = scroll_handle.clone();
+    let handle_for_up = scroll_handle.clone();
+    let handle_for_thumb = scroll_handle.clone();
+    // P1-8: wider hit area (10px) with a centered 4px visual so touch/high-DPI
+    // can actually grab it; visual stays slim.
+    let track = div()
         .id(track_id)
         .absolute()
         .top_0()
         .bottom_0()
         .right_0()
-        .w(SCROLLBAR_WIDTH)
-        .bg(theme.bg_surface)
-        .border_l_1()
-        .border_color(theme.border_default)
-        .cursor(CursorStyle::PointingHand);
-
-    if scrollable {
-        track = track.on_mouse_down(
+        .w(px(10.))
+        .bg(gpui::hsla(0., 0., 0., 0.))
+        .hover(|s| s.bg(theme.bg_hover))
+        .cursor(CursorStyle::PointingHand)
+        .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                // P1-8: track geometry == viewport geometry (track is
+                // top_0/bottom_0 of the same relative parent), so the
+                // viewport origin/height is the correct denominator.
                 let bounds = handle.bounds();
                 let track_top = bounds.origin.y;
                 let track_height = bounds.size.height;
@@ -103,21 +112,69 @@ pub fn render_vertical_scrollbar(
                 cx.stop_propagation();
                 cx.notify();
             }),
-        );
-    }
-
-    track.child(
-        div()
-            .absolute()
-            .top(thumb_top)
-            .left(px(2.))
-            .right(px(2.))
-            .h(thumb_height)
-            .rounded_sm()
-            .bg(if scrollable {
-                theme.text_muted
-            } else {
-                theme.border_default
+        )
+        // P1-8: true thumb drag — move updates the offset proportionally.
+        .on_mouse_move(
+            cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                let Some((start_y, start_off)) = this.scrollbar_drag else {
+                    return;
+                };
+                let bounds = handle_for_move.bounds();
+                let track_height = bounds.size.height;
+                if track_height <= px(0.) {
+                    return;
+                }
+                let max_scroll = handle_for_move.max_offset().y;
+                if max_scroll <= px(0.) {
+                    return;
+                }
+                let dy = event.position.y - px(start_y);
+                let viewport = bounds.size.height;
+                let content_height = viewport + max_scroll;
+                // thumb travel <-> content scroll mapping.
+                let mut thumb_h = viewport * (viewport / content_height);
+                if thumb_h < SCROLLBAR_MIN_THUMB {
+                    thumb_h = SCROLLBAR_MIN_THUMB;
+                }
+                let travel = (viewport - thumb_h).max(px(1.));
+                let ratio_delta = dy / travel;
+                let new_off = (px(start_off) - max_scroll * ratio_delta).clamp(-max_scroll, px(0.));
+                handle_for_move.set_offset(point(px(0.), new_off));
+                cx.stop_propagation();
+                cx.notify();
             }),
-    )
+        )
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(move |this, _, _, cx| {
+                this.scrollbar_drag = None;
+                let _ = &handle_for_up;
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(thumb_top)
+                .left(px(3.))
+                .right(px(3.))
+                .h(thumb_h)
+                .rounded_full()
+                .bg(theme.text_muted)
+                .hover(|s| s.bg(theme.text_primary))
+                // P1-8: thumb press starts a drag (and swallows the track
+                // jump that would otherwise fire from under the cursor).
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        let cur_off: f32 = handle_for_thumb.offset().y.into();
+                        this.scrollbar_drag = Some((f32::from(event.position.y), cur_off));
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
+        );
+    track.into_any_element()
 }

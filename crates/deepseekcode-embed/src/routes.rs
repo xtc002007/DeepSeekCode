@@ -417,6 +417,7 @@ pub fn authed_router(state: AppState) -> Router {
             "/api/v1/session/{id}/cache-status",
             get(session_cache_status),
         )
+        .route("/api/v1/billing/rates", get(billing_rates))
         .route("/api/v1/session/{id}/compact", post(compact_session))
         .route("/api/v1/session/{id}/fork", post(fork_session))
         .route("/api/v1/session/{id}/revert", get(revert_get_staged))
@@ -1358,11 +1359,25 @@ pub(crate) async fn session_cache_status(
             }
             let status =
                 deepseekcode_core::cache_status::aggregate_with_compaction(&payloads, &compacted);
-            // P1-5: read-only cost attribution from the configured rate
-            // card. Never gates requests; purely so "tokens saved" is
-            // auditable as money saved.
-            let card = deepseekcode_core::cache_status::RateCard::from(&engine.config.billing);
-            let estimated_cost = deepseekcode_core::cache_status::estimated_cost(&status, &card);
+            // Per-model cost attribution (Reasonix catalog rule): each turn is
+            // priced with its own official row; the session total is the sum
+            // so mixed-model sessions never misprice. Unknown/history turns
+            // fall back to the global BillingConfig card.
+            let fallback = deepseekcode_core::cache_status::RateCard::from(&engine.config.billing);
+            let models = deepseekcode_core::cache_status::aggregate_by_model(
+                &payloads,
+                &engine.config.billing.currency,
+                &fallback,
+            );
+            let estimated_cost: f64 = if models.is_empty() {
+                deepseekcode_core::cache_status::estimated_cost(&status, &fallback)
+            } else {
+                models.iter().map(|m| m.estimated_cost).sum()
+            };
+            let display_currency = models
+                .first()
+                .map(|m| m.currency.clone())
+                .unwrap_or_else(|| fallback.currency.clone());
             Json(serde_json::json!({
                 "session_id": id,
                 "turns": status.turns,
@@ -1384,13 +1399,44 @@ pub(crate) async fn session_cache_status(
                 "first_cache_hit": status.first_cache_hit,
                 "first_cache_miss": status.first_cache_miss,
                 "first_hit_rate": status.first_hit_rate,
-                "currency": card.currency,
+                "currency": display_currency,
                 "estimated_cost": estimated_cost,
+                "estimated_cost_display": deepseekcode_core::pricing::format_cost(&display_currency, estimated_cost),
+                "models": models,
+                "price_table": deepseekcode_core::pricing::price_table(),
             }))
             .into_response()
         }
         Err(e) => service_error_response(e).into_response(),
     }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/billing/rates",
+    tag = "billing",
+    responses((status = 200, description = "Official per-model price table (per 1M tokens)"))
+)]
+pub(crate) async fn billing_rates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let dir = match validated_project_root(&headers) {
+        Ok(d) => d,
+        Err(resp) => return resp.into_response(),
+    };
+    let engine = state.engine.read().await;
+    let _ = engine.location(&dir).await;
+    let table = deepseekcode_core::pricing::price_table();
+    let currency = engine.config.billing.currency.clone();
+    Json(serde_json::json!({
+        "currency": currency,
+        "unit": "per_1m_tokens",
+        "fields": ["cache_hit", "input", "output"],
+        "peak_note": "DeepSeek peak 09:00-12:00/14:00-18:00 Beijing workdays, else off-peak half price",
+        "rates": table,
+    }))
+    .into_response()
 }
 
 #[utoipa::path(

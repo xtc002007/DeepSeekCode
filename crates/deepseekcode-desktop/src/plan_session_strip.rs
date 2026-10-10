@@ -131,13 +131,19 @@ fn strip_button(
     label: String,
     handler: impl Fn(
             &mut crate::workspace::WorkspaceView,
-            &MouseDownEvent,
+            &MouseUpEvent,
             &mut Window,
             &mut Context<crate::workspace::WorkspaceView>,
         ) + 'static,
 ) -> impl IntoElement {
     let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
+    let arm_id = format!("plan-strip-{label}");
+    let confirm_id = arm_id.clone();
+    let tooltip_label = label.clone();
+    let display_label = label.clone();
+    let tip_id = format!("plan-strip-tip-{display_label}");
     div()
+        .id(ElementId::Name(tip_id.into()))
         .px_2()
         .py_0p5()
         .rounded_md()
@@ -145,6 +151,32 @@ fn strip_button(
         .text_xs()
         .text_color(theme.text_primary)
         .cursor_pointer()
-        .on_mouse_down(MouseButton::Left, cx.listener(handler))
-        .child(label)
+        .hover(|s| s.bg(theme.bg_hover))
+        .tooltip(move |_, cx| {
+            cx.new(|_| crate::git_panel::GitFileTooltip {
+                text: tooltip_label.clone().into(),
+            })
+            .into()
+        })
+        // P1-1: arm on down, fire on up (same row) — drag-through never
+        // mis-fires Implement. P1-2: stop so the click never reaches the
+        // strip header toggle underneath.
+        .on_mouse_down(MouseButton::Left, {
+            let arm_id = arm_id.clone();
+            cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.arm_click(arm_id.clone(), cx);
+            })
+        })
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(move |this, ev, window, cx| {
+                cx.stop_propagation();
+                if !this.confirm_click(&confirm_id, cx) {
+                    return;
+                }
+                handler(this, ev, window, cx);
+            }),
+        )
+        .child(display_label)
 }

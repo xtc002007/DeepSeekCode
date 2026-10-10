@@ -597,10 +597,14 @@ pub fn classify_git_porcelain(
             unstaged_label: git_status_label(worktree, false),
             raw: raw.clone(),
         };
-        if index != ' ' && index != '?' {
+        // NOTE: converted porcelain-v2 lines use `.` for the unmodified
+        // side (classic porcelain only ever emits `' '`). Both spellings
+        // mean "nothing to show here" — without this, a `.M` worktree-only
+        // edit lands in Staged AND Unstaged at once (caught by live UI test).
+        if index != ' ' && index != '.' && index != '?' {
             staged.push(entry.clone());
         }
-        if worktree != ' ' && worktree != '?' {
+        if worktree != ' ' && worktree != '.' && worktree != '?' {
             unstaged.push(entry);
         }
     }
@@ -690,6 +694,442 @@ pub fn git_worktree_file_content(project_dir: &str, path: &str) -> Option<String
     std::fs::read_to_string(full).ok()
 }
 
+// ---------------------------------------------------------------------------
+// Cursor-parity Git models (P0-P5). Pure + unit-tested; no git spawning here.
+// ---------------------------------------------------------------------------
+
+/// Branch row from `git branch -vv --all`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitBranch {
+    pub name: String,
+    pub is_remote: bool,
+    pub is_head: bool,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub last_commit: String,
+}
+
+/// Commit node from `log --pretty=format:%H%x1f%P%x1f%an%x1f%ct%x1f%s%x1f%D`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitCommitNode {
+    pub sha: String,
+    pub short_sha: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub timestamp: i64,
+    pub subject: String,
+    pub decorations: Vec<String>,
+    pub branches: Vec<String>,
+    pub remotes: Vec<String>,
+    pub is_head: bool,
+    pub lane: usize,
+}
+
+/// Stash row from `stash list --pretty=format:%gd%x1f%H%x1f%s%x1f%ct`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitStashEntry {
+    pub ref_name: String,
+    pub sha: String,
+    pub subject: String,
+    pub timestamp: i64,
+}
+
+/// Remote row from `remote -v` (fetch/push collapsed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitRemote {
+    pub name: String,
+    pub fetch_url: String,
+    pub push_url: String,
+}
+
+/// Agent-review finding rendered under AGENT REVIEW.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitReviewIssue {
+    pub path: String,
+    pub line: Option<u32>,
+    pub severity: String,
+    pub message: String,
+}
+
+/// Parse `git branch -vv --all --no-color` lines.
+pub fn parse_branch_vv(output: &str) -> Vec<GitBranch> {
+    let mut out = Vec::new();
+    for raw in output.lines() {
+        let line = raw.trim_end();
+        if line.trim().is_empty() {
+            continue;
+        }
+        // `* main abc1234 [origin/main: ahead 1] subject` or `  remotes/origin/x ...`
+        let is_head = line.starts_with('*');
+        let body = line.trim_start_matches('*').trim_start_matches(' ').trim();
+        let mut parts = body.split_whitespace();
+        let Some(name_raw) = parts.next() else {
+            continue;
+        };
+        let is_remote = name_raw.starts_with("remotes/");
+        let name = if is_remote {
+            name_raw
+                .strip_prefix("remotes/")
+                .unwrap_or(name_raw)
+                .to_string()
+        } else {
+            name_raw.to_string()
+        };
+        // Skip sha token.
+        let _sha = parts.next().unwrap_or("");
+        // Remainder may start with `[upstream...]` then subject.
+        let rest = body
+            .splitn(3, char::is_whitespace)
+            .nth(2)
+            .unwrap_or("")
+            .trim();
+        let (upstream, ahead, behind, last_commit) = parse_branch_remainder(rest);
+        out.push(GitBranch {
+            name,
+            is_remote,
+            is_head,
+            upstream,
+            ahead,
+            behind,
+            last_commit,
+        });
+    }
+    out.sort_by(|a, b| {
+        // HEAD first, then local, then remote, each alphabetical.
+        (b.is_head, !b.is_remote, &a.name).cmp(&(a.is_head, !a.is_remote, &b.name))
+    });
+    out
+}
+
+fn parse_branch_remainder(rest: &str) -> (Option<String>, u32, u32, String) {
+    if let Some(bracket_end) = rest.strip_prefix('[').and_then(|r| r.find(']')) {
+        let inside = &rest[1..1 + bracket_end];
+        let after = rest[1 + bracket_end + 1..].trim().to_string();
+        // inside: `origin/main`, `origin/main: ahead 1`, `gone`, ...
+        let (upstream_part, ahead, behind) = if inside == "gone" {
+            (None, 0, 0)
+        } else {
+            let (up, trail) = match inside.split_once(':') {
+                Some((u, t)) => (u.trim(), t.trim()),
+                None => (inside.trim(), ""),
+            };
+            let mut ahead = 0u32;
+            let mut behind = 0u32;
+            for seg in trail.split(',') {
+                let seg = seg.trim();
+                if let Some(n) = seg.strip_prefix("ahead ") {
+                    ahead = n.trim().parse().unwrap_or(0);
+                } else if let Some(n) = seg.strip_prefix("behind ") {
+                    behind = n.trim().parse().unwrap_or(0);
+                }
+            }
+            (
+                if up.is_empty() {
+                    None
+                } else {
+                    Some(up.to_string())
+                },
+                ahead,
+                behind,
+            )
+        };
+        (upstream_part, ahead, behind, after)
+    } else {
+        (None, 0, 0, rest.to_string())
+    }
+}
+
+/// Parse machine-readable log lines (`\x1f` separated, 6 fields).
+pub fn parse_log_pretty(output: &str, head_sha: Option<&str>) -> Vec<GitCommitNode> {
+    let mut out = Vec::new();
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\x1f').collect();
+        if fields.len() < 6 {
+            continue;
+        }
+        let sha = fields[0].to_string();
+        let parents: Vec<String> = fields[1]
+            .split_whitespace()
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        let author = fields[2].to_string();
+        let timestamp = fields[3].parse().unwrap_or(0);
+        let subject = fields[4].to_string();
+        let decor_raw = fields[5];
+        let mut decorations = Vec::new();
+        let mut branches = Vec::new();
+        let mut remotes = Vec::new();
+        let mut is_head = false;
+        for d in decor_raw.split(", ") {
+            let d = d.trim();
+            if d.is_empty() {
+                continue;
+            }
+            // Decorations look like `HEAD -> main, origin/main, tag: v1`.
+            let d = d
+                .strip_prefix("HEAD -> ")
+                .map(|s| {
+                    is_head = true;
+                    s
+                })
+                .unwrap_or(d);
+            if d == "HEAD" {
+                is_head = true;
+            }
+            decorations.push(d.to_string());
+            if d.starts_with("tag: ") {
+                continue;
+            }
+            if d == "HEAD" {
+                continue;
+            }
+            // Remote-tracking refs are `origin/<branch>` / `upstream/<branch>`;
+            // local branches may themselves contain `/` (e.g. `upgrade/sdk-54`),
+            // so only the well-known remote prefixes count as remotes.
+            if d.starts_with("origin/") || d.starts_with("upstream/") || d.starts_with("remotes/") {
+                remotes.push(d.to_string());
+            } else {
+                branches.push(d.to_string());
+            }
+        }
+        if let Some(head) = head_sha {
+            if sha == head {
+                is_head = true;
+            }
+        }
+        let short_sha = sha.chars().take(7).collect();
+        out.push(GitCommitNode {
+            sha,
+            short_sha,
+            parents,
+            author,
+            timestamp,
+            subject,
+            decorations,
+            branches,
+            remotes,
+            is_head,
+            lane: 0,
+        });
+    }
+    assign_graph_lanes(&mut out);
+    out
+}
+
+/// Minimal lane assignment so the GRAPH column draws stable vertical rails:
+/// first-parent stays on its lane, new parents open the next free lane.
+pub fn assign_graph_lanes(commits: &mut [GitCommitNode]) {
+    use std::collections::HashMap;
+    let mut sha_lane: HashMap<String, usize> = HashMap::new();
+    let mut next_lane = 0usize;
+    for c in commits.iter_mut() {
+        let lane = sha_lane.remove(&c.sha).unwrap_or_else(|| {
+            let l = next_lane;
+            next_lane += 1;
+            l
+        });
+        c.lane = lane;
+        for (i, p) in c.parents.iter().enumerate() {
+            if i == 0 {
+                sha_lane.entry(p.clone()).or_insert(lane);
+            } else if !sha_lane.contains_key(p) {
+                let l = next_lane;
+                next_lane += 1;
+                sha_lane.insert(p.clone(), l);
+            }
+        }
+    }
+}
+
+/// Parse `stash list --pretty=format:%gd%x1f%H%x1f%s%x1f%ct`.
+pub fn parse_stash_list(output: &str) -> Vec<GitStashEntry> {
+    let mut out = Vec::new();
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split('\x1f').collect();
+        if f.len() < 4 {
+            continue;
+        }
+        out.push(GitStashEntry {
+            ref_name: f[0].to_string(),
+            sha: f[1].to_string(),
+            subject: f[2].to_string(),
+            timestamp: f[3].parse().unwrap_or(0),
+        });
+    }
+    out
+}
+
+/// Parse `git remote -v` into collapsed remotes.
+pub fn parse_remotes(output: &str) -> Vec<GitRemote> {
+    use std::collections::HashMap;
+    let mut map: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    for line in output.lines() {
+        // `origin\tgit@github.com:x/y.git (fetch)`
+        let mut parts = line.split_whitespace();
+        let (Some(name), Some(url), Some(kind)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let entry = map.entry(name.to_string()).or_insert((None, None));
+        if kind.contains("fetch") {
+            entry.0 = Some(url.to_string());
+        } else if kind.contains("push") {
+            entry.1 = Some(url.to_string());
+        }
+    }
+    let mut out: Vec<GitRemote> = map
+        .into_iter()
+        .map(|(name, (fetch, push))| GitRemote {
+            fetch_url: fetch.clone().unwrap_or_default(),
+            push_url: push.clone().unwrap_or_else(|| fetch.unwrap_or_default()),
+            name,
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Parse `rev-list --left-right --count HEAD...@{u}` output ("1\t2").
+pub fn parse_ahead_behind(output: &str) -> (u32, u32) {
+    let nums: Vec<u32> = output
+        .split(|c: char| c.is_whitespace() || c == '\t')
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    match nums.as_slice() {
+        [a, b, ..] => (*a, *b),
+        [a] => (*a, 0),
+        _ => (0, 0),
+    }
+}
+
+/// Case-insensitive substring filter for the Changes search box.
+pub fn filter_changes(entries: &[GitStatusEntry], query: &str) -> Vec<GitStatusEntry> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return entries.to_vec();
+    }
+    entries
+        .iter()
+        .filter(|e| e.path.to_lowercase().contains(&q))
+        .cloned()
+        .collect()
+}
+
+/// Whether a path looks like a merge conflict (`UU`/`AA`/`DD` etc.).
+pub fn is_conflicted_raw(raw: &str) -> bool {
+    let mut chars = raw.chars();
+    let (a, b) = (chars.next().unwrap_or(' '), chars.next().unwrap_or(' '));
+    matches!((a, b), ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D'))
+}
+
+/// Split conflicted entries out of staged/unstaged for the Merge Changes group.
+pub fn partition_conflicts(
+    staged: Vec<GitStatusEntry>,
+    unstaged: Vec<GitStatusEntry>,
+) -> (
+    Vec<GitStatusEntry>,
+    Vec<GitStatusEntry>,
+    Vec<GitStatusEntry>,
+) {
+    let mut clean_staged = Vec::new();
+    let mut clean_unstaged = Vec::new();
+    let mut conflicted = Vec::new();
+    for e in staged {
+        if is_conflicted_raw(&e.raw) {
+            if !conflicted.iter().any(|c: &GitStatusEntry| c.path == e.path) {
+                conflicted.push(e);
+            }
+        } else {
+            clean_staged.push(e);
+        }
+    }
+    for e in unstaged {
+        if is_conflicted_raw(&e.raw) {
+            if !conflicted.iter().any(|c: &GitStatusEntry| c.path == e.path) {
+                conflicted.push(e);
+            }
+        } else {
+            clean_unstaged.push(e);
+        }
+    }
+    (clean_staged, clean_unstaged, conflicted)
+}
+
+/// Commit box placeholder: `Message (Ctrl+Enter to commit on "branch")`.
+pub fn commit_placeholder(branch: Option<&str>) -> String {
+    match branch {
+        Some(b) if !b.trim().is_empty() => {
+            let short: String = b.chars().take(12).collect();
+            format!("Message (Ctrl+Enter to commit on \"{short}\")")
+        }
+        _ => "Message (Ctrl+Enter to commit)".to_string(),
+    }
+}
+
+/// Empty-commit validation for the Commit button enabled state.
+pub fn commit_message_error(message: &str) -> Option<String> {
+    if message.trim().is_empty() {
+        Some("commit message is empty".to_string())
+    } else {
+        None
+    }
+}
+
+/// Split a unified diff into per-hunk patches (each keeps file headers).
+pub fn split_diff_hunks(diff: &str) -> Vec<String> {
+    let mut header: Vec<String> = Vec::new();
+    let mut hunks: Vec<Vec<String>> = Vec::new();
+    let mut current: Option<Vec<String>> = None;
+    for line in diff.lines() {
+        if line.starts_with("@@") {
+            if let Some(c) = current.take() {
+                hunks.push(c);
+            }
+            current = Some(Vec::new());
+            if let Some(c) = current.as_mut() {
+                c.push(line.to_string());
+            }
+        } else if current.is_some() {
+            if let Some(c) = current.as_mut() {
+                c.push(line.to_string());
+            }
+        } else if line.starts_with("diff ")
+            || line.starts_with("index ")
+            || line.starts_with("--- ")
+            || line.starts_with("+++ ")
+            || line.starts_with("new file")
+            || line.starts_with("deleted ")
+            || line.starts_with("Binary ")
+        {
+            header.push(line.to_string());
+        }
+    }
+    if let Some(c) = current.take() {
+        hunks.push(c);
+    }
+    hunks
+        .into_iter()
+        .map(|h| {
+            let mut out = header.clone();
+            out.extend(h);
+            out.join("\n")
+        })
+        .collect()
+}
+
+/// Review scope label for AGENT REVIEW (`Review diffs vs. {scope}.`).
+pub fn review_scope_label(scope: &str) -> String {
+    format!("Review diffs vs. {scope}.")
+}
+
 /// Most recent todo write/read leaf in the activity tree (last depth-first visit wins).
 pub fn find_latest_todo_leaf_id(
     tree: &deepseekcode_schema::activity::ActivityTree,
@@ -763,7 +1203,7 @@ fn patch_targets(patch: &str) -> Vec<String> {
     }
     let mut out: Vec<String> = Vec::new();
     let mut pending_old: Option<String> = None;
-    let mut add = |out: &mut Vec<String>, path: String| {
+    let add = |out: &mut Vec<String>, path: String| {
         if !out.iter().any(|p| *p == path) {
             out.push(path);
         }
@@ -1007,8 +1447,16 @@ pub enum ComposerAction {
 /// needs to abort, yet the guard used to swallow the click first, leaving an
 /// inert square (greyed out, `on_mouse_down` returning immediately) while the
 /// task kept running. Gating applies to *send* only.
-pub fn composer_button_action(session_busy: bool, input_blocked: bool) -> ComposerAction {
-    if session_busy {
+pub fn composer_button_action(
+    session_busy: bool,
+    input_blocked: bool,
+    stopping: bool,
+) -> ComposerAction {
+    if stopping {
+        // P0-2: Stop in flight — disable the button so a rapid second click
+        // cannot flip into Send and mis-fire a prompt.
+        ComposerAction::None
+    } else if session_busy {
         ComposerAction::Stop
     } else if input_blocked {
         ComposerAction::None
@@ -1111,9 +1559,9 @@ mod tests {
     #[test]
     fn stop_is_never_gated_by_a_pending_prompt() {
         // 回归：等待权限/提问时点击结束按钮无效。stop 必须始终可用。
-        assert_eq!(composer_button_action(true, false), ComposerAction::Stop);
+        assert_eq!(composer_button_action(true, false, false), ComposerAction::Stop);
         assert_eq!(
-            composer_button_action(true, true),
+            composer_button_action(true, true, false),
             ComposerAction::Stop,
             "stop must stay available while a permission/question prompt is pending"
         );
@@ -1121,11 +1569,27 @@ mod tests {
 
     #[test]
     fn send_is_blocked_only_while_idle_and_prompted() {
-        assert_eq!(composer_button_action(false, false), ComposerAction::Send);
         assert_eq!(
-            composer_button_action(false, true),
+            composer_button_action(false, false, false),
+            ComposerAction::Send
+        );
+        assert_eq!(
+            composer_button_action(false, true, false),
             ComposerAction::None,
             "an idle composer awaiting approval must not be able to send"
+        );
+    }
+
+    #[test]
+    fn stopping_disables_button_to_prevent_stop_to_send_flip() {
+        // P0-2: Stop RPC in flight — rapid second click must not become Send.
+        assert_eq!(
+            composer_button_action(false, false, true),
+            ComposerAction::None
+        );
+        assert_eq!(
+            composer_button_action(true, false, true),
+            ComposerAction::None
         );
     }
 
@@ -1573,5 +2037,193 @@ mod tests {
                 line: None,
             }
         );
+    }
+
+    #[test]
+    fn parse_branch_vv_reads_head_and_upstream() {
+        let out = "* upgrade/sdk-54 abc1234 [origin/upgrade/sdk-54: ahead 1] continue\n  main def5678 [origin/main] base\n  remotes/origin/upgrade/sdk-54 abc1234 continue\n";
+        let branches = parse_branch_vv(out);
+        assert_eq!(branches.len(), 3);
+        let head = branches.iter().find(|b| b.is_head).unwrap();
+        assert_eq!(head.name, "upgrade/sdk-54");
+        assert_eq!(head.upstream.as_deref(), Some("origin/upgrade/sdk-54"));
+        assert_eq!(head.ahead, 1);
+        assert!(!branches.iter().find(|b| b.is_remote).unwrap().is_head);
+    }
+
+    #[test]
+    fn parse_log_pretty_builds_nodes_and_lanes() {
+        let out = "abc1234567890\x1fdef1\x1fxtc\x1f1700000000\x1fcontinue work\x1fHEAD -> upgrade/sdk-54, origin/upgrade/sdk-54\ndef5678abcd\x1fabc1\x1fxtc\x1f1699999999\x1fbase\x1fmaster";
+        let nodes = parse_log_pretty(out, Some("abc1234567890"));
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes[0].is_head);
+        assert!(nodes[0].branches.contains(&"upgrade/sdk-54".to_string()));
+        assert!(nodes[0]
+            .remotes
+            .contains(&"origin/upgrade/sdk-54".to_string()));
+        assert_eq!(nodes[0].short_sha.len(), 7);
+    }
+
+    #[test]
+    fn parse_stash_and_remotes() {
+        let stash = parse_stash_list("stash@{0}\x1fabc123\x1fWIP\x1f1700000000");
+        assert_eq!(stash.len(), 1);
+        assert_eq!(stash[0].ref_name, "stash@{0}");
+        let remotes = parse_remotes(
+            "origin\tgit@github.com:x/y.git (fetch)\norigin\tgit@github.com:x/y.git (push)\n",
+        );
+        assert_eq!(remotes.len(), 1);
+        assert_eq!(remotes[0].name, "origin");
+    }
+
+    #[test]
+    fn ahead_behind_and_conflict_helpers() {
+        assert_eq!(parse_ahead_behind("1\t2"), (1, 2));
+        assert!(is_conflicted_raw("UU file"));
+        assert!(!is_conflicted_raw("M  file"));
+        assert!(commit_message_error("").is_some());
+        assert!(commit_message_error("fix").is_none());
+        // Placeholder truncates long branch names (`upgrade/sdk-54` -> `upgrade/sdk-…`).
+        assert!(commit_placeholder(Some("upgrade/sdk-54")).contains("upgrade"));
+        assert!(commit_placeholder(None).contains("commit"));
+        // Cursor-style placeholder always carries the submit hint.
+        let ph = commit_placeholder(Some("main"));
+        assert!(ph.contains("main") && ph.contains("Ctrl+Enter"));
+        assert!(commit_placeholder(Some("")).contains("commit"));
+    }
+
+    #[test]
+    fn filter_and_hunks() {
+        let entries = vec![
+            GitStatusEntry {
+                path: "src/a.rs".into(),
+                staged_label: String::new(),
+                unstaged_label: "Modified".into(),
+                raw: " M src/a.rs".into(),
+            },
+            GitStatusEntry {
+                path: "src/b.rs".into(),
+                staged_label: String::new(),
+                unstaged_label: "Modified".into(),
+                raw: " M src/b.rs".into(),
+            },
+        ];
+        assert_eq!(filter_changes(&entries, "a.rs").len(), 1);
+        assert_eq!(filter_changes(&entries, "").len(), 2);
+        let diff =
+            "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n@@ -5 +5 @@\n-c\n+d\n";
+        assert_eq!(split_diff_hunks(diff).len(), 2);
+        assert_eq!(review_scope_label("master"), "Review diffs vs. master.");
+    }
+
+    #[test]
+    fn partition_conflicts_separates_merge_group() {
+        let staged = vec![GitStatusEntry {
+            path: "c.rs".into(),
+            staged_label: String::new(),
+            unstaged_label: String::new(),
+            raw: "UU c.rs".into(),
+        }];
+        let unstaged = vec![GitStatusEntry {
+            path: "a.rs".into(),
+            staged_label: String::new(),
+            unstaged_label: "Modified".into(),
+            raw: " M a.rs".into(),
+        }];
+        let (cs, cu, cc) = partition_conflicts(staged, unstaged);
+        assert!(cs.is_empty());
+        assert_eq!(cu.len(), 1);
+        assert_eq!(cc.len(), 1);
+    }
+
+    #[test]
+    fn partition_conflicts_dedups_same_path() {
+        let mk = |raw: &str, path: &str| GitStatusEntry {
+            path: path.into(),
+            staged_label: String::new(),
+            unstaged_label: String::new(),
+            raw: raw.into(),
+        };
+        let (cs, cu, cc) =
+            partition_conflicts(vec![mk("UU x.rs", "x.rs")], vec![mk("UU x.rs", "x.rs")]);
+        assert!(cs.is_empty() && cu.is_empty());
+        assert_eq!(cc.len(), 1);
+    }
+
+    #[test]
+    fn branch_vv_gone_upstream_parses() {
+        let out = "* main abc1234 [gone] old subject";
+        let branches = parse_branch_vv(out);
+        assert_eq!(branches.len(), 1);
+        assert!(branches[0].upstream.is_none());
+        assert!(branches[0].is_head);
+    }
+
+    #[test]
+    fn remotes_fetch_only_collapses_push() {
+        let remotes = parse_remotes("origin\tgit@github.com:x/y.git (fetch)\n");
+        assert_eq!(remotes.len(), 1);
+        assert_eq!(remotes[0].push_url, "git@github.com:x/y.git");
+    }
+
+    #[test]
+    fn split_hunks_empty_without_headers() {
+        assert!(split_diff_hunks("").is_empty());
+        assert!(split_diff_hunks("no diff here").is_empty());
+    }
+
+    #[test]
+    fn git_input_contexts_cover_every_git_input() {
+        // Regression lock for dead-backspace reports: every key context set
+        // via `set_key_context` in `WorkspaceView::new` for git inputs must
+        // be registered in `bind_git_input_keys` (see `GIT_INPUT_CONTEXTS`).
+        let contexts = crate::git_panel::GIT_INPUT_CONTEXTS;
+        for expected in [
+            "GitCommitInput",
+            "GitFilterInput",
+            "GitBranchInput",
+            "GitStashInput",
+            "GitReviewScopeInput",
+        ] {
+            assert!(
+                contexts.contains(&expected),
+                "git input context {expected} is not bound"
+            );
+        }
+    }
+
+    #[test]
+    fn v2_dot_means_unmodified_not_staged() {
+        // Converted porcelain-v2 lines (`XY path` with `.` for the clean
+        // side) must not leak into the opposite group. Live-test regression:
+        // a `.M` worktree-only edit rendered in Staged AND Changes at once.
+        let lines = vec![
+            ".M work-only.rs".to_string(),
+            "M. staged-only.rs".to_string(),
+            "MM both.rs".to_string(),
+            "A. added.rs".to_string(),
+        ];
+        let (staged, unstaged, untracked) = classify_git_porcelain(&lines);
+        let staged_paths: Vec<_> = staged.iter().map(|e| e.path.as_str()).collect();
+        let unstaged_paths: Vec<_> = unstaged.iter().map(|e| e.path.as_str()).collect();
+        assert!(!staged_paths.contains(&"work-only.rs"));
+        assert!(!unstaged_paths.contains(&"staged-only.rs"));
+        assert!(!unstaged_paths.contains(&"added.rs"));
+        assert!(staged_paths.contains(&"staged-only.rs"));
+        assert!(staged_paths.contains(&"both.rs") && unstaged_paths.contains(&"both.rs"));
+        assert!(staged_paths.contains(&"added.rs"));
+        assert!(untracked.is_empty());
+    }
+
+    #[test]
+    fn filter_is_case_insensitive() {
+        let entries = vec![GitStatusEntry {
+            path: "SRC/App.TS".into(),
+            staged_label: String::new(),
+            unstaged_label: "Modified".into(),
+            raw: " M SRC/App.TS".into(),
+        }];
+        assert_eq!(filter_changes(&entries, "app.ts").len(), 1);
+        assert_eq!(filter_changes(&entries, "zzz").len(), 0);
     }
 }

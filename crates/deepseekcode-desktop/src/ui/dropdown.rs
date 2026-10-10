@@ -70,8 +70,11 @@ impl DropdownView {
             .flex()
             .items_center()
             .gap_1()
-            .on_mouse_down(MouseButton::Left, {
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            // P2: hover feedback (previously none) + release-to-confirm + stop.
+            .hover(|s| s.bg(theme.bg_hover))
+            .on_mouse_up(MouseButton::Left, {
+                cx.listener(move |this, event: &MouseUpEvent, _, cx| {
+                    cx.stop_propagation();
                     on_toggle(this, event.position, cx);
                 })
             })

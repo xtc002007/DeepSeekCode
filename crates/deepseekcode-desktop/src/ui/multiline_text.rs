@@ -16,9 +16,23 @@ pub fn split_display_lines(text: &str) -> Vec<String> {
 }
 
 pub fn render_multiline(text: &str, style_line: impl Fn(Div) -> Div) -> impl IntoElement {
-    let mut column = style_line(div().flex().flex_col().w_full());
-    for line in split_display_lines(text) {
-        column = column.child(style_line(div()).child(line));
+    // P2: empty text renders nothing (previously a ghost empty row).
+    if text.is_empty() {
+        return div().into_any_element();
     }
-    column
+    let mut column = style_line(div().flex().flex_col().w_full().overflow_hidden());
+    for line in split_display_lines(text) {
+        // P2: long URLs/hashes must not blow out the container — keep the
+        // line box bounded and ellipsis-truncated (GPUI has no break-all).
+        column = column.child(
+            style_line(div())
+                .w_full()
+                .max_w_full()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(line),
+        );
+    }
+    column.into_any_element()
 }

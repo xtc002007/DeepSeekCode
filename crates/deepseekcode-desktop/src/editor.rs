@@ -1,10 +1,24 @@
 use deepseekcode_schema::activity::DiffStats;
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use similar::{ChangeTag, TextDiff};
 use std::collections::HashSet;
 
 use crate::file_editor_input::FileEditorInput;
 use crate::syntax::{highlight_rgba, HighlightKind, ReadOnlyBuffer, SyntaxHighlighter};
+use crate::ui::icon::{render_icon_rgba, IconName};
+
+/// True for markdown source files (`.md`, `.markdown`, `.mdx`,
+/// case-insensitive).
+pub fn is_markdown_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    // Strip query-like suffixes just in case; compare the file name part.
+    let name = lower.rsplit(['/', '\\']).next().unwrap_or(&lower);
+    name.ends_with(".md")
+        || name.ends_with(".markdown")
+        || name.ends_with(".mdx")
+        || name == "readme"
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct EditorState {
@@ -15,6 +29,9 @@ pub struct EditorState {
     pub diff_stats: Option<DiffStats>,
     pub side_by_side_diff: bool,
     pub scroll_to_line: Option<u32>,
+    /// Markdown preview toggle. Off = code view (default on file open),
+    /// on = rendered with the same renderer used for LLM output.
+    pub md_preview: bool,
 }
 
 impl EditorState {
@@ -46,7 +63,7 @@ impl EditorState {
 
 pub struct EditorView;
 
-fn line_gutter_width(line_count: usize) -> Pixels {
+pub(crate) fn line_gutter_width(line_count: usize) -> Pixels {
     let digits = line_count.max(1).to_string().len().max(2);
     px((digits as f32 * 9.0 + 20.0).max(44.0))
 }
@@ -56,7 +73,12 @@ fn render_line_gutter(
     gutter_width: Pixels,
     theme: &crate::theme::ThemeTokens,
 ) -> impl IntoElement {
+    // Structural right alignment (`justify_end`): the number always hugs the
+    // right edge no matter the digit count, in both read-only and editable
+    // views (which share this helper and the width formula above).
     div()
+        .flex()
+        .justify_end()
         .flex_shrink_0()
         .w(gutter_width)
         .px_2()
@@ -64,7 +86,6 @@ fn render_line_gutter(
         .text_size(px(13.))
         .line_height(px(20.))
         .text_color(theme.text_disabled)
-        .text_align(TextAlign::Right)
         .child(format!("{line_no}"))
 }
 
@@ -74,7 +95,10 @@ impl EditorView {
         tabs: &[String],
         active_tab: usize,
         read_only: bool,
+        dirty: bool,
+        saving: bool,
         file_editor: Entity<FileEditorInput>,
+        preview_source: &str,
         cx: &Context<crate::workspace::WorkspaceView>,
     ) -> impl IntoElement {
         let theme = crate::theme::DeepSeekCodeTheme::tokens_from_context(cx);
@@ -106,117 +130,38 @@ impl EditorView {
             .as_ref()
             .map(|h| !h.is_empty())
             .unwrap_or(false);
-        let diff_label = state
-            .diff_stats
-            .as_ref()
-            .map(|d| format!("+{} -{}", d.added, d.removed))
-            .or_else(|| {
-                state
-                    .diff_hunks
-                    .as_ref()
-                    .map(|d| diff_stats_label(d.as_str()))
-            })
-            .unwrap_or_default();
-        let line_count = state.line_count();
         let start_line = state
             .scroll_to_line
             .map(|l| l.saturating_sub(1) as usize)
             .unwrap_or(0);
 
-        panel = panel.child(render_editor_tabs(cx, tabs, active_tab, &theme));
+        // Single header row: filename tabs on the left, actions right-aligned.
+        // The full-path row is gone; hovering a tab shows its full path.
+        panel = panel.child(render_editor_tabs(
+            cx,
+            tabs,
+            active_tab,
+            state,
+            read_only,
+            dirty,
+            saving,
+            &theme,
+        ));
 
-        panel = panel.child(
-            div()
-                .px_3()
-                .py_2()
-                .flex()
-                .items_center()
-                .justify_between()
-                .text_xs()
-                .text_color(theme.text_muted)
-                .border_b_1()
-                .border_color(theme.border_subtle)
-                .child(path.clone())
-                .children({
-                    let mut actions = vec![];
-                    if !diff_label.is_empty() {
-                        actions.push(
-                            div()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_md()
-                                .bg(theme.accent_muted)
-                                .text_color(theme.success)
-                                .child(diff_label)
-                                .into_any_element(),
-                        );
-                    }
-                    if read_only {
-                        actions.push(
-                            div()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_md()
-                                .bg(theme.bg_hover)
-                                .text_color(theme.warning)
-                                .child(deepseekcode_i18n::t("common.read_only"))
-                                .into_any_element(),
-                        );
-                    } else {
-                        actions.push(
-                            div()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .bg(theme.accent_muted)
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, _, cx| {
-                                        this.save_editor_file(cx);
-                                    }),
-                                )
-                                .child(deepseekcode_i18n::t("editor.save"))
-                                .into_any_element(),
-                        );
-                    }
-                    if has_diff {
-                        actions.push(
-                            div()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .bg(if state.side_by_side_diff {
-                                    theme.bg_selected
-                                } else {
-                                    theme.bg_elevated
-                                })
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, _, cx| {
-                                        this.editor.side_by_side_diff =
-                                            !this.editor.side_by_side_diff;
-                                        cx.notify();
-                                    }),
-                                )
-                                .child(if state.side_by_side_diff {
-                                    deepseekcode_i18n::t("editor.unified")
-                                } else {
-                                    deepseekcode_i18n::t("editor.side_by_side")
-                                })
-                                .into_any_element(),
-                        );
-                    }
-                    actions
-                }),
-        );
+        let is_md = is_markdown_path(path);
 
         if state.side_by_side_diff && has_diff {
             return panel.child(render_side_by_side(
                 state.diff_hunks.as_deref().unwrap_or_default(),
                 &theme,
             ));
+        }
+
+        // Markdown preview: reuse the LLM output renderer (`render_markdown`).
+        // `preview_source` is the live buffer text threaded down from the
+        // workspace so edits in Code reflect immediately.
+        if is_md && state.md_preview {
+            return panel.child(render_md_preview(path, preview_source, &theme, cx));
         }
 
         if !read_only {
@@ -242,62 +187,138 @@ impl EditorView {
             );
         }
 
-        let highlighted_lines = diff_highlighted_lines(state);
-        let mut highlighter = SyntaxHighlighter::for_path(path);
-        let gutter_width = line_gutter_width(line_count);
-
-        let mut body = div()
-            .id("editor-body")
-            .flex_1()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .font_family(crate::theme::font_mono(&theme));
-
-        for idx in start_line..line_count {
-            let line_no = idx + 1;
-            let line = state.line_at(idx);
-            let (bg, _) = line_style(line_no, &highlighted_lines, &theme);
-            body = body.child(
-                div()
-                    .flex()
-                    .items_start()
-                    .flex_shrink_0()
-                    .text_sm()
-                    .line_height(px(20.))
-                    .bg(bg)
-                    .child(render_line_gutter(line_no, gutter_width, &theme))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .px_2()
-                            .child(render_highlighted_line(&line, highlighter.as_mut(), &theme)),
-                    ),
-            );
-        }
-
-        if line_count == 1 && state.content.is_empty() {
-            body = body.child(
-                div()
-                    .flex()
-                    .items_start()
-                    .flex_shrink_0()
-                    .text_sm()
-                    .line_height(px(20.))
-                    .child(render_line_gutter(1, gutter_width, &theme))
-                    .child(
-                        div()
-                            .flex_1()
-                            .px_2()
-                            .text_color(theme.text_muted)
-                            .child(deepseekcode_i18n::t("editor.empty_file")),
-                    ),
-            );
-        }
-
-        panel.child(body)
+        panel.child(
+            div()
+                .id("editor-body")
+                .flex_1()
+                .min_h(px(0.))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .font_family(crate::theme::font_mono(&theme))
+                .child(render_readonly_source(state, path, &theme)),
+        )
     }
+}
+
+/// Markdown preview body: same renderer as LLM output.
+///
+/// Own selection surface (`TextSurface::Editor`): drag-select works here
+/// exactly like in the timeline, and surface scoping keeps the two panels
+/// from ever highlighting together.
+fn render_md_preview(
+    path: &str,
+    source: &str,
+    theme: &crate::theme::ThemeTokens,
+    cx: &Context<crate::workspace::WorkspaceView>,
+) -> AnyElement {
+    let preview = div()
+        .id("editor-md-preview")
+        .flex_1()
+        .min_h(px(0.))
+        .overflow_y_scroll()
+        .p_4()
+        .cursor(CursorStyle::IBeam)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(
+                |this, event: &MouseDownEvent, window, cx| {
+                    this.text_selection_down(event.position, event.click_count, window, cx);
+                },
+            ),
+        )
+        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+            this.text_selection_move(event.position, cx);
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                this.text_selection_up(cx);
+            }),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                this.text_selection_up_out(cx);
+            }),
+        );
+    if source.is_empty() {
+        return preview
+            .text_sm()
+            .text_color(theme.text_muted)
+            .child(deepseekcode_i18n::t("editor.empty_file"))
+            .into_any_element();
+    }
+    preview
+        .child(crate::markdown::render_markdown(
+            source,
+            theme,
+            path,
+            &cx.entity(),
+            crate::selectable_text::TextSurface::Editor,
+        ))
+        .into_any_element()
+}
+
+/// Read-only source lines (shared by Code and Split left pane).
+fn render_readonly_source(
+    state: &EditorState,
+    path: &str,
+    theme: &crate::theme::ThemeTokens,
+) -> AnyElement {
+    let line_count = state.line_count();
+    let start_line = state
+        .scroll_to_line
+        .map(|l| l.saturating_sub(1) as usize)
+        .unwrap_or(0);
+    let highlighted_lines = diff_highlighted_lines(state);
+    let mut highlighter = SyntaxHighlighter::for_path(path);
+    let gutter_width = line_gutter_width(line_count);
+
+    let mut body = div().flex().flex_col().w_full();
+    for idx in start_line..line_count {
+        let line_no = idx + 1;
+        let line = state.line_at(idx);
+        let (bg, _) = line_style(line_no, &highlighted_lines, theme);
+        body = body.child(
+            div()
+                .flex()
+                .items_start()
+                .flex_shrink_0()
+                .text_sm()
+                .line_height(px(20.))
+                .bg(bg)
+                .child(render_line_gutter(line_no, gutter_width, theme))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .px_2()
+                        .child(render_highlighted_line(&line, highlighter.as_mut(), theme)),
+                ),
+        );
+    }
+
+    if line_count == 1 && state.content.is_empty() {
+        body = body.child(
+            div()
+                .flex()
+                .items_start()
+                .flex_shrink_0()
+                .text_sm()
+                .line_height(px(20.))
+                .child(render_line_gutter(1, gutter_width, theme))
+                .child(
+                    div()
+                        .flex_1()
+                        .px_2()
+                        .text_color(theme.text_muted)
+                        .child(deepseekcode_i18n::t("editor.empty_file")),
+                ),
+        );
+    }
+
+    body.into_any_element()
 }
 
 fn render_highlighted_line(
@@ -515,21 +536,69 @@ fn line_style(
     }
 }
 
+/// Icon-only action button with a hover name tooltip.
+///
+/// `active` drives the selected background so toggle state (preview on/off,
+/// side-by-side on/off) stays visible without text labels.
+fn icon_action_btn(
+    cx: &Context<crate::workspace::WorkspaceView>,
+    id: &'static str,
+    icon: IconName,
+    tip: String,
+    active: bool,
+    theme: &crate::theme::ThemeTokens,
+    on_click: impl Fn(
+        &mut crate::workspace::WorkspaceView,
+        &MouseDownEvent,
+        &mut Window,
+        &mut Context<crate::workspace::WorkspaceView>,
+    ) + 'static,
+) -> AnyElement {
+    let tip_text: SharedString = tip.into();
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(22.))
+        .rounded_md()
+        .cursor_pointer()
+        .bg(if active {
+            theme.bg_selected
+        } else {
+            gpui::hsla(0., 0., 0., 0.).into()
+        })
+        .hover(|s| s.bg(theme.bg_hover))
+        .tooltip(move |_, cx| {
+            cx.new(|_| crate::git_panel::GitFileTooltip {
+                text: tip_text.clone(),
+            })
+            .into()
+        })
+        .on_mouse_down(MouseButton::Left, cx.listener(on_click))
+        .child(render_icon_rgba(
+            icon,
+            px(13.),
+            if active {
+                theme.text_primary
+            } else {
+                theme.text_muted
+            },
+        ))
+        .into_any_element()
+}
+
 fn render_editor_tabs(
     cx: &Context<crate::workspace::WorkspaceView>,
     tabs: &[String],
     active_tab: usize,
+    state: &EditorState,
+    read_only: bool,
+    dirty: bool,
+    saving: bool,
     theme: &crate::theme::ThemeTokens,
 ) -> impl IntoElement {
-    let mut row = div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .flex_shrink_0()
-        .px_2()
-        .py_1()
-        .border_b_1()
-        .border_color(theme.border_subtle);
+    let mut tab_list = div().flex().items_center().gap_1().min_w(px(0.));
 
     for (idx, path) in tabs.iter().enumerate() {
         let is_active = idx == active_tab;
@@ -538,8 +607,13 @@ fn render_editor_tabs(
             .and_then(|n| n.to_str())
             .unwrap_or(path);
         let can_close = tabs.len() > 1;
-        row = row.child(
+        // Hovering the filename shows the full path (the old path row is gone).
+        // NOTE: `.id()` first — `tooltip` only exists on stateful divs.
+        let full_path: SharedString = path.clone().into();
+        let tab_id = ElementId::Name(format!("editor-tab-{idx}").into());
+        tab_list = tab_list.child(
             div()
+                .id(tab_id)
                 .flex()
                 .items_center()
                 .gap_1()
@@ -552,6 +626,12 @@ fn render_editor_tabs(
                     theme.bg_selected
                 } else {
                     theme.bg_base
+                })
+                .tooltip(move |_, cx| {
+                    cx.new(|_| crate::git_panel::GitFileTooltip {
+                        text: full_path.clone(),
+                    })
+                    .into()
                 })
                 .on_mouse_down(MouseButton::Left, {
                     let idx = idx;
@@ -579,7 +659,141 @@ fn render_editor_tabs(
         );
     }
 
-    row
+    // Right-aligned actions. Preview stays at the far right; Save only
+    // appears next to it once the file is modified.
+    let has_diff = state
+        .diff_hunks
+        .as_ref()
+        .map(|h| !h.is_empty())
+        .unwrap_or(false);
+    let diff_label = state
+        .diff_stats
+        .as_ref()
+        .map(|d| format!("+{} -{}", d.added, d.removed))
+        .or_else(|| {
+            state
+                .diff_hunks
+                .as_ref()
+                .map(|d| diff_stats_label(d.as_str()))
+        })
+        .unwrap_or_default();
+    let is_md = state
+        .path
+        .as_ref()
+        .is_some_and(|p| is_markdown_path(p));
+
+    let mut actions = div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .flex_shrink_0()
+        .text_xs()
+        .text_color(theme.text_muted);
+    if !diff_label.is_empty() {
+        actions = actions.child(
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .bg(theme.accent_muted)
+                .text_color(theme.success)
+                .child(diff_label),
+        );
+    }
+    if read_only {
+        actions = actions.child(
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .bg(theme.bg_hover)
+                .text_color(theme.warning)
+                .child(deepseekcode_i18n::t("common.read_only")),
+        );
+    } else if dirty {
+        // P2: saving state — disabled + spinner text so rapid Ctrl+S can't
+        // look dead (logic already debounces via editor_saving).
+        let saving_label = saving;
+        actions = actions.child(
+            div()
+                .id("editor-save")
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .bg(theme.accent_muted)
+                .when(!saving_label, |el| {
+                    el.cursor_pointer()
+                        .hover(|s| s.bg(theme.bg_hover))
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| crate::git_panel::GitFileTooltip {
+                                text: deepseekcode_i18n::t("editor.save").into(),
+                            })
+                            .into()
+                        })
+                })
+                .when(saving_label, |el| el.opacity(0.6))
+                .when(!saving_label, |el| {
+                    el.on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.save_editor_file(cx);
+                        }),
+                    )
+                })
+                .child(if saving_label {
+                    deepseekcode_i18n::t("common.loading")
+                } else {
+                    deepseekcode_i18n::t("editor.save")
+                }),
+        );
+    }
+    if has_diff {
+        let tip = if state.side_by_side_diff {
+            deepseekcode_i18n::t("editor.unified")
+        } else {
+            deepseekcode_i18n::t("editor.side_by_side")
+        };
+        actions = actions.child(icon_action_btn(
+            cx,
+            "editor-diff-toggle",
+            IconName::PanelRight,
+            tip,
+            state.side_by_side_diff,
+            theme,
+            |this, _, _, cx| {
+                this.editor.side_by_side_diff = !this.editor.side_by_side_diff;
+                cx.notify();
+            },
+        ));
+    }
+    if is_md {
+        actions = actions.child(icon_action_btn(
+            cx,
+            "editor-preview-toggle",
+            IconName::Eye,
+            deepseekcode_i18n::t("editor.preview"),
+            state.md_preview,
+            theme,
+            |this, _, _, cx| {
+                this.editor.md_preview = !this.editor.md_preview;
+                cx.notify();
+            },
+        ));
+    }
+
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .flex_shrink_0()
+        .px_2()
+        .py_1()
+        .border_b_1()
+        .border_color(theme.border_subtle)
+        .child(tab_list)
+        .child(actions)
 }
 
 pub fn compute_local_diff(original: &str, current: &str) -> String {
@@ -613,4 +827,25 @@ fn diff_stats_label(diff: &str) -> String {
         "added" => added as u64,
         "removed" => removed as u64
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_markdown_path;
+
+    #[test]
+    fn markdown_paths_are_detected_case_insensitively() {
+        assert!(is_markdown_path("README.md"));
+        assert!(is_markdown_path("docs/guide.MD"));
+        assert!(is_markdown_path("notes.markdown"));
+        assert!(is_markdown_path("CHANGELOG.mdx"));
+        assert!(!is_markdown_path("main.rs"));
+        assert!(!is_markdown_path("notes.md.bak"));
+        assert!(!is_markdown_path("md"));
+    }
+
+    #[test]
+    fn md_preview_defaults_to_off() {
+        assert!(!super::EditorState::default().md_preview);
+    }
 }

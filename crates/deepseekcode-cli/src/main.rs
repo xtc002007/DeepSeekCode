@@ -10,12 +10,11 @@ use std::str::FromStr;
 
 mod cli_locale;
 
-/// P1-4: one-line per-turn cache receipt from a `MessageCompleted` payload.
-/// Delegates to the single shared formatter in `deepseekcode-core` (the same
-/// bytes the desktop meter and `/cache-status` aggregate) so the CLI can
-/// never drift from it. Returns `None` when `show` is false
-/// (`ui.show_turn_usage` gates display only — accounting always runs) or
-/// when the payload carries no usage.
+/// Per-turn receipt with cost: `in … (H cached / M new) · out … · ¥0.0123`.
+/// Cost comes from the server-stamped `estimated_cost`/`currency` when present
+/// (per-model official row at occurrence time); otherwise it is priced locally
+/// via the official catalog so old events still show money. Display-only:
+/// `show=false` stays silent, accounting always runs server-side.
 fn turn_receipt_line(payload: &serde_json::Value, show: bool) -> Option<String> {
     // Transcript-only events carry no usage: stay silent instead of printing
     // a zero line (the shared helper rebuilds from zeros when asked).
@@ -30,11 +29,74 @@ fn turn_receipt_line(payload: &serde_json::Value, show: bool) -> Option<String> 
     if !has_usage {
         return None;
     }
-    let line = deepseekcode_core::cache_status::receipt_from_payload(payload, show);
+    // Prefer server-stamped cost (exact per-model band); fall back to local
+    // catalog pricing so pre-upgrade events still show a cost line.
+    let cost_display: Option<String> = payload
+        .get("estimated_cost")
+        .and_then(|v| v.as_f64())
+        .map(|cost| {
+            let cur = payload
+                .get("currency")
+                .and_then(|v| v.as_str())
+                .unwrap_or("CNY");
+            deepseekcode_core::pricing::format_cost(cur, cost)
+        })
+        .or_else(|| {
+            let model = payload.get("model").and_then(|v| v.as_str()).unwrap_or("");
+            let currency = payload
+                .get("currency")
+                .and_then(|v| v.as_str())
+                .unwrap_or("CNY");
+            let (card, _) = deepseekcode_core::pricing::rate_for(model, currency)
+                .or_else(|| {
+                    // Unknown model or missing model field: price with the
+                    // configured global card rather than going blind.
+                    None
+                })?;
+            let usage = deepseekcode_llm::TokenUsage {
+                input_tokens: payload.get("input_tokens").and_then(|v| v.as_u64()).map(|v| v as u32),
+                output_tokens: payload.get("output_tokens").and_then(|v| v.as_u64()).map(|v| v as u32),
+                cache_hit: payload.get("cache_hit").and_then(|v| v.as_u64()).map(|v| v as u32),
+                cache_miss: payload.get("cache_miss").and_then(|v| v.as_u64()).map(|v| v as u32),
+                ..Default::default()
+            };
+            let hit = usage.cache_hit.unwrap_or(0) as u64;
+            let miss = usage.cache_miss.map(|v| v as u64).unwrap_or_else(|| {
+                (usage.input_tokens.unwrap_or(0) as u64).saturating_sub(hit)
+            });
+            let cost = deepseekcode_core::pricing::cost_for_tokens(
+                hit,
+                miss,
+                usage.output_tokens.unwrap_or(0) as u64,
+                &card,
+            );
+            Some(deepseekcode_core::pricing::format_cost(&card.currency, cost))
+        });
+    let usage = deepseekcode_llm::TokenUsage {
+        input_tokens: payload.get("input_tokens").and_then(|v| v.as_u64()).map(|v| v as u32),
+        output_tokens: payload.get("output_tokens").and_then(|v| v.as_u64()).map(|v| v as u32),
+        reasoning_tokens: payload.get("reasoning_tokens").and_then(|v| v.as_u64()).map(|v| v as u32),
+        cache_tokens: payload.get("cache_hit").and_then(|v| v.as_u64()).map(|v| v as u32),
+        cache_hit: payload.get("cache_hit").and_then(|v| v.as_u64()).map(|v| v as u32),
+        cache_miss: payload.get("cache_miss").and_then(|v| v.as_u64()).map(|v| v as u32),
+        cache_write: payload.get("cache_write").and_then(|v| v.as_u64()).map(|v| v as u32),
+    };
+    let line = deepseekcode_core::cache_status::format_turn_receipt_with_cost(
+        &usage,
+        show,
+        cost_display.as_deref(),
+    );
     if line.is_empty() {
         return None;
     }
-    Some(format!("\n{line}"))
+    // Model tag keeps mixed-model sessions auditable: `[deepseek-flash] …`.
+    let model_tag = payload
+        .get("model")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|m| format!("[{m}] "))
+        .unwrap_or_default();
+    Some(format!("\n{model_tag}{line}"))
 }
 
 #[derive(Parser)]
@@ -749,7 +811,44 @@ async fn run(cli: Cli, logging: LoggingConfig, config_error: Option<String>) -> 
             })
             .await;
             match result {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => {
+                    // Session total: always fetch so the user sees money spent
+                    // even when `show_turn_usage` hid the per-turn lines.
+                    // Failure is non-fatal (transcript already printed).
+                    if let Ok(status) = client.session_cache_status(session.id).await {
+                        let turns = status.get("turns").and_then(|v| v.as_u64()).unwrap_or(0);
+                        if turns > 0 {
+                            let input = status.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let output = status.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let cost = status.get("estimated_cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let currency = status.get("currency").and_then(|v| v.as_str()).unwrap_or("CNY");
+                            let cost_str = deepseekcode_core::pricing::format_cost(currency, cost);
+                            let summary = deepseekcode_i18n::tr!(
+                                "cli.out.session_cost",
+                                "input" => deepseekcode_i18n::count(input),
+                                "output" => deepseekcode_i18n::count(output),
+                                "turns" => turns,
+                                "cost" => cost_str.as_str()
+                            );
+                            let models = status.get("models").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                            let mut per_model = String::new();
+                            for m in models.iter().take(5) {
+                                let name = m.get("model").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                let mc = m.get("estimated_cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let mcur = m.get("currency").and_then(|v| v.as_str()).unwrap_or(currency);
+                                per_model.push_str(&format!(
+                                    "\n{}",
+                                    deepseekcode_i18n::tr!(
+                                        "cli.out.session_model_cost",
+                                        "model" => name,
+                                        "cost" => deepseekcode_core::pricing::format_cost(mcur, mc).as_str()
+                                    )
+                                ));
+                            }
+                            println!("\n[session] {summary}{per_model}");
+                        }
+                    }
+                }
                 Ok(Err(e)) => {
                     eprintln!("{e}");
                     std::process::exit(1);

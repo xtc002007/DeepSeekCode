@@ -62,9 +62,16 @@ impl SidebarView {
                         false,
                         false,
                     )
-                    .on_mouse_down(
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| crate::git_panel::GitFileTooltip {
+                            text: deepseekcode_i18n::t("sidebar.expand").into(),
+                        })
+                        .into()
+                    })
+                    .on_mouse_up(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
                             this.toggle_sidebar_collapsed(cx);
                         }),
                     ),
@@ -79,9 +86,16 @@ impl SidebarView {
                         false,
                         false,
                     )
-                    .on_mouse_down(
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| crate::git_panel::GitFileTooltip {
+                            text: deepseekcode_i18n::t("home.open_folder").into(),
+                        })
+                        .into()
+                    })
+                    .on_mouse_up(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
                             this.pick_project_folder(cx);
                         }),
                     ),
@@ -281,6 +295,8 @@ fn render_project_row(
         let path_for_open = path_owned.clone();
         let path_for_new = path_owned.clone();
         let path_for_context = path_owned.clone();
+        let path_for_context_right = path_owned.clone();
+        let tooltip_path = path_owned.clone();
         let mut row = div()
             .id(format!("project-header-{path_key}"))
             .px_2()
@@ -296,23 +312,40 @@ fn render_project_row(
         row = row
             .child(
                 div()
+                    .id(format!("project-chevron-{path_key}"))
                     .flex_shrink_0()
-                    .w(px(16.))
+                    // P2 S5: 24px hit area (was 16px) + hover bg so the
+                    // chevron is actually hittable on HiDPI/touch.
+                    .w(px(24.))
+                    .h(px(24.))
                     .flex()
                     .items_center()
                     .justify_center()
+                    .rounded_md()
                     .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, {
+                    .hover(|s| s.bg(sidebar_row_hover_bg(&theme)))
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| crate::git_panel::GitFileTooltip {
+                            text: if expanded {
+                                deepseekcode_i18n::t("common.hide").into()
+                            } else {
+                                deepseekcode_i18n::t("common.show").into()
+                            },
+                        })
+                        .into()
+                    })
+                    .on_mouse_up(MouseButton::Left, {
                         let path_for_toggle = path_for_toggle.clone();
                         cx.listener(move |this, _, _, cx| {
-                            this.toggle_project_expanded(path_for_toggle.clone(), cx);
                             cx.stop_propagation();
+                            this.toggle_project_expanded(path_for_toggle.clone(), cx);
                         })
                     })
                     .child(render_icon_rgba(chevron, px(12.), theme.text_muted)),
             )
             .child(
                 div()
+                    .id(format!("project-name-{path_key}"))
                     .flex_1()
                     .min_w(px(0.))
                     .text_xs()
@@ -328,38 +361,57 @@ fn render_project_row(
                         FontWeight::NORMAL
                     })
                     .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, {
+                    .hover(|s| s.bg(sidebar_row_hover_bg(&theme)))
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| crate::git_panel::GitFileTooltip {
+                            text: tooltip_path.clone().into(),
+                        })
+                        .into()
+                    })
+                    .on_mouse_up(MouseButton::Left, {
                         let path_for_open = path_for_open.clone();
                         let is_current = is_current;
                         cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
                             if is_current {
                                 this.toggle_project_expanded(path_for_open.clone(), cx);
                             } else {
                                 this.open_recent_project(PathBuf::from(path_for_open.clone()), cx);
                             }
-                            cx.stop_propagation();
                         })
                     })
                     .child(short_name.to_string()),
             )
             .children(if show_sessions {
                 vec![div()
+                    .id(format!("project-new-{path_key}"))
                     .flex_shrink_0()
-                    .px_1p5()
-                    .py_0p5()
+                    // P2 S7: 20px hit area (was 12px icon only) + hover bg +
+                    // tooltip so the new-session affordance is discoverable.
+                    .size(px(20.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .rounded_md()
-                    .text_xs()
                     .cursor_pointer()
                     .text_color(theme.text_muted)
                     .hover(|s| {
                         s.bg(sidebar_row_hover_bg(&theme))
                             .text_color(theme.text_primary)
                     })
-                    .on_mouse_down(MouseButton::Left, {
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| crate::git_panel::GitFileTooltip {
+                            text: deepseekcode_i18n::t("sidebar.new_session").into(),
+                        })
+                        .into()
+                    })
+                    .on_mouse_up(MouseButton::Left, {
                         cx.listener(move |this, _, _, cx| {
-                            this.new_session_for_project(PathBuf::from(path_for_new.clone()), cx);
                             cx.stop_propagation();
+                            this.new_session_for_project(PathBuf::from(path_for_new.clone()), cx);
                         })
                     })
                     .child(render_icon_rgba(IconName::Plus, px(12.), theme.text_muted))
@@ -369,14 +421,30 @@ fn render_project_row(
             });
         row = row.on_mouse_up(MouseButton::Right, {
             cx.listener(move |this, event: &MouseUpEvent, _, cx| {
-                this.open_project_context_menu(path_for_context.clone(), event.position, cx);
+                this.open_project_context_menu(path_for_context_right.clone(), event.position, cx);
                 cx.stop_propagation();
+            })
+        });
+        // P2: Ctrl+Click (macOS trackpad) opens the same context menu.
+        row = row.on_mouse_down(MouseButton::Left, {
+            let path_for_context = path_for_context.clone();
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                if event.modifiers.control {
+                    this.open_project_context_menu(
+                        path_for_context.clone(),
+                        event.position,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }
             })
         });
         row
     });
 
-    if expanded && show_sessions {
+    // P2 S5: show the session list whenever expanded (was `expanded &&
+    // show_sessions`, so recent-project chevrons appeared dead).
+    if expanded {
         if loading_sessions && sessions.is_empty() {
             column = column.child(
                 div()
@@ -399,7 +467,7 @@ fn render_project_row(
             );
         } else {
             let limit = session_nav_visible
-                .get(path)
+                .get(&path_key)
                 .copied()
                 .unwrap_or(PAGE)
                 .min(sessions.len());
@@ -433,6 +501,9 @@ fn render_project_row(
                         .hover(|s| s.bg(theme.bg_hover))
                         .on_mouse_down(MouseButton::Left, {
                             cx.listener(move |this, _, _, cx| {
+                                // P1-2: stop so More never bubbles to the
+                                // project row toggle underneath.
+                                cx.stop_propagation();
                                 this.show_more_project_sessions(path_owned.clone(), cx);
                             })
                         })
@@ -459,7 +530,18 @@ fn render_session_row(
     let running = session.running;
     let project_path = project_path.to_string();
 
-    let full_title: SharedString = title.clone().into();
+    let full_title: SharedString = if title.is_empty() {
+        deepseekcode_i18n::t("workspace.new_session_short").into()
+    } else {
+        title.clone().into()
+    };
+    // P2 S12: running is text as well as color (color-blind safe) and the
+    // tooltip shows title + state (was a terminal-styled tooltip).
+    let state_label: SharedString = if running {
+        deepseekcode_i18n::t("status.running").into()
+    } else {
+        full_title.clone()
+    };
     let row = div()
         .id(ElementId::Name(format!("session-row-{}", session_id).into()))
         .pl_6()
@@ -473,14 +555,35 @@ fn render_session_row(
         .items_center()
         .when(active, |s| s.bg(sidebar_session_selected_bg(&theme)))
         .tooltip(move |_, cx| {
-            cx.new(|_| crate::terminal::TerminalTabTooltip {
-                text: full_title.clone(),
+            cx.new(|_| crate::git_panel::GitFileTooltip {
+                text: state_label.clone(),
             })
             .into()
         });
     row.on_mouse_down(MouseButton::Left, {
+        let row_id = format!("session-row-{session_id}");
+        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            // P1-1: arm only — fire on mouse-up so press-drag-release never
+            // mis-switches sessions. P1-2: stop so the dismiss layer doesn't
+            // double-fire underneath.
+            // P2: macOS Ctrl+Click / trackpad two-finger maps to Right here.
+            if event.modifiers.control {
+                this.open_session_context_menu(session_id, event.position, cx);
+                cx.stop_propagation();
+                return;
+            }
+            cx.stop_propagation();
+            this.arm_click(row_id.clone(), cx);
+        })
+    })
+    .on_mouse_up(MouseButton::Left, {
         let project_path = project_path.clone();
+        let row_id = format!("session-row-{session_id}");
         cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            if !this.confirm_click(&row_id, cx) {
+                return;
+            }
             this.close_popover(cx);
             this.activate_project_session(
                 std::path::PathBuf::from(project_path.clone()),
@@ -496,11 +599,29 @@ fn render_session_row(
         })
     })
     .gap_1()
-    .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(if running {
-        theme.success
-    } else {
-        theme.text_disabled
-    }))
+    .child(
+        div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(if running {
+                theme.success
+            } else {
+                theme.text_disabled
+            }))
+            // P2 S12: text badge in addition to the dot so running doesn't
+            // rely on color alone.
+            .when(running, |el| {
+                el.child(
+                    div()
+                        .text_size(px(9.))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(theme.success)
+                        .child("●"),
+                )
+            }),
+    )
     .child(
         div()
             .flex_1()
@@ -523,7 +644,11 @@ fn render_session_row(
                     .whitespace_nowrap()
                     .overflow_hidden()
                     .text_ellipsis()
-                    .child(title),
+                    .child(if title.is_empty() {
+                        deepseekcode_i18n::t("workspace.new_session_short")
+                    } else {
+                        title
+                    }),
             ),
     )
 }

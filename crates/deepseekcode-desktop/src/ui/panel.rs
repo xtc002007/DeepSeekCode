@@ -21,10 +21,20 @@ pub fn render_panel_header(
             div()
                 .text_xs()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text_muted)
+                // P2: muted xs on elevated can fall below a11y contrast —
+                // use secondary for the header title.
+                .text_color(theme.text_secondary)
                 .child(title.into()),
         )
-        .child(div().flex().gap(px(4.)).children(actions))
+        // P2: center heterogeneous icons vertically; 8px gap meets the 32px
+        // touch pitch with 24px targets.
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .children(actions),
+        )
 }
 
 pub fn render_panel_header_icon_button<F>(
@@ -46,6 +56,12 @@ where
         .rounded_sm()
         .cursor_pointer()
         .hover(|s| s.bg(theme.bg_hover))
-        .on_mouse_down(MouseButton::Left, move |_, _, cx| on_click(cx))
+        .active(|s| s.bg(theme.bg_active))
+        // P1-1 release-to-confirm; P1-2 stop so a header ✕ never starts a
+        // panel drag/resize underneath.
+        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            on_click(cx)
+        })
         .child(render_icon_rgba(icon, px(14.), theme.text_secondary))
 }

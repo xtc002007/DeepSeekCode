@@ -51,12 +51,35 @@ impl PlanImplementDock {
                         .child(summary.clone().unwrap_or_default()),
                 )
             })
+            // P2: placeholder when the model produced no summary (was a
+            // missing row that shifted layout).
+            .when(summary.is_none(), |el| {
+                el.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.text_disabled)
+                        .child(deepseekcode_i18n::t("common.none")),
+                )
+            })
             .child(
                 div()
+                    .id(ElementId::Name(format!("plan-path-{}", prompt.plan_id).into()))
                     .text_xs()
                     .font_family(crate::theme::font_mono(&theme))
                     .text_color(theme.text_muted)
-                    .child(plan_path.clone()),
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .tooltip({
+                        let tip_path = prompt.plan_path.clone();
+                        move |_, cx| {
+                            cx.new(|_| crate::git_panel::GitFileTooltip {
+                                text: tip_path.clone().into(),
+                            })
+                            .into()
+                        }
+                    })
+                    .child(prompt.plan_path.clone()),
             )
             .child(
                 div()
@@ -104,12 +127,15 @@ fn dock_button(
     fg: gpui::Rgba,
     handler: impl Fn(
             &mut crate::workspace::WorkspaceView,
-            &MouseDownEvent,
+            &MouseUpEvent,
             &mut Window,
             &mut Context<crate::workspace::WorkspaceView>,
         ) + 'static,
 ) -> impl IntoElement {
+    let tip = label.clone();
+    let btn_id = format!("plan-dock-{label}");
     div()
+        .id(ElementId::Name(btn_id.into()))
         .px_3()
         .py_1()
         .rounded_md()
@@ -117,6 +143,17 @@ fn dock_button(
         .text_xs()
         .text_color(fg)
         .cursor_pointer()
-        .on_mouse_down(MouseButton::Left, cx.listener(handler))
+        .hover(|s| s.bg(bg))
+        .tooltip(move |_, cx| {
+            cx.new(|_| crate::git_panel::GitFileTooltip {
+                text: tip.clone().into(),
+            })
+            .into()
+        })
+        // P1-1 release-to-confirm + P1-2 stop.
+        .on_mouse_up(MouseButton::Left, cx.listener(move |this, ev, window, cx| {
+            cx.stop_propagation();
+            handler(this, ev, window, cx);
+        }))
         .child(label)
 }

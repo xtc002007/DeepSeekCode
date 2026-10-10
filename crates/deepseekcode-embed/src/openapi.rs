@@ -55,6 +55,7 @@ pub use deepseekcode_schema::api::{
         crate::routes::list_session_events,
         crate::routes::session_event_head,
         crate::routes::session_cache_status,
+        crate::routes::billing_rates,
         crate::routes::compact_session,
         crate::routes::fork_session,
         crate::routes::move_session,
