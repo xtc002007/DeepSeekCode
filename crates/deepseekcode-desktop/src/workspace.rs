@@ -739,8 +739,13 @@ impl WorkspaceView {
     }
 
     pub fn pick_project_folder(&mut self, cx: &mut Context<Self>) {
+        // rfd sync dialog blocks the GPUI UI thread for seconds on Windows
+        // (COM + shell namespace enumeration), so offload to blocking pool.
         cx.spawn(async move |view, cx| {
-            let path = rfd::FileDialog::new().pick_folder();
+            let path = tokio::task::spawn_blocking(|| rfd::FileDialog::new().pick_folder())
+                .await
+                .ok()
+                .flatten();
             if let Some(path) = path {
                 let _ = view.update(cx, |this, cx| {
                     this.open_project(path, cx);
@@ -1088,9 +1093,14 @@ impl WorkspaceView {
                 }
             };
             let default_name = format!("{SESSION_EXPORT_PREFIX}-{session_id}.json");
-            let dest = rfd::FileDialog::new()
-                .set_file_name(&default_name)
-                .save_file();
+            let dest = tokio::task::spawn_blocking(move || {
+                rfd::FileDialog::new()
+                    .set_file_name(&default_name)
+                    .save_file()
+            })
+            .await
+            .ok()
+            .flatten();
             let Some(path) = dest else {
                 // User cancelled — not an error, stay silent.
                 return;
@@ -1105,13 +1115,19 @@ impl WorkspaceView {
                             sanitize = sanitize,
                             "session exported"
                         );
-                        rfd::MessageDialog::new()
-                            .set_title(&deepseekcode_i18n::t("session.exported"))
-                            .set_description(&deepseekcode_i18n::tr!(
-                                "session.saved_to",
-                                "path" => path.display().to_string()
-                            ))
-                            .show();
+                        let title = deepseekcode_i18n::t("session.exported").to_string();
+                        let description = deepseekcode_i18n::tr!(
+                            "session.saved_to",
+                            "path" => path.display().to_string()
+                        )
+                        .to_string();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            rfd::MessageDialog::new()
+                                .set_title(&title)
+                                .set_description(&description)
+                                .show()
+                        })
+                        .await;
                     }
                     Err(e) => {
                         let _ = view.update(cx, |this, cx| {
@@ -5368,7 +5384,10 @@ Describe this project so the AI assistant has context.\n\n\
 
     pub(crate) fn attach_file(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |view, cx| {
-            let path = rfd::FileDialog::new().pick_file();
+            let path = tokio::task::spawn_blocking(|| rfd::FileDialog::new().pick_file())
+                .await
+                .ok()
+                .flatten();
             if let Some(path) = path {
                 let _ = view.update(cx, |this, cx| {
                     this.attach_path(path, cx);
@@ -5892,7 +5911,10 @@ Describe this project so the AI assistant has context.\n\n\
         self.close_session_menu(cx);
         let client_slot = Arc::clone(&self.client);
         cx.spawn(async move |view, cx| {
-            let dest = rfd::FileDialog::new().pick_folder();
+            let dest = tokio::task::spawn_blocking(|| rfd::FileDialog::new().pick_folder())
+                .await
+                .ok()
+                .flatten();
             let Some(directory) = dest else {
                 return;
             };
@@ -5945,7 +5967,10 @@ Describe this project so the AI assistant has context.\n\n\
     pub(crate) fn add_project_directory(&mut self, cx: &mut Context<Self>) {
         let client_slot = Arc::clone(&self.client);
         cx.spawn(async move |view, cx| {
-            let picked = rfd::FileDialog::new().pick_folder();
+            let picked = tokio::task::spawn_blocking(|| rfd::FileDialog::new().pick_folder())
+                .await
+                .ok()
+                .flatten();
             let Some(directory) = picked else {
                 return;
             };
@@ -6754,9 +6779,14 @@ Describe this project so the AI assistant has context.\n\n\
                 "{DIAGNOSTICS_ARCHIVE_PREFIX}-{}.zip",
                 run_id.as_deref().unwrap_or("latest")
             );
-            let dest = rfd::FileDialog::new()
-                .set_file_name(&default_name)
-                .save_file();
+            let dest = tokio::task::spawn_blocking(move || {
+                rfd::FileDialog::new()
+                    .set_file_name(&default_name)
+                    .save_file()
+            })
+            .await
+            .ok()
+            .flatten();
             let Some(path) = dest else {
                 return;
             };
@@ -7131,16 +7161,33 @@ impl WorkspaceView {
                     .gap_3()
                     .child(
                         div()
-                            .text_2xl()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(theme.text_primary)
-                            .child(deepseekcode_i18n::t("app.name")),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.text_muted)
-                            .child(deepseekcode_i18n::t("workspace.no_project")),
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                img(std::sync::Arc::clone(&crate::titlebar::APP_ICON))
+                                    .w(px(48.))
+                                    .h(px(48.))
+                                    .rounded(px(10.)),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        div()
+                                            .text_2xl()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(theme.text_primary)
+                                            .child(deepseekcode_i18n::t("app.name")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(theme.text_muted)
+                                            .child(deepseekcode_i18n::t("workspace.no_project")),
+                                    ),
+                            ),
                     )
                     .child(
                         div()

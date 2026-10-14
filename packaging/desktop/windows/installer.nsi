@@ -46,6 +46,8 @@ OutFile "${OUT_DIR}\DeepSeekCode-${APP_VERSION}-x64-setup.exe"
 Unicode True
 SetCompressor /SOLID lzma
 
+!define MUI_ICON "..\..\..\crates\deepseekcode-desktop\assets\icon.ico"
+!define MUI_UNICON "..\..\..\crates\deepseekcode-desktop\assets\icon.ico"
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXE}"
 !define MUI_FINISHPAGE_RUN_TEXT "Launch DeepSeekCode"

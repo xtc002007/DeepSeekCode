@@ -157,16 +157,33 @@ impl Render for HomeView {
                     .gap_4()
                     .child(
                         div()
-                            .text_2xl()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(theme.text_primary)
-                            .child(deepseekcode_i18n::t("app.name")),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.text_muted)
-                            .child(deepseekcode_i18n::t("app.tagline")),
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                img(std::sync::Arc::clone(&crate::titlebar::APP_ICON))
+                                    .w(px(44.))
+                                    .h(px(44.))
+                                    .rounded(px(10.)),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        div()
+                                            .text_2xl()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(theme.text_primary)
+                                            .child(deepseekcode_i18n::t("app.name")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(theme.text_muted)
+                                            .child(deepseekcode_i18n::t("app.tagline")),
+                                    ),
+                            ),
                     )
                     .child(
                         div()

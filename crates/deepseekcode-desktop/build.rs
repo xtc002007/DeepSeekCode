@@ -119,23 +119,27 @@ fn to_pascal_case(name: &str) -> String {
 
 #[cfg(target_os = "windows")]
 fn compile_windows_resources() {
-    if std::path::Path::new("assets/icon.png").exists() {
-        // P1-12: write to OUT_DIR, never pollute the source tree (previously
-        // overwrote `assets/icon.ico` on every build).
+    let ico_path = if std::path::Path::new("assets/icon.ico").exists() {
+        std::path::PathBuf::from("assets/icon.ico")
+    } else if std::path::Path::new("assets/icon.png").exists() {
         let out_ico = std::path::Path::new(
             &std::env::var("OUT_DIR").expect("build.rs: OUT_DIR not set by Cargo"),
         )
         .join("icon.ico");
         write_ico_from_png("assets/icon.png", &out_ico.to_string_lossy());
-        let mut res = winres::WindowsResource::new();
-        res.set_icon(&out_ico.to_string_lossy());
-        res.set("ProductName", "DeepSeekCode");
-        res.set("FileDescription", "DeepSeekCode Desktop");
-        res.set("InternalName", "deepseekcode-desktop");
-        res.set("OriginalFilename", "deepseekcode-desktop.exe");
-        if let Err(err) = res.compile() {
-            eprintln!("winres: {err}");
-        }
+        out_ico
+    } else {
+        return;
+    };
+
+    let mut res = winres::WindowsResource::new();
+    res.set_icon(&ico_path.to_string_lossy());
+    res.set("ProductName", "DeepSeekCode");
+    res.set("FileDescription", "DeepSeekCode Desktop");
+    res.set("InternalName", "deepseekcode-desktop");
+    res.set("OriginalFilename", "deepseekcode-desktop.exe");
+    if let Err(err) = res.compile() {
+        eprintln!("winres: {err}");
     }
 }
 
@@ -145,23 +149,23 @@ fn write_ico_from_png(png_path: &str, ico_path: &str) {
     use std::io::BufWriter;
 
     let img = match image::open(png_path) {
-        Ok(img) => img.into_rgba8(),
+        Ok(img) => img,
         Err(err) => {
             eprintln!("icon png: {err}");
             return;
         }
     };
-    let (w, h) = img.dimensions();
-    let icon_img = ico::IconImage::from_rgba_data(w, h, img.into_raw());
     let mut icon_dir = ico::IconDir::new(ico::ResourceType::Icon);
-    let entry = match ico::IconDirEntry::encode(&icon_img) {
-        Ok(entry) => entry,
-        Err(err) => {
-            eprintln!("icon encode: {err}");
-            return;
+    // Standard Windows multi-resolution icon dimensions (256 max)
+    for &size in &[256u32, 128, 64, 48, 32, 16] {
+        let resized = img
+            .resize_exact(size, size, image::imageops::FilterType::Lanczos3)
+            .into_rgba8();
+        let icon_img = ico::IconImage::from_rgba_data(size, size, resized.into_raw());
+        if let Ok(entry) = ico::IconDirEntry::encode(&icon_img) {
+            icon_dir.add_entry(entry);
         }
-    };
-    icon_dir.add_entry(entry);
+    }
     if let Ok(file) = File::create(ico_path) {
         let _ = icon_dir.write(BufWriter::new(file));
     }

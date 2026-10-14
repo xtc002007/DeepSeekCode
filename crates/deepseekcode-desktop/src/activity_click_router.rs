@@ -586,6 +586,7 @@ struct BashStreamBody {
     stderr: String,
 }
 
+#[cfg(test)]
 pub(crate) fn merge_bash_completed_display(
     streamed: Option<&str>,
     completed_value: &serde_json::Value,
@@ -670,12 +671,17 @@ pub(crate) fn truncate_command(command: &str, max: usize) -> String {
 }
 
 /// Shell shown before any output has arrived.
+/// Test-only spec helper: prod now stores the raw payload and renders via
+/// `parse_bash_result` with the `received` tri-state instead.
+#[cfg(test)]
 pub(crate) fn bash_pending_body(command: &str) -> String {
     deepseekcode_i18n::tr!("terminal.bash_pending", "command" => command)
 }
 
 /// Shell body once output is known: the echoed command, then the output.
 /// An empty result is stated explicitly instead of implying it is still running.
+/// Test-only spec helper: see `bash_pending_body`.
+#[cfg(test)]
 pub(crate) fn bash_output_body(command: &str, output: &str) -> String {
     if output.trim().is_empty() {
         deepseekcode_i18n::tr!("terminal.bash_empty", "command" => command)

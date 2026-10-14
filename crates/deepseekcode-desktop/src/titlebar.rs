@@ -3,7 +3,7 @@ use crate::ui::icon::IconName;
 use gpui::*;
 use std::sync::{Arc, LazyLock};
 
-static APP_ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
+pub(crate) static APP_ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
     Arc::new(Image::from_bytes(
         ImageFormat::Png,
         include_bytes!("../assets/icon.png").to_vec(),
