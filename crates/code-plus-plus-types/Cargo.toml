@@ -1,0 +1,21 @@
+[package]
+name = "code-plus-plus-types"
+description = "Shared types, IDs, and errors for Code++"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# P1-9: `uuid` removed (unused; all IDs are ULID). This also shrinks every
+# downstream crate's compile graph.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ulid = { workspace = true }
+chrono = { workspace = true }
+directories = { workspace = true }
+# Schema rendering for the ID newtypes only (no other schema surface lives
+# here). Already in the workspace graph via `schema`, so no new crates.
+schemars = { workspace = true }
+utoipa = { workspace = true }

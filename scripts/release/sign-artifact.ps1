@@ -18,19 +18,19 @@ Import-Module (Join-Path $PSScriptRoot "release-env.psm1") -Force
 $keys = Get-SigningKeyPaths -Root $root
 
 # CI: private key injected as env var content
-$privateKeyInline = [Environment]::GetEnvironmentVariable("DEEPSEEKCODE_SIGNING_PRIVATE_KEY")
+$privateKeyInline = [Environment]::GetEnvironmentVariable("CODE_PLUS_PLUS_SIGNING_PRIVATE_KEY")
 $secretKeyPath = $keys.PrivateKey
 
 if ($privateKeyInline) {
     # Unpredictable name (no pre-creation/symlink races) + owner-only ACL so
     # other local users cannot read the key between write and delete.
-    $tempKey = Join-Path $env:TEMP ("deepseekcode-signing-{0}.key" -f ([guid]::NewGuid().ToString("N")))
+    $tempKey = Join-Path $env:TEMP ("code-plus-plus-signing-{0}.key" -f ([guid]::NewGuid().ToString("N")))
     Set-Content -Path $tempKey -Value $privateKeyInline -Encoding utf8 -NoNewline
     icacls $tempKey /inheritance:r /grant:r ("$env:USERNAME:(R,W)") | Out-Null
     $secretKeyPath = $tempKey
 } elseif (-not (Test-Path $secretKeyPath)) {
     if ($Required) {
-        throw "No signing key. Set DEEPSEEKCODE_SIGNING_PRIVATE_KEY (CI) or create signing/deepseekcode.key (local)."
+        throw "No signing key. Set CODE_PLUS_PLUS_SIGNING_PRIVATE_KEY (CI) or create signing/code-plus-plus.key (local)."
     }
     Write-Host "[!] No signing key; skipping signature (local build). Use -SkipSign to silence, or run generate-signing-key.ps1" -ForegroundColor Yellow
     return
@@ -41,7 +41,7 @@ $minisignExe = Resolve-MinisignExe
 $sigPath = "$ArtifactPath.minisig"
 if (Test-Path $sigPath) { Remove-Item $sigPath -Force }
 
-$password = [Environment]::GetEnvironmentVariable("DEEPSEEKCODE_SIGNING_PRIVATE_KEY_PASSWORD")
+$password = [Environment]::GetEnvironmentVariable("CODE_PLUS_PLUS_SIGNING_PRIVATE_KEY_PASSWORD")
 if ($null -eq $password) { $password = $keys.Password }
 
 try {

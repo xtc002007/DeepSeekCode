@@ -1,0 +1,32 @@
+[package]
+name = "code-plus-plus-plugin"
+description = "Plugin host with Rust native and WASM sandbox support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# WASM plugin sandbox (wasmtime ~100MB compile + runtime). Default ON to
+# preserve behavior; slim builds (`run`/`serve` without `.wasm` plugins) use
+# `--no-default-features` to drop the entire wasmtime stack. Native plugins
+# (libloading) and the hook registry always stay available.
+default = ["wasm"]
+wasm = ["dep:wasmtime"]
+
+[dependencies]
+code-plus-plus-types = { workspace = true }
+code-plus-plus-schema = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+wasmtime = { workspace = true, optional = true }
+tracing = { workspace = true }
+code-plus-plus-telemetry = { workspace = true }
+libloading = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

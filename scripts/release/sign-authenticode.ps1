@@ -11,14 +11,14 @@ param(
 $ErrorActionPreference = "Stop"
 if (-not (Test-Path $ArtifactPath)) { throw "Artifact not found: $ArtifactPath" }
 
-$pfxBase64 = [Environment]::GetEnvironmentVariable("DEEPSEEKCODE_WINDOWS_PFX_BASE64")
-$pfxPassword = [Environment]::GetEnvironmentVariable("DEEPSEEKCODE_WINDOWS_PFX_PASSWORD")
+$pfxBase64 = [Environment]::GetEnvironmentVariable("CODE_PLUS_PLUS_WINDOWS_PFX_BASE64")
+$pfxPassword = [Environment]::GetEnvironmentVariable("CODE_PLUS_PLUS_WINDOWS_PFX_PASSWORD")
 if (-not $pfxBase64) {
-    Write-Host "[*] DEEPSEEKCODE_WINDOWS_PFX_BASE64 not set; skipping Authenticode" -ForegroundColor DarkYellow
+    Write-Host "[*] CODE_PLUS_PLUS_WINDOWS_PFX_BASE64 not set; skipping Authenticode" -ForegroundColor DarkYellow
     return
 }
 
-$pfxPath = Join-Path $env:TEMP "deepseekcode-signing.pfx"
+$pfxPath = Join-Path $env:TEMP "code-plus-plus-signing.pfx"
 [System.IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($pfxBase64))
 
 $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue

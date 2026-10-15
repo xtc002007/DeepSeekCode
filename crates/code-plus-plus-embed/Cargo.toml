@@ -1,0 +1,51 @@
+[package]
+name = "code-plus-plus-embed"
+description = "In-process HTTP engine (Axum router, SSE, PTY) shared by the SDK, desktop, and serve command"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["wasm-plugins"]
+wasm-plugins = ["code-plus-plus-core/wasm-plugins"]
+
+[dependencies]
+code-plus-plus-types = { workspace = true }
+code-plus-plus-schema = { workspace = true }
+code-plus-plus-config = { workspace = true }
+code-plus-plus-i18n = { workspace = true }
+code-plus-plus-core = { path = "../code-plus-plus-core", default-features = false }
+code-plus-plus-llm = { workspace = true }
+code-plus-plus-storage = { workspace = true }
+code-plus-plus-telemetry = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+utoipa = { workspace = true }
+ignore = { workspace = true }
+portable-pty = { workspace = true }
+chrono = { workspace = true }
+camino = { workspace = true }
+similar = { workspace = true }
+tokio-stream = { workspace = true }
+base64 = { workspace = true }
+ulid = { workspace = true }
+jsonc-parser = { workspace = true }
+
+[dev-dependencies]
+code-plus-plus-core = { workspace = true }
+code-plus-plus-config = { workspace = true }
+code-plus-plus-i18n = { workspace = true }
+reqwest = { workspace = true }
+tempfile = { workspace = true }
+wiremock = { workspace = true }
+futures = { workspace = true }
+code-plus-plus-schema = { workspace = true }

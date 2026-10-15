@@ -1,0 +1,33 @@
+[package]
+name = "code-plus-plus-server"
+description = "Standalone-server facade over code-plus-plus-embed for the serve command"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["wasm-plugins"]
+wasm-plugins = ["code-plus-plus-embed/wasm-plugins"]
+
+[dependencies]
+code-plus-plus-embed = { path = "../code-plus-plus-embed", default-features = false }
+# Kept so downstream `serve`-adjacent code keeps compiling without churn;
+# the engine itself contributes no new symbols beyond the re-export.
+code-plus-plus-types = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+code-plus-plus-core = { workspace = true }
+code-plus-plus-config = { workspace = true }
+reqwest = { workspace = true }
+tempfile = { workspace = true }
+wiremock = { workspace = true }
+futures = { workspace = true }
+code-plus-plus-schema = { workspace = true }
+# Integration tests boot the router directly and touch storage/camino.
+axum = { workspace = true }
+tokio = { workspace = true }
+code-plus-plus-storage = { workspace = true }
+camino = { workspace = true }

@@ -1,0 +1,57 @@
+[package]
+name = "code-plus-plus-sdk"
+description = "High-level Rust SDK and embedded engine for Code++"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["wasm-plugins"]
+wasm-plugins = ["code-plus-plus-core/wasm-plugins", "code-plus-plus-embed/wasm-plugins"]
+
+[dependencies]
+code-plus-plus-types = { workspace = true }
+code-plus-plus-schema = { workspace = true }
+code-plus-plus-config = { workspace = true }
+code-plus-plus-i18n = { workspace = true }
+code-plus-plus-core = { path = "../code-plus-plus-core", default-features = false }
+code-plus-plus-embed = { path = "../code-plus-plus-embed", default-features = false }
+code-plus-plus-storage = { workspace = true }
+code-plus-plus-llm = { workspace = true }
+urlencoding = "2"
+axum = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+eventsource-stream = { workspace = true }
+tracing = { workspace = true }
+code-plus-plus-telemetry = { workspace = true }
+camino = { workspace = true }
+
+# Standard layout (`benches/` next to `src/`): `cargo package` and tooling
+# resolve these without out-of-tree `../../` paths (which previously broke
+# packaging and confused `cargo bench` from the workspace root).
+[[bench]]
+name = "startup"
+harness = false
+
+[[bench]]
+name = "file_tree"
+harness = false
+
+[[bench]]
+name = "sse_latency"
+harness = false
+
+[[bench]]
+name = "memory"
+harness = false
+
+[dev-dependencies]
+tempfile = { workspace = true }
+ignore = { workspace = true }
+code-plus-plus-schema = { workspace = true }

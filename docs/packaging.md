@@ -1,13 +1,13 @@
-# DeepSeekCode 打包说明
+# Code++ 打包说明
 
 > 三通道分离 + 统一版本。本文档是发布/打包系统的唯一参考手册。
 
 ## 1. 架构概览
 
-DeepSeekCode 采用 **三通道分离**：CLI、Desktop、Crates 各自独立配置与产物，但 **共享同一 workspace 版本号**。
+Code++ 采用 **三通道分离**：CLI、Desktop、Crates 各自独立配置与产物，但 **共享同一 workspace 版本号**。
 
 ```
-                         git tag v0.1.0
+                         git tag v0.2.0
                                │
               ┌────────────────┼────────────────┐
               ▼                ▼                ▼
@@ -28,7 +28,7 @@ DeepSeekCode 采用 **三通道分离**：CLI、Desktop、Crates 各自独立配
 
 **通道开关的唯一真相源**：`packaging/channels.toml`（CI 通过 `scripts/release/read-channels.ps1` 读取）。
 
-**版本唯一真相源**：根目录 `Cargo.toml` → `[workspace.package].version`（当前如 `0.1.0`），对应 git tag `v0.1.0`。
+**版本唯一真相源**：根目录 `Cargo.toml` → `[workspace.package].version`（当前如 `0.2.0`），对应 git tag `v0.2.0`。
 
 ---
 
@@ -37,37 +37,37 @@ DeepSeekCode 采用 **三通道分离**：CLI、Desktop、Crates 各自独立配
 ### 2.1 仅 `cargo build`（裸二进制）
 
 ```powershell
-cargo build --release -p deepseekcode-desktop --target x86_64-pc-windows-msvc
+cargo build --release -p code-plus-plus-desktop --target x86_64-pc-windows-msvc
 ```
 
 | 产物 | 路径 |
 |------|------|
-| **主程序** | `target/x86_64-pc-windows-msvc/release/deepseekcode.exe` |
+| **主程序** | `target/x86_64-pc-windows-msvc/release/code-plus-plus-desktop.exe` |
 | **依赖 DLL**（若有） | `target/x86_64-pc-windows-msvc/release/*.dll` |
-| **调试符号**（若有） | `target/x86_64-pc-windows-msvc/release/deepseekcode.pdb` |
+| **调试符号**（若有） | `target/x86_64-pc-windows-msvc/release/code-plus-plus-desktop.pdb` |
 
 > 这是 **未打包的 exe**，不能直接发给用户安装。需要继续执行 NSIS 安装器构建（见 §4）。
 
 若 **未指定 `--target`**（默认本机 triple），则路径为：
 
 ```
-target/release/deepseekcode.exe
+target/release/code-plus-plus-desktop.exe
 ```
 
 ### 2.2 NSIS 安装器（最终发布物）
 
 ```powershell
-.\packaging\desktop\windows\build-installer.ps1 -Version 0.1.0
+.\packaging\desktop\windows\build-installer.ps1 -Version 0.2.0
 ```
 
 | 产物 | 路径 |
 |------|------|
-| **NSIS 安装器** | `packaging/desktop/windows/dist/DeepSeekCode-0.1.0-x64-setup.exe` |
-| **minisign 签名** | `packaging/desktop/windows/dist/DeepSeekCode-0.1.0-x64-setup.exe.minisig` |
-| **SHA256 校验和** | `packaging/desktop/windows/dist/DeepSeekCode-0.1.0-x64-setup.sha256` |
+| **NSIS 安装器** | `packaging/desktop/windows/dist/CodePlusPlus-0.2.0-x64-setup.exe` |
+| **minisign 签名** | `packaging/desktop/windows/dist/CodePlusPlus-0.2.0-x64-setup.exe.minisig` |
+| **SHA256 校验和** | `packaging/desktop/windows/dist/CodePlusPlus-0.2.0-x64-setup.sha256` |
 | **更新清单** | `packaging/desktop/windows/dist/latest.json` |
 
-安装器默认安装到：`C:\Program Files\DeepSeekCode\deepseekcode.exe`
+安装器默认安装到：`C:\Program Files\Code++\code-plus-plus-desktop.exe`
 
 ### 2.3 CI 发布产物
 
@@ -88,8 +88,8 @@ packaging/
 
 signing/
   README.md                  # 密钥说明
-  deepseekcode.key           # 私钥（gitignore，禁止提交）
-  deepseekcode.key.pub       # 公钥（可提交）
+  code-plus-plus.key           # 私钥（gitignore，禁止提交）
+  code-plus-plus.key.pub       # 公钥（可提交）
 
 scripts/release/
   generate-signing-key.ps1   # 生成 minisign 密钥对
@@ -128,13 +128,13 @@ release-plz.toml             # release-plz 配置（通道 C）
 
 ```powershell
 # ① 构建 release 二进制
-cargo build --release -p deepseekcode-desktop --target x86_64-pc-windows-msvc
+cargo build --release -p code-plus-plus-desktop --target x86_64-pc-windows-msvc
 
 # 确认 exe 存在
-dir target\x86_64-pc-windows-msvc\release\deepseekcode.exe
+dir target\x86_64-pc-windows-msvc\release\code-plus-plus-desktop.exe
 
 # ② 打 NSIS 安装器（版本号与 Cargo.toml 一致）
-.\packaging\desktop\windows\build-installer.ps1 -Version 0.1.0
+.\packaging\desktop\windows\build-installer.ps1 -Version 0.2.0
 
 # ③ 查看最终产物
 dir packaging\desktop\windows\dist\
@@ -164,24 +164,24 @@ CI runs [gitleaks](https://github.com/gitleaks/gitleaks) on every push/PR (`.git
 
 | 文件 | 用途 | Git |
 |------|------|-----|
-| `signing/deepseekcode.key` | 私钥（签名） | **禁止提交** |
-| `signing/deepseekcode.key.pub` | 公钥（校验） | **可提交** |
+| `signing/code-plus-plus.key` | 私钥（签名） | **禁止提交** |
+| `signing/code-plus-plus.key.pub` | 公钥（校验） | **可提交** |
 
 ### 5.2 首次生成
 
 ```powershell
 .\scripts\release\generate-signing-key.ps1
 copy .env.example .env
-# 编辑 .env 填写 DEEPSEEKCODE_SIGNING_PRIVATE_KEY_PASSWORD
+# 编辑 .env 填写 CODE_PLUS_PLUS_SIGNING_PRIVATE_KEY_PASSWORD
 .\scripts\release\verify-signing-key.ps1
 ```
 
 ### 5.3 环境变量（`.env`）
 
 ```env
-DEEPSEEKCODE_SIGNING_PRIVATE_KEY_PATH=signing/deepseekcode.key
-DEEPSEEKCODE_SIGNING_PUBLIC_KEY_PATH=signing/deepseekcode.key.pub
-DEEPSEEKCODE_SIGNING_PRIVATE_KEY_PASSWORD=<密码，无密码则留空>
+CODE_PLUS_PLUS_SIGNING_PRIVATE_KEY_PATH=signing/code-plus-plus.key
+CODE_PLUS_PLUS_SIGNING_PUBLIC_KEY_PATH=signing/code-plus-plus.key.pub
+CODE_PLUS_PLUS_SIGNING_PRIVATE_KEY_PASSWORD=<密码，无密码则留空>
 ```
 
 ### 5.4 GitHub Secrets（CI 必需）
@@ -192,11 +192,11 @@ DEEPSEEKCODE_SIGNING_PRIVATE_KEY_PASSWORD=<密码，无密码则留空>
 
 | Secret | 必需 | 说明 |
 |--------|------|------|
-| `DEEPSEEKCODE_SIGNING_PRIVATE_KEY` | ✅ | 私钥文件全文 |
-| `DEEPSEEKCODE_SIGNING_PRIVATE_KEY_PASSWORD` | ✅ | 私钥密码（无密码则设空 secret） |
-| `DEEPSEEKCODE_SIGNING_PUBLIC_KEY` | ✅ | 公钥文件全文 |
-| `DEEPSEEKCODE_WINDOWS_PFX_BASE64` | 可选 | Authenticode 证书（Base64 PFX） |
-| `DEEPSEEKCODE_WINDOWS_PFX_PASSWORD` | 可选 | PFX 密码 |
+| `CODE_PLUS_PLUS_SIGNING_PRIVATE_KEY` | ✅ | 私钥文件全文 |
+| `CODE_PLUS_PLUS_SIGNING_PRIVATE_KEY_PASSWORD` | ✅ | 私钥密码（无密码则设空 secret） |
+| `CODE_PLUS_PLUS_SIGNING_PUBLIC_KEY` | ✅ | 公钥文件全文 |
+| `CODE_PLUS_PLUS_WINDOWS_PFX_BASE64` | 可选 | Authenticode 证书（Base64 PFX） |
+| `CODE_PLUS_PLUS_WINDOWS_PFX_PASSWORD` | 可选 | PFX 密码 |
 
 > **CI 无签名密钥会直接失败**，不会发布未签名安装包。
 
@@ -208,11 +208,11 @@ DEEPSEEKCODE_SIGNING_PRIVATE_KEY_PASSWORD=<密码，无密码则留空>
 
 ```bash
 # 方式一：推送 tag（版本须与 Cargo.toml 一致）
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 
 # 方式二：手动触发
-gh workflow run Release -f tag_name=v0.1.0
+gh workflow run Release -f tag_name=v0.2.0
 ```
 
 ### CI 流程
@@ -228,8 +228,8 @@ CLI / Crates job 已预留，当前 `enabled = false` 时自动跳过。
 ### 版本校验
 
 ```powershell
-.\scripts\release\validate-version.ps1 -TagName v0.1.0
-# tag v0.1.0 必须等于 Cargo.toml 中的 0.1.0
+.\scripts\release\validate-version.ps1 -TagName v0.2.0
+# tag v0.2.0 必须等于 Cargo.toml 中的 0.2.0
 ```
 
 ---
@@ -260,10 +260,10 @@ CLI / Crates job 已预留，当前 `enabled = false` 时自动跳过。
 | 项 | 规则 |
 |----|------|
 | workspace 版本 | `Cargo.toml` → `[workspace.package].version` |
-| git tag | `v` + 版本号，如 `v0.1.0` |
-| 安装器文件名 | `DeepSeekCode-{version}-x64-setup.exe` |
-| CLI 二进制名 | `deepseekcode`（crate 名仍为 `deepseekcode-cli`） |
-| Desktop 二进制名 | `deepseekcode` |
+| git tag | `v` + 版本号，如 `v0.2.0` |
+| 安装器文件名 | `CodePlusPlus-{version}-x64-setup.exe` |
+| CLI 二进制名 | `code-plus-plus`（crate 名仍为 `code-plus-plus-cli`） |
+| Desktop 二进制名 | `code-plus-plus-desktop` |
 
 ---
 
@@ -283,11 +283,11 @@ NSIS 可能已安装但未加入 PATH。`build-installer.ps1` 会自动查找 `C
 
 **Q: 裸 exe 和安装器的区别？**
 
-- `target/.../deepseekcode.exe` — 开发/调试用的裸二进制
+- `target/.../code-plus-plus-desktop.exe` — 开发/调试用的裸二进制
 - `packaging/.../dist/*-setup.exe` — 带安装/卸载/开始菜单的 NSIS 安装器，**这才是发给用户的发布物**
 
 **Q: 如何跳过签名本地测试？**
 
 ```powershell
-.\packaging\desktop\windows\build-installer.ps1 -Version 0.1.0 -SkipSign
+.\packaging\desktop\windows\build-installer.ps1 -Version 0.2.0 -SkipSign
 ```

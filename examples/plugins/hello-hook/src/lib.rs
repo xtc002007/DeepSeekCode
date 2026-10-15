@@ -1,11 +1,11 @@
-//! Minimal native plugin example for DeepSeekCode hook registration.
+//! Minimal native plugin example for Code++ hook registration.
 //!
 //! Build: `cargo build -p hello-hook` from workspace root after adding to members,
 //! or `cargo build` from this directory.
 
 /// Plugin entry — returns 0 on success.
 #[no_mangle]
-pub extern "C" fn deepseekcode_plugin_init() -> i32 {
+pub extern "C" fn code_plus_plus_plugin_init() -> i32 {
     0
 }
 
@@ -14,6 +14,6 @@ pub extern "C" fn deepseekcode_plugin_init() -> i32 {
 // c_char`, which mismatches on platforms where `c_char = i8`).
 #[allow(clippy::manual_c_str_literals)]
 #[no_mangle]
-pub extern "C" fn deepseekcode_plugin_id() -> *const u8 {
+pub extern "C" fn code_plus_plus_plugin_id() -> *const u8 {
     b"hello-hook\0".as_ptr()
 }

@@ -26,4 +26,4 @@ hosting = "github"
 # pr-run-mode = "plan"
 
 [dist.bin-aliases]
-"deepseekcode" = ["deepseekcode-cli"]
+"code-plus-plus" = ["code-plus-plus-cli"]

@@ -1,5 +1,5 @@
 <# .SYNOPSIS
-  Verify DeepSeekCode minisign signing key before CI upload or local release.
+  Verify Code++ minisign signing key before CI upload or local release.
 #>
 $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
@@ -15,7 +15,7 @@ if (-not (Test-Path $keys.PublicKey)) {
 
 $minisignExe = Resolve-MinisignExe
 
-$testFile = Join-Path $env:TEMP "deepseekcode-sign-test.txt"
+$testFile = Join-Path $env:TEMP "code-plus-plus-sign-test.txt"
 "verify" | Set-Content -Path $testFile -Encoding ascii -NoNewline
 
 try {

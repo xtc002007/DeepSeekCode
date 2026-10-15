@@ -1,38 +1,38 @@
-# DeepSeekCode
+# Code++
 
 Rust + GPUI AI programming environment. Core SDK with embedded server; desktop, CLI, and future web clients share the same runtime.
 
 ## Architecture
 
 ```
-deepseekcode-desktop (GPUI) ──┐
-deepseekcode-cli              ├── deepseekcode-sdk ── deepseekcode-server ── deepseekcode-core
-future web client         ──┘                              └── deepseekcode-llm
+code-plus-plus-desktop (GPUI) ──┐
+code-plus-plus-cli              ├── code-plus-plus-sdk ── code-plus-plus-server ── code-plus-plus-core
+future web client         ──┘                              └── code-plus-plus-llm
 ```
 
 ## Quick Start
 
 ```bash
-cargo run -p deepseekcode-desktop    # GPUI desktop app
-cargo run -p deepseekcode-cli -- serve --directory . --port 4096
-cargo test -p deepseekcode-core
+cargo run -p code-plus-plus-desktop    # GPUI desktop app
+cargo run -p code-plus-plus-cli -- serve --directory . --port 4096
+cargo test -p code-plus-plus-core
 ```
 
 ## Workspace Crates
 
 | Crate | Purpose |
 |-------|---------|
-| `deepseekcode-types` | Shared IDs and errors |
-| `deepseekcode-schema` | API and domain schemas |
-| `deepseekcode-config` | DeepSeekCode config loading (`deepseekcode.jsonc`) |
-| `deepseekcode-storage` | SQLite + event store |
-| `deepseekcode-llm` | LLM protocol layer |
-| `deepseekcode-core` | Session engine, tools, system context |
-| `deepseekcode-server` | Axum HTTP + SSE |
-| `deepseekcode-sdk` | Rust client + EmbeddedEngine |
-| `deepseekcode-desktop` | GPUI desktop application |
-| `deepseekcode-cli` | Command-line interface |
-| `deepseekcode-plugin` | Rust + WASM plugin host |
+| `code-plus-plus-types` | Shared IDs and errors |
+| `code-plus-plus-schema` | API and domain schemas |
+| `code-plus-plus-config` | Code++ config loading (`code-plus-plus.jsonc`) |
+| `code-plus-plus-storage` | SQLite + event store |
+| `code-plus-plus-llm` | LLM protocol layer |
+| `code-plus-plus-core` | Session engine, tools, system context |
+| `code-plus-plus-server` | Axum HTTP + SSE |
+| `code-plus-plus-sdk` | Rust client + EmbeddedEngine |
+| `code-plus-plus-desktop` | GPUI desktop application |
+| `code-plus-plus-cli` | Command-line interface |
+| `code-plus-plus-plugin` | Rust + WASM plugin host |
 
 ## Configuration
 
@@ -43,7 +43,7 @@ Architecture overview: [docs/architecture.md](docs/architecture.md).
 ```bash
 export DEEPSEEK_API_KEY=...
 export OPENAI_API_KEY=...
-export DEEPSEEKCODE_SERVER_PASSWORD=...   # when exposing serve remotely
+export CODE_PLUS_PLUS_SERVER_PASSWORD=...   # when exposing serve remotely
 ```
 
 ## Security
@@ -53,7 +53,7 @@ See **[SECURITY.md](SECURITY.md)** for the full policy. Summary:
 | Secret | Where it belongs |
 |--------|------------------|
 | Provider API keys | Environment variables or OS keyring (via UI) — not in git |
-| Server password | `DEEPSEEKCODE_SERVER_PASSWORD` / desktop keyring |
+| Server password | `CODE_PLUS_PLUS_SERVER_PASSWORD` / desktop keyring |
 | Release signing keys | `signing/*.key` (gitignored) or GitHub Actions secrets |
 | Local reference clones | `third-party-code/` (gitignored, never publish) |
 
@@ -71,7 +71,7 @@ No manual hook install for normal development:
    ```
 
 Optional manual setup (same as step 1): `.\scripts\install-git-hooks.ps1`  
-Emergency bypass only: `DEEPSEEKCODE_SKIP_SECRET_SCAN=1 git commit ...`
+Emergency bypass only: `CODE_PLUS_PLUS_SKIP_SECRET_SCAN=1 git commit ...`
 
 Session and diagnostic exports **redact secrets by default** (`sanitize=true`, diagnostic log scrubbing). Use `--no-sanitize` on CLI export only when you need full content locally.
 

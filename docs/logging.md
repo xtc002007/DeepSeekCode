@@ -1,24 +1,24 @@
-# DeepSeekCode Logging
+# Code++ Logging
 
-DeepSeekCode uses the Rust [`tracing`](https://docs.rs/tracing) ecosystem for structured, product-grade observability. All binaries initialize logging through `deepseekcode_telemetry::init` — do not call `tracing_subscriber::fmt().init()` directly.
+Code++ uses the Rust [`tracing`](https://docs.rs/tracing) ecosystem for structured, product-grade observability. All binaries initialize logging through `code_plus_plus_telemetry::init` — do not call `tracing_subscriber::fmt().init()` directly.
 
 ## Quick start (development)
 
 ```powershell
 # Standard tracing filter (highest priority)
-$env:RUST_LOG = "deepseekcode_llm=debug,deepseekcode_core::session=debug"
+$env:RUST_LOG = "code_plus_plus_llm=debug,code_plus_plus_core::session=debug"
 
 # Shortcut overrides
-$env:DEEPSEEKCODE_LOG_LEVEL = "debug"
-$env:DEEPSEEKCODE_LOG_CONSOLE = "1"
+$env:CODE_PLUS_PLUS_LOG_LEVEL = "debug"
+$env:CODE_PLUS_PLUS_LOG_CONSOLE = "1"
 
-cargo run -p deepseekcode-desktop
+cargo run -p code-plus-plus-desktop
 ```
 
 Send a prompt and inspect the session trace:
 
 ```
-%LOCALAPPDATA%\deepseekcode\logs\run-<ulid>\session.log
+%LOCALAPPDATA%\code-plus-plus\logs\run-<ulid>\session.log
 ```
 
 ## Log layout
@@ -26,7 +26,7 @@ Send a prompt and inspect the session trace:
 Each process start creates a new run directory:
 
 ```
-%LOCALAPPDATA%/deepseekcode/logs/
+%LOCALAPPDATA%/code-plus-plus/logs/
   run-{ulid}/
     app.log       # full application log (JSON lines) + app.log.1 when rotated
     session.log   # SESSION + TOOL + LLM targets (one file per turn) + .1
@@ -44,9 +44,9 @@ Diagnostic bundles include the rolled files and redact them like the primaries.
 
 Old runs are pruned when `logging.max_run_dirs` is exceeded (default 10).
 
-## Configuration (`deepseekcode.jsonc`)
+## Configuration (`code-plus-plus.jsonc`)
 
-In the DeepSeekCode project config file:
+In the Code++ project config file:
 
 ```jsonc
 {
@@ -59,8 +59,8 @@ In the DeepSeekCode project config file:
     "max_file_mb": 50,
     "max_run_dirs": 10,
     "modules": {
-      "deepseekcode_core::session": "debug",
-      "deepseekcode_llm": "debug"
+      "code_plus_plus_core::session": "debug",
+      "code_plus_plus_llm": "debug"
     },
     "audit": {
       "enabled": true,
@@ -76,9 +76,9 @@ In the DeepSeekCode project config file:
 | Variable | Effect |
 |----------|--------|
 | `RUST_LOG` | Standard `tracing` env filter (wins over config) |
-| `DEEPSEEKCODE_LOG_LEVEL` | Global default level |
-| `DEEPSEEKCODE_LOG_DIR` | Log root directory |
-| `DEEPSEEKCODE_LOG_CONSOLE` | `0` or `1` force console sink |
+| `CODE_PLUS_PLUS_LOG_LEVEL` | Global default level |
+| `CODE_PLUS_PLUS_LOG_DIR` | Log root directory |
+| `CODE_PLUS_PLUS_LOG_CONSOLE` | `0` or `1` force console sink |
 
 Release builds default to `file=true`, `console=false`, `level=info`.
 
@@ -86,16 +86,16 @@ Release builds default to `file=true`, `console=false`, `level=info`.
 
 | Target | File | Purpose |
 |--------|------|---------|
-| `deepseekcode::app` | app.log | Process lifecycle |
-| `deepseekcode::session` | session.log | Session / runner |
-| `deepseekcode::llm` | session.log + app.log | Provider calls (duplicated for turn reconstruction) |
-| `deepseekcode::tool` | session.log + app.log | Tool execution (duplicated for turn reconstruction) |
-| `deepseekcode::permission` | audit.log | Permission prompts |
-| `deepseekcode::audit` | audit.log | Cross-cutting audit (policy permit/block/prompt) |
-| `deepseekcode::server` | app.log | HTTP / PTY (with `request_id` + `run_id`) |
-| `deepseekcode::desktop` | app.log | Desktop UI (with `run_id`) |
-| `deepseekcode::storage` | app.log | Database / events |
-| `deepseekcode::cli` | app.log | CLI commands |
+| `code-plus-plus::app` | app.log | Process lifecycle |
+| `code-plus-plus::session` | session.log | Session / runner |
+| `code-plus-plus::llm` | session.log + app.log | Provider calls (duplicated for turn reconstruction) |
+| `code-plus-plus::tool` | session.log + app.log | Tool execution (duplicated for turn reconstruction) |
+| `code-plus-plus::permission` | audit.log | Permission prompts |
+| `code-plus-plus::audit` | audit.log | Cross-cutting audit (policy permit/block/prompt) |
+| `code-plus-plus::server` | app.log | HTTP / PTY (with `request_id` + `run_id`) |
+| `code-plus-plus::desktop` | app.log | Desktop UI (with `run_id`) |
+| `code-plus-plus::storage` | app.log | Database / events |
+| `code-plus-plus::cli` | app.log | CLI commands |
 
 `session.log` intentionally carries SESSION+TOOL+LLM so a full turn can be
 reconstructed from one file; `app.log` remains the catch-all.
@@ -106,7 +106,7 @@ Every event carries:
 
 - `run_id` — process start (ULID, also the `run-{ulid}` directory name)
 - `session_id` — where a session is in scope (`"-"` for non-session routes)
-- `request_id` — HTTP `x-deepseekcode-request-id` (task-local, `"-"` outside
+- `request_id` — HTTP `x-code-plus-plus-request-id` (task-local, `"-"` outside
   HTTP such as CLI direct calls, SDK startup tasks, and background session
   drains; those correlate via `run_id` + `session_id` instead)
 - `provider`, `model`, `tool`, `tool_call_id`, `duration_ms`, `status`, `code`, `error` where relevant
@@ -119,8 +119,8 @@ code + error`. Successes log once at the call site / middleware completion.
 
 Initialization is retryable: a failed first `init` (e.g. unwritable log dir)
 logs to stderr and retries on the next call instead of sticking at
-`run_id="unknown"`. The default filter covers all `deepseekcode::` subsystem
-targets plus `deepseekcode_core/_llm/_storage/_embed/_sdk/_plugin/...` crate
+`run_id="unknown"`. The default filter covers all `code-plus-plus::` subsystem
+targets plus `code_plus_plus_core/_llm/_storage/_embed/_sdk/_plugin/...` crate
 prefixes so untargeted module-path events are never silently dropped.
 
 ## Redaction
@@ -128,7 +128,7 @@ prefixes so untargeted module-path events are never silently dropped.
 Secrets are redacted before write:
 
 - API keys, Bearer tokens, `Authorization` headers
-- `DEEPSEEKCODE_SERVER_PASSWORD`
+- `CODE_PLUS_PLUS_SERVER_PASSWORD`
 - User prompts (hash + length + 80-char prefix by default)
 
 Enable full prompt logging only with `logging.audit.include_prompts=true` (support scenarios).
@@ -146,7 +146,7 @@ Settings → **Export Diagnostics** saves a zip and logs the `run_id`.
 ### CLI
 
 ```bash
-deepseekcode diagnostics export --output ./support-bundle.zip
+code-plus-plus diagnostics export --output ./support-bundle.zip
 ```
 
 ### HTTP API
@@ -174,8 +174,8 @@ Attachment: support-bundle.zip
 When integration tests fail, dump recent log lines:
 
 ```rust
-if let Some(ctx) = deepseekcode_telemetry::run_context() {
-    eprintln!("{}", deepseekcode_telemetry::tail_app_log(&ctx.run_dir, 200));
+if let Some(ctx) = code_plus_plus_telemetry::run_context() {
+    eprintln!("{}", code_plus_plus_telemetry::tail_app_log(&ctx.run_dir, 200));
 }
 ```
 
@@ -185,7 +185,7 @@ The CI workflow runs tests with `RUST_BACKTRACE=1` and prints the tail of the cu
 
 ```rust
 tracing::info!(
-    target: deepseekcode_telemetry::SESSION,
+    target: code_plus_plus_telemetry::SESSION,
     session_id = %session_id,
     duration_ms = elapsed.as_millis(),
     "tool completed"
@@ -193,7 +193,7 @@ tracing::info!(
 
 // Audit events
 tracing::info!(
-    target: deepseekcode_telemetry::AUDIT,
+    target: code_plus_plus_telemetry::AUDIT,
     permission_id = %id,
     decision = "denied",
     "permission resolved"

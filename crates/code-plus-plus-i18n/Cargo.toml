@@ -1,0 +1,16 @@
+[package]
+name = "code-plus-plus-i18n"
+description = "Locale detection, message catalogs and locale-aware formatting for Code++"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# No system dependencies on purpose: the Windows UI-language lookup is declared
+# inline (`extern "system"`) so this crate stays buildable everywhere the rest
+# of the workspace is, including the slim release edges.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }

@@ -1,4 +1,4 @@
-title = "DeepSeekCode gitleaks config"
+title = "Code++ gitleaks config"
 
 [extend]
 useDefault = true
@@ -6,11 +6,11 @@ useDefault = true
 [allowlist]
 description = "Known false positives"
 paths = [
-  '''(?i)deepseekcode-telemetry/src/redact\.rs''',
+  '''(?i)code-plus-plus-telemetry/src/redact\.rs''',
   '''(?i)credentials_store\.rs''',
   '''(?i)integration_test\.rs''',
   '''(?i)\.env\.example''',
-  '''(?i)deepseekcode\.jsonc\.example''',
+  '''(?i)code-plus-plus\.jsonc\.example''',
   '''(?i)SECURITY\.md''',
   '''(?i)docs/packaging\.md''',
   '''(?i)signing/README\.md''',
@@ -22,6 +22,6 @@ regexes = [
   '''test-key''',
   '''YOUR_API_KEY_HERE''',
   '''your-key''',
-  '''your-org/deepseekcode''',
+  '''your-org/code-plus-plus''',
   '''your-password-or-empty''',
 ]

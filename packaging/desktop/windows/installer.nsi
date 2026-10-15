@@ -1,4 +1,4 @@
-; DeepSeekCode Windows NSIS installer
+; Code++ Windows NSIS installer
 ; Build via: packaging/desktop/windows/build-installer.ps1
 ;
 ; Install scope: per-user by default, per-machine when elevated. The mode
@@ -14,15 +14,15 @@
 !define MULTIUSER_MUI
 !define MULTIUSER_INSTALLMODE_DEFAULT_CURRENTUSER
 !define MULTIUSER_INSTALLMODE_COMMANDLINE
-!define MULTIUSER_INSTALLMODE_DEFAULT_REGISTRY_KEY "Software\io.deepseekcode.desktop"
+!define MULTIUSER_INSTALLMODE_DEFAULT_REGISTRY_KEY "Software\io.code-plus-plus.desktop"
 !define MULTIUSER_INSTALLMODE_DEFAULT_REGISTRY_VALUENAME "InstallDir"
-!define MULTIUSER_INSTALLMODE_INSTDIR "DeepSeekCode"
-!define MULTIUSER_INSTALLMODE_INSTDIR_REGISTRY_KEY "Software\io.deepseekcode.desktop"
+!define MULTIUSER_INSTALLMODE_INSTDIR "Code++"
+!define MULTIUSER_INSTALLMODE_INSTDIR_REGISTRY_KEY "Software\io.code-plus-plus.desktop"
 !define MULTIUSER_INSTALLMODE_INSTDIR_REGISTRY_VALUENAME "InstallDir"
 !include "MultiUser.nsh"
 
 !ifndef APP_VERSION
-  !define APP_VERSION "0.1.0"
+  !define APP_VERSION "0.2.0"
 !endif
 
 !ifndef STAGING_DIR
@@ -33,24 +33,24 @@
   !define OUT_DIR "dist"
 !endif
 
-!define APP_NAME "DeepSeekCode"
-!define APP_PUBLISHER "DeepSeekCode"
-!define APP_EXE "deepseekcode-desktop.exe"
-!define APP_ID "io.deepseekcode.desktop"
-!define START_MENU_DIR "DeepSeekCode"
+!define APP_NAME "Code++"
+!define APP_PUBLISHER "Code++"
+!define APP_EXE "code-plus-plus-desktop.exe"
+!define APP_ID "io.code-plus-plus.desktop"
+!define START_MENU_DIR "Code++"
 
 Name "${APP_NAME} ${APP_VERSION}"
-OutFile "${OUT_DIR}\DeepSeekCode-${APP_VERSION}-x64-setup.exe"
+OutFile "${OUT_DIR}\CodePlusPlus-${APP_VERSION}-x64-setup.exe"
 ; No InstallDirRegKey: MultiUser resolves $INSTDIR from the defines above
 ; (InstallDirRegKey accepts only literal HKLM/HKCU, not the scope-aware SHCTX).
 Unicode True
 SetCompressor /SOLID lzma
 
-!define MUI_ICON "..\..\..\crates\deepseekcode-desktop\assets\icon.ico"
-!define MUI_UNICON "..\..\..\crates\deepseekcode-desktop\assets\icon.ico"
+!define MUI_ICON "..\..\..\crates\code-plus-plus-desktop\assets\icon.ico"
+!define MUI_UNICON "..\..\..\crates\code-plus-plus-desktop\assets\icon.ico"
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXE}"
-!define MUI_FINISHPAGE_RUN_TEXT "Launch DeepSeekCode"
+!define MUI_FINISHPAGE_RUN_TEXT "Launch Code++"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MULTIUSER_PAGE_INSTALLMODE

@@ -38,12 +38,12 @@ function Resolve-ReleasePath {
 function Get-SigningKeyPaths {
     param([string]$Root)
     Import-ReleaseDotEnv -Root $Root
-    $privateRel = Get-ReleaseEnvValue "DEEPSEEKCODE_SIGNING_PRIVATE_KEY_PATH" "signing/deepseekcode.key"
-    $publicRel = Get-ReleaseEnvValue "DEEPSEEKCODE_SIGNING_PUBLIC_KEY_PATH" "signing/deepseekcode.key.pub"
+    $privateRel = Get-ReleaseEnvValue "CODE_PLUS_PLUS_SIGNING_PRIVATE_KEY_PATH" "signing/code-plus-plus.key"
+    $publicRel = Get-ReleaseEnvValue "CODE_PLUS_PLUS_SIGNING_PUBLIC_KEY_PATH" "signing/code-plus-plus.key.pub"
     return @{
         PrivateKey = Resolve-ReleasePath -Root $Root -PathValue $privateRel
         PublicKey = Resolve-ReleasePath -Root $Root -PathValue $publicRel
-        Password = Get-ReleaseEnvValue "DEEPSEEKCODE_SIGNING_PRIVATE_KEY_PASSWORD"
+        Password = Get-ReleaseEnvValue "CODE_PLUS_PLUS_SIGNING_PRIVATE_KEY_PASSWORD"
     }
 }
 
@@ -73,7 +73,7 @@ function Invoke-MinisignSign {
         [string]$Password
     )
     if ($Password -and $Password.Length -gt 0) {
-        $pwFile = Join-Path $env:TEMP "deepseekcode-minisign-pw-$([Guid]::NewGuid().ToString('n')).txt"
+        $pwFile = Join-Path $env:TEMP "code-plus-plus-minisign-pw-$([Guid]::NewGuid().ToString('n')).txt"
         try {
             [System.IO.File]::WriteAllText($pwFile, $Password)
             $cmdLine = "type `"$pwFile`" | `"$MinisignExe`" -Sm `"$ArtifactPath`" -s `"$SecretKeyPath`" -x `"$SigPath`""

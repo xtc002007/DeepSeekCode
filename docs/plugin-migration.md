@@ -1,12 +1,12 @@
 # Plugin & MCP Migration Guide
 
-This document describes how DeepSeekCode integrates MCP servers, skills, and the plugin hook surface.
+This document describes how Code++ integrates MCP servers, skills, and the plugin hook surface.
 
 ## MCP Servers
 
 ### Configuration
 
-MCP servers are declared in `deepseekcode.jsonc` under `mcp.servers`:
+MCP servers are declared in `code-plus-plus.jsonc` under `mcp.servers`:
 
 ```jsonc
 {
@@ -43,9 +43,9 @@ EOF` on `text/event-stream`), 1MiB per-payload / 4MiB buffer caps, strict JSON
 Any MCP server speaking the line-protocol JSON-RPC subset (`initialize`,
 `notifications/initialized`, `tools/list`, `tools/call`) works. A minimal
 windows-mcp style example lives at
-`crates/deepseekcode-core/tests/support/mcp_windows_server.py` (tools:
+`crates/code-plus-plus-core/tests/support/mcp_windows_server.py` (tools:
 `screenshot`, `snapshot`, `click`, `type_text`, `powershell`) with coverage in
-`crates/deepseekcode-core/tests/mcp_windows_test.rs`:
+`crates/code-plus-plus-core/tests/mcp_windows_test.rs`:
 
 ```jsonc
 { "mcp": { "servers": {
@@ -81,14 +81,14 @@ Connected MCP tools are registered in the session `ToolRegistry` as `{server}_{t
 | POST | `/api/v1/mcp/{name}/connect` | Connect a server and refresh bridged tools |
 | POST | `/api/v1/mcp/{name}/disconnect` | Disconnect a server and refresh bridged tools |
 
-Pass `x-deepseekcode-directory` to target the project location.
+Pass `x-code-plus-plus-directory` to target the project location.
 
 ## Skills
 
 Skills are discovered from:
 
 - Paths in config `skills`
-- `.deepseekcode/skills/*/SKILL.md`
+- `.code-plus-plus/skills/*/SKILL.md`
 - Optional remote index URL (`skills_index_url`)
 
 `SkillCatalog` injects a summary into system context via `skill_guidance`. Agents load full instructions with the builtin `skill` tool:
@@ -112,7 +112,7 @@ via explicit reload paths (`engine.reload_catalog()` / runner
 
 ### WASM plugins
 
-Place `.wasm` files in `.deepseekcode/plugins/` or list paths in config `plugins`. The host links imports under module `deepseekcode`:
+Place `.wasm` files in `.code-plus-plus/plugins/` or list paths in config `plugins`. The host links imports under module `code-plus-plus`:
 
 - `tool_execute` — proxies to location `ToolRegistry` via `set_wasm_tool_proxy`
 - `config_transform` — parses JSON config, applies transform metadata, stores result
@@ -122,15 +122,15 @@ Place `.wasm` files in `.deepseekcode/plugins/` or list paths in config `plugins
 
 Native Rust plugins implement `SessionHook` and register via `HookRegistry::register`. See `examples/plugins/hello-hook/`.
 
-| JS plugin `hooks` | `SessionHook` trait in `deepseekcode-plugin` |
-| Bun plugin runtime | WASM sandbox in `.deepseekcode/plugins/` |
+| JS plugin `hooks` | `SessionHook` trait in `code-plus-plus-plugin` |
+| Bun plugin runtime | WASM sandbox in `.code-plus-plus/plugins/` |
 
 ## Session integration
 
 On location creation (`location.rs`):
 
 1. `McpConnectionPool` connects configured servers
-2. `PluginHost` loads WASM from config and `.deepseekcode/plugins`
+2. `PluginHost` loads WASM from config and `.code-plus-plus/plugins`
 3. `HookRegistry` receives hooks from the plugin host
 4. `set_wasm_tool_proxy` wires WASM `tool_execute` to a location-scoped `ToolRegistry`
 5. `SessionRunner` registers MCP bridged tools and skill tool, runs hooks around tool execution and system prompt transforms

@@ -25,48 +25,48 @@ jobs:
         run: cargo build -p hello-hook --release
       - name: Test core crates
         run: |
-          $env:DEEPSEEKCODE_LOG_CONSOLE = "0"
-          $env:DEEPSEEKCODE_LOG_LEVEL = "debug"
-          $env:DEEPSEEKCODE_DISABLE_KEYRING = "1"
-          cargo test -p deepseekcode-types -p deepseekcode-schema -p deepseekcode-config -p deepseekcode-i18n -p deepseekcode-storage -p deepseekcode-llm -p deepseekcode-core -p deepseekcode-plugin -p deepseekcode-telemetry
+          $env:CODE_PLUS_PLUS_LOG_CONSOLE = "0"
+          $env:CODE_PLUS_PLUS_LOG_LEVEL = "debug"
+          $env:CODE_PLUS_PLUS_DISABLE_KEYRING = "1"
+          cargo test -p code-plus-plus-types -p code-plus-plus-schema -p code-plus-plus-config -p code-plus-plus-i18n -p code-plus-plus-storage -p code-plus-plus-llm -p code-plus-plus-core -p code-plus-plus-plugin -p code-plus-plus-telemetry
           if ($LASTEXITCODE -ne 0) {
-            Get-ChildItem -Path "$env:LOCALAPPDATA\deepseekcode\logs" -Recurse -Filter app.log -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Tail 80 }
+            Get-ChildItem -Path "$env:LOCALAPPDATA\code-plus-plus\logs" -Recurse -Filter app.log -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Tail 80 }
             exit $LASTEXITCODE
           }
-          cargo test -p deepseekcode-server -p deepseekcode-sdk -p deepseekcode-cli
+          cargo test -p code-plus-plus-server -p code-plus-plus-sdk -p code-plus-plus-cli
           if ($LASTEXITCODE -ne 0) {
-            Get-ChildItem -Path "$env:LOCALAPPDATA\deepseekcode\logs" -Recurse -Filter app.log -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Tail 80 }
+            Get-ChildItem -Path "$env:LOCALAPPDATA\code-plus-plus\logs" -Recurse -Filter app.log -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Tail 80 }
             exit $LASTEXITCODE
           }
-          cargo test -p deepseekcode-server --test openapi_contract
+          cargo test -p code-plus-plus-server --test openapi_contract
       - name: i18n catalog parity (all ten locales)
-        run: cargo test -p deepseekcode-i18n --test catalog_parity
+        run: cargo test -p code-plus-plus-i18n --test catalog_parity
       - name: Test desktop (logic)
         env:
-          DEEPSEEKCODE_DISABLE_KEYRING: "1"
-        run: cargo test -p deepseekcode-desktop
+          CODE_PLUS_PLUS_DISABLE_KEYRING: "1"
+        run: cargo test -p code-plus-plus-desktop
       - name: Check desktop
-        run: cargo check -p deepseekcode-desktop
+        run: cargo check -p code-plus-plus-desktop
       - name: Cache impact guard (DeepSeek prefix)
         env:
-          DEEPSEEKCODE_DISABLE_KEYRING: "1"
+          CODE_PLUS_PLUS_DISABLE_KEYRING: "1"
         run: ./scripts/check-cache-impact.ps1 -Mode cold
       - name: Bench smoke (startup)
         env:
-          DEEPSEEKCODE_DISABLE_KEYRING: "1"
-        run: cargo bench -p deepseekcode-sdk --bench startup -- --nocapture
+          CODE_PLUS_PLUS_DISABLE_KEYRING: "1"
+        run: cargo bench -p code-plus-plus-sdk --bench startup -- --nocapture
       - name: Bench smoke (sse_latency)
         env:
-          DEEPSEEKCODE_DISABLE_KEYRING: "1"
-        run: cargo bench -p deepseekcode-sdk --bench sse_latency -- --nocapture
+          CODE_PLUS_PLUS_DISABLE_KEYRING: "1"
+        run: cargo bench -p code-plus-plus-sdk --bench sse_latency -- --nocapture
       - name: Bench smoke (memory)
         env:
-          DEEPSEEKCODE_DISABLE_KEYRING: "1"
-        run: cargo bench -p deepseekcode-sdk --bench memory -- --nocapture
+          CODE_PLUS_PLUS_DISABLE_KEYRING: "1"
+        run: cargo bench -p code-plus-plus-sdk --bench memory -- --nocapture
       - name: Bench smoke (file_tree)
         env:
-          DEEPSEEKCODE_DISABLE_KEYRING: "1"
-        run: cargo bench -p deepseekcode-sdk --bench file_tree -- --nocapture
+          CODE_PLUS_PLUS_DISABLE_KEYRING: "1"
+        run: cargo bench -p code-plus-plus-sdk --bench file_tree -- --nocapture
   # P1-13: linux/macOS portability gate (rfd/keyring/portable-pty breakage).
   test-unix:
     runs-on: ${{ matrix.os }}
@@ -78,11 +78,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Check workspace (excl. desktop git-dep)
-        run: cargo check --workspace --exclude deepseekcode-desktop
+        run: cargo check --workspace --exclude code-plus-plus-desktop
       - name: Test portable crates
         env:
-          DEEPSEEKCODE_DISABLE_KEYRING: "1"
-        run: cargo test -p deepseekcode-types -p deepseekcode-schema -p deepseekcode-config -p deepseekcode-i18n -p deepseekcode-storage -p deepseekcode-llm -p deepseekcode-core
+          CODE_PLUS_PLUS_DISABLE_KEYRING: "1"
+        run: cargo test -p code-plus-plus-types -p code-plus-plus-schema -p code-plus-plus-config -p code-plus-plus-i18n -p code-plus-plus-storage -p code-plus-plus-llm -p code-plus-plus-core
   # B7: MSRV gate — workspace declares rust-version = "1.85"; this job fails
   # if any dependency or language feature breaks the 1.85 floor (CI otherwise
   # runs latest stable, currently 1.97, which would silently mask MSRV drift).
@@ -93,7 +93,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85
       - uses: Swatinem/rust-cache@v2
       - name: Check MSRV floor (excl. desktop git-dep)
-        run: cargo check --workspace --exclude deepseekcode-desktop
+        run: cargo check --workspace --exclude code-plus-plus-desktop
   # C1: dependency vulnerability gate (reads Cargo.lock).
   audit:
     runs-on: ubuntu-latest

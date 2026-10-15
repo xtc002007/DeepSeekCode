@@ -1221,6 +1221,343 @@ dependencies = [
 ]
 
 [[package]]
+name = "code-plus-plus-cli"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "camino",
+ "clap",
+ "code-plus-plus-config",
+ "code-plus-plus-core",
+ "code-plus-plus-i18n",
+ "code-plus-plus-llm",
+ "code-plus-plus-schema",
+ "code-plus-plus-sdk",
+ "code-plus-plus-server",
+ "code-plus-plus-telemetry",
+ "code-plus-plus-types",
+ "futures",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "code-plus-plus-config"
+version = "0.2.0"
+dependencies = [
+ "camino",
+ "code-plus-plus-i18n",
+ "code-plus-plus-schema",
+ "code-plus-plus-types",
+ "jsonc-parser",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "walkdir",
+]
+
+[[package]]
+name = "code-plus-plus-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "camino",
+ "chrono",
+ "code-plus-plus-config",
+ "code-plus-plus-i18n",
+ "code-plus-plus-llm",
+ "code-plus-plus-plugin",
+ "code-plus-plus-schema",
+ "code-plus-plus-storage",
+ "code-plus-plus-telemetry",
+ "code-plus-plus-types",
+ "encoding_rs",
+ "futures",
+ "glob",
+ "ignore",
+ "libc",
+ "portable-pty",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "similar",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "ulid",
+ "walkdir",
+ "windows-sys 0.59.0",
+ "wiremock",
+]
+
+[[package]]
+name = "code-plus-plus-desktop"
+version = "0.2.0"
+dependencies = [
+ "alacritty_terminal",
+ "base64 0.22.1",
+ "camino",
+ "chrono",
+ "code-plus-plus-config",
+ "code-plus-plus-core",
+ "code-plus-plus-i18n",
+ "code-plus-plus-schema",
+ "code-plus-plus-sdk",
+ "code-plus-plus-telemetry",
+ "code-plus-plus-types",
+ "eventsource-stream",
+ "futures",
+ "gpui",
+ "gpui_platform",
+ "http",
+ "ico",
+ "image",
+ "keyring",
+ "pulldown-cmark",
+ "reqwest",
+ "rfd",
+ "ropey",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "similar",
+ "streaming-iterator",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+ "ulid",
+ "unicode-segmentation",
+ "winres",
+]
+
+[[package]]
+name = "code-plus-plus-embed"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "camino",
+ "chrono",
+ "code-plus-plus-config",
+ "code-plus-plus-core",
+ "code-plus-plus-i18n",
+ "code-plus-plus-llm",
+ "code-plus-plus-schema",
+ "code-plus-plus-storage",
+ "code-plus-plus-telemetry",
+ "code-plus-plus-types",
+ "futures",
+ "ignore",
+ "jsonc-parser",
+ "portable-pty",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "similar",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tower-http",
+ "tracing",
+ "ulid",
+ "utoipa",
+ "wiremock",
+]
+
+[[package]]
+name = "code-plus-plus-i18n"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "code-plus-plus-llm"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "code-plus-plus-schema",
+ "code-plus-plus-telemetry",
+ "code-plus-plus-types",
+ "futures",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "reqwest",
+ "rustls",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower-service",
+ "tracing",
+ "webpki-roots",
+ "wiremock",
+]
+
+[[package]]
+name = "code-plus-plus-plugin"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "code-plus-plus-schema",
+ "code-plus-plus-telemetry",
+ "code-plus-plus-types",
+ "libloading",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "wasmtime",
+]
+
+[[package]]
+name = "code-plus-plus-schema"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "code-plus-plus-types",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "utoipa",
+]
+
+[[package]]
+name = "code-plus-plus-sdk"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "camino",
+ "code-plus-plus-config",
+ "code-plus-plus-core",
+ "code-plus-plus-embed",
+ "code-plus-plus-i18n",
+ "code-plus-plus-llm",
+ "code-plus-plus-schema",
+ "code-plus-plus-storage",
+ "code-plus-plus-telemetry",
+ "code-plus-plus-types",
+ "eventsource-stream",
+ "futures",
+ "ignore",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
+name = "code-plus-plus-server"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "camino",
+ "code-plus-plus-config",
+ "code-plus-plus-core",
+ "code-plus-plus-embed",
+ "code-plus-plus-schema",
+ "code-plus-plus-storage",
+ "code-plus-plus-types",
+ "futures",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
+name = "code-plus-plus-storage"
+version = "0.2.0"
+dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
+ "camino",
+ "chrono",
+ "code-plus-plus-schema",
+ "code-plus-plus-telemetry",
+ "code-plus-plus-types",
+ "getrandom 0.3.4",
+ "keyring",
+ "refinery",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
+name = "code-plus-plus-telemetry"
+version = "0.2.0"
+dependencies = [
+ "camino",
+ "chrono",
+ "code-plus-plus-config",
+ "code-plus-plus-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "ulid",
+ "walkdir",
+ "zip",
+]
+
+[[package]]
+name = "code-plus-plus-types"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "directories",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "ulid",
+ "utoipa",
+]
+
+[[package]]
 name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1759,343 +2096,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bef552e6f588e446098f6ba40d89ac146c8c7b64aade83c051ee00bb5d2bc18d"
 dependencies = [
  "uuid",
-]
-
-[[package]]
-name = "deepseekcode-cli"
-version = "0.1.2"
-dependencies = [
- "anyhow",
- "camino",
- "clap",
- "deepseekcode-config",
- "deepseekcode-core",
- "deepseekcode-i18n",
- "deepseekcode-llm",
- "deepseekcode-schema",
- "deepseekcode-sdk",
- "deepseekcode-server",
- "deepseekcode-telemetry",
- "deepseekcode-types",
- "futures",
- "reqwest",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "deepseekcode-config"
-version = "0.1.2"
-dependencies = [
- "camino",
- "deepseekcode-i18n",
- "deepseekcode-schema",
- "deepseekcode-types",
- "jsonc-parser",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "walkdir",
-]
-
-[[package]]
-name = "deepseekcode-core"
-version = "0.1.2"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "camino",
- "chrono",
- "deepseekcode-config",
- "deepseekcode-i18n",
- "deepseekcode-llm",
- "deepseekcode-plugin",
- "deepseekcode-schema",
- "deepseekcode-storage",
- "deepseekcode-telemetry",
- "deepseekcode-types",
- "encoding_rs",
- "futures",
- "glob",
- "ignore",
- "libc",
- "portable-pty",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "similar",
- "sqlx",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "ulid",
- "walkdir",
- "windows-sys 0.59.0",
- "wiremock",
-]
-
-[[package]]
-name = "deepseekcode-desktop"
-version = "0.1.2"
-dependencies = [
- "alacritty_terminal",
- "base64 0.22.1",
- "camino",
- "chrono",
- "deepseekcode-config",
- "deepseekcode-core",
- "deepseekcode-i18n",
- "deepseekcode-schema",
- "deepseekcode-sdk",
- "deepseekcode-telemetry",
- "deepseekcode-types",
- "eventsource-stream",
- "futures",
- "gpui",
- "gpui_platform",
- "http",
- "ico",
- "image",
- "keyring",
- "pulldown-cmark",
- "reqwest",
- "rfd",
- "ropey",
- "rust-embed",
- "serde",
- "serde_json",
- "similar",
- "streaming-iterator",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "tree-sitter",
- "tree-sitter-javascript",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-typescript",
- "ulid",
- "unicode-segmentation",
- "winres",
-]
-
-[[package]]
-name = "deepseekcode-embed"
-version = "0.1.2"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "camino",
- "chrono",
- "deepseekcode-config",
- "deepseekcode-core",
- "deepseekcode-i18n",
- "deepseekcode-llm",
- "deepseekcode-schema",
- "deepseekcode-storage",
- "deepseekcode-telemetry",
- "deepseekcode-types",
- "futures",
- "ignore",
- "jsonc-parser",
- "portable-pty",
- "reqwest",
- "serde",
- "serde_json",
- "similar",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tower",
- "tower-http",
- "tracing",
- "ulid",
- "utoipa",
- "wiremock",
-]
-
-[[package]]
-name = "deepseekcode-i18n"
-version = "0.1.2"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "deepseekcode-llm"
-version = "0.1.2"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "deepseekcode-schema",
- "deepseekcode-telemetry",
- "deepseekcode-types",
- "futures",
- "http",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "reqwest",
- "rustls",
- "rustls-native-certs",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "tokio",
- "tower-service",
- "tracing",
- "webpki-roots",
- "wiremock",
-]
-
-[[package]]
-name = "deepseekcode-plugin"
-version = "0.1.2"
-dependencies = [
- "async-trait",
- "deepseekcode-schema",
- "deepseekcode-telemetry",
- "deepseekcode-types",
- "libloading",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "wasmtime",
-]
-
-[[package]]
-name = "deepseekcode-schema"
-version = "0.1.2"
-dependencies = [
- "chrono",
- "deepseekcode-types",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "utoipa",
-]
-
-[[package]]
-name = "deepseekcode-sdk"
-version = "0.1.2"
-dependencies = [
- "axum",
- "camino",
- "deepseekcode-config",
- "deepseekcode-core",
- "deepseekcode-embed",
- "deepseekcode-i18n",
- "deepseekcode-llm",
- "deepseekcode-schema",
- "deepseekcode-storage",
- "deepseekcode-telemetry",
- "deepseekcode-types",
- "eventsource-stream",
- "futures",
- "ignore",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "urlencoding",
-]
-
-[[package]]
-name = "deepseekcode-server"
-version = "0.1.2"
-dependencies = [
- "axum",
- "camino",
- "deepseekcode-config",
- "deepseekcode-core",
- "deepseekcode-embed",
- "deepseekcode-schema",
- "deepseekcode-storage",
- "deepseekcode-types",
- "futures",
- "reqwest",
- "serde_json",
- "tempfile",
- "tokio",
- "wiremock",
-]
-
-[[package]]
-name = "deepseekcode-storage"
-version = "0.1.2"
-dependencies = [
- "aes-gcm",
- "base64 0.22.1",
- "camino",
- "chrono",
- "deepseekcode-schema",
- "deepseekcode-telemetry",
- "deepseekcode-types",
- "getrandom 0.3.4",
- "keyring",
- "refinery",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlx",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "ulid",
-]
-
-[[package]]
-name = "deepseekcode-telemetry"
-version = "0.1.2"
-dependencies = [
- "camino",
- "chrono",
- "deepseekcode-config",
- "deepseekcode-types",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "ulid",
- "walkdir",
- "zip",
-]
-
-[[package]]
-name = "deepseekcode-types"
-version = "0.1.2"
-dependencies = [
- "chrono",
- "directories",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "ulid",
- "utoipa",
 ]
 
 [[package]]

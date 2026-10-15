@@ -1,4 +1,4 @@
-# DeepSeekCode Session Runtime Specification
+# Code++ Session Runtime Specification
 
 Implementation must match these rules; tests assert parity via JSON fixtures.
 
@@ -55,7 +55,7 @@ Implementation must match these rules; tests assert parity via JSON fixtures.
 
 ## Plan / Build Workflow
 
-Plan mode produces implementation plans under `<project>/.deepseekcode/plan/<plan_id>/`:
+Plan mode produces implementation plans under `<project>/.code-plus-plus/plan/<plan_id>/`:
 
 - `PLAN.md` — flexible markdown body (no fixed section schema; "template"
   was a wording variant of the same rule)
@@ -66,9 +66,9 @@ Plan mode produces implementation plans under `<project>/.deepseekcode/plan/<pla
 - Provider-visible tools: `read`, `grep`, `glob`, `list`, `skill`, `question`,
   `plan_complete`, `tool_result_page` (paged recovery for large outputs).
   `write`/`edit`/`bash`/`apply_patch` are NOT provider-visible in plan mode;
-  writes are confined to `.deepseekcode/plan/**` via the plan-scoped policy.
-- Policy: `block` `edit`/`bash`/`apply_patch` outside `.deepseekcode/plan/**`;
-  `permit` writes under `.deepseekcode/plan/**`; `permit` `question` and
+  writes are confined to `.code-plus-plus/plan/**` via the plan-scoped policy.
+- Policy: `block` `edit`/`bash`/`apply_patch` outside `.code-plus-plus/plan/**`;
+  `permit` writes under `.code-plus-plus/plan/**`; `permit` `question` and
   `plan_complete`. (Earlier drafts said "block globally"; the scoped form
   here is canonical.)
 - Runner always injects the built-in plan system prompt (config `agents.plan.system_prompt` appends)
@@ -108,4 +108,4 @@ confirmation (submit) before sending.
 
 ## Behavioral Test Fixtures
 
-See `crates/deepseekcode-core/tests/fixtures/` for Given/When/Then JSON scenarios.
+See `crates/code-plus-plus-core/tests/fixtures/` for Given/When/Then JSON scenarios.

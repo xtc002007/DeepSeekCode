@@ -4,8 +4,8 @@
 
 set -e
 
-if [ "${DEEPSEEKCODE_SKIP_SECRET_SCAN:-}" = "1" ]; then
-  echo "[!] DEEPSEEKCODE_SKIP_SECRET_SCAN=1 — skipping pre-commit secret scan" >&2
+if [ "${CODE_PLUS_PLUS_SKIP_SECRET_SCAN:-}" = "1" ]; then
+  echo "[!] CODE_PLUS_PLUS_SKIP_SECRET_SCAN=1 — skipping pre-commit secret scan" >&2
   exit 0
 fi
 
@@ -50,7 +50,7 @@ elif bootstrap_gitleaks && GITLEAKS=$(find_gitleaks); then
 else
   echo "[!] gitleaks not available — pre-commit secret scan blocked." >&2
   echo "    Needs network once, or install gitleaks manually." >&2
-  echo "    Emergency bypass: DEEPSEEKCODE_SKIP_SECRET_SCAN=1 git commit ..." >&2
+  echo "    Emergency bypass: CODE_PLUS_PLUS_SKIP_SECRET_SCAN=1 git commit ..." >&2
   exit 1
 fi
 

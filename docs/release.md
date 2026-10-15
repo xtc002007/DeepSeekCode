@@ -7,10 +7,10 @@
 
 ```powershell
 # 裸二进制（P1-12: desktop 二进制已改名，避免与 CLI 覆盖）
-cargo build --release -p deepseekcode-desktop --target x86_64-pc-windows-msvc
-# → target/x86_64-pc-windows-msvc/release/deepseekcode-desktop.exe
+cargo build --release -p code-plus-plus-desktop --target x86_64-pc-windows-msvc
+# → target/x86_64-pc-windows-msvc/release/code-plus-plus-desktop.exe
 
-# NSIS 安装器（版本号与 Cargo.toml 保持一致，例如 0.1.2）
-.\packaging\desktop\windows\build-installer.ps1 -Version 0.1.2
-# → packaging/desktop/windows/dist/DeepSeekCode-0.1.2-x64-setup.exe
+# NSIS 安装器（版本号与 Cargo.toml 保持一致，例如 0.2.0）
+.\packaging\desktop\windows\build-installer.ps1 -Version 0.2.0
+# → packaging/desktop/windows/dist/CodePlusPlus-0.2.0-x64-setup.exe
 ```

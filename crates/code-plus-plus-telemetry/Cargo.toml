@@ -1,0 +1,25 @@
+[package]
+name = "code-plus-plus-telemetry"
+description = "Unified logging, redaction, and diagnostic export for Code++"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+code-plus-plus-config = { workspace = true }
+code-plus-plus-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+ulid = { workspace = true }
+chrono = { workspace = true }
+camino = { workspace = true }
+zip = { workspace = true }
+walkdir = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

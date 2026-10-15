@@ -1,0 +1,19 @@
+[package]
+name = "code-plus-plus-schema"
+description = "Serializable schemas and API types for Code++"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "export-schema"
+path = "src/bin/export_schema.rs"
+
+[dependencies]
+code-plus-plus-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+chrono = { workspace = true }
+utoipa = { workspace = true }

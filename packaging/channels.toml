@@ -1,12 +1,12 @@
-# DeepSeekCode release channels — single source of truth for CI and local scripts.
+# Code++ release channels — single source of truth for CI and local scripts.
 # Three independent channels share workspace version (Cargo.toml [workspace.package].version).
 
 [channels.cli]
 # cargo-dist: cross-platform CLI archives + shell/powershell installers.
 enabled = false
 tool = "cargo-dist"
-package = "deepseekcode-cli"
-binary = "deepseekcode"
+package = "code-plus-plus-cli"
+binary = "code-plus-plus"
 # Targets to build when enabled (Rust triple syntax):
 targets = [
     "x86_64-pc-windows-msvc",
@@ -18,10 +18,10 @@ targets = [
 [channels.desktop]
 # GPUI desktop application — platform-specific installers.
 enabled = true
-package = "deepseekcode-desktop"
-# Must match the [[bin]] name in crates/deepseekcode-desktop/Cargo.toml
-# (renamed from `deepseekcode` to avoid overwriting the CLI binary).
-binary = "deepseekcode-desktop"
+package = "code-plus-plus-desktop"
+# Must match the [[bin]] name in crates/code-plus-plus-desktop/Cargo.toml
+# (renamed from `code-plus-plus` to avoid overwriting the CLI binary).
+binary = "code-plus-plus-desktop"
 
 [[channels.desktop.platforms]]
 id = "windows-x64"
@@ -58,23 +58,23 @@ installer = "deb"
 enabled = false
 tool = "release-plz"
 packages = [
-    "deepseekcode-types",
-    "deepseekcode-schema",
-    "deepseekcode-config",
-    "deepseekcode-telemetry",
-    "deepseekcode-storage",
-    "deepseekcode-llm",
-    "deepseekcode-core",
-    "deepseekcode-plugin",
-    "deepseekcode-embed",
-    "deepseekcode-server",
-    "deepseekcode-sdk",
+    "code-plus-plus-types",
+    "code-plus-plus-schema",
+    "code-plus-plus-config",
+    "code-plus-plus-telemetry",
+    "code-plus-plus-storage",
+    "code-plus-plus-llm",
+    "code-plus-plus-core",
+    "code-plus-plus-plugin",
+    "code-plus-plus-embed",
+    "code-plus-plus-server",
+    "code-plus-plus-sdk",
 ]
 
 [signing]
 # minisign ed25519 — private key in signing/ (gitignored), public key committed for verification.
-private_key_path = "signing/deepseekcode.key"
-public_key_path = "signing/deepseekcode.key.pub"
+private_key_path = "signing/code-plus-plus.key"
+public_key_path = "signing/code-plus-plus.key.pub"
 # Optional Authenticode for Windows installer trust (PFX base64 in CI secret).
-authenticode_secret = "DEEPSEEKCODE_WINDOWS_PFX_BASE64"
-authenticode_password_secret = "DEEPSEEKCODE_WINDOWS_PFX_PASSWORD"
+authenticode_secret = "CODE_PLUS_PLUS_WINDOWS_PFX_BASE64"
+authenticode_password_secret = "CODE_PLUS_PLUS_WINDOWS_PFX_PASSWORD"

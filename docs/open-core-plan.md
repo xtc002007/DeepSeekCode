@@ -1,4 +1,4 @@
-# DeepSeekCode Open Core 草案
+# Code++ Open Core 草案
 
 > 状态：**规划草案**（Community 栈已采用 **Apache-2.0**；项目尚未公开）  
 > 原则：**现有代码 = Community 全量开源；收费能力 = 未来新增，不从开源仓库撤回功能。**
@@ -9,10 +9,10 @@
 
 | 层级 | 协议 | 仓库 |
 |------|------|------|
-| **Community**（当前 monorepo 全部 crate） | Apache-2.0 | `deepseekcode`（公开） |
-| **Pro / Enterprise**（未来） | 专有 / 商业许可 | `deepseekcode-pro`（私有，或独立 org 下 private repo） |
-| **Cloud 控制面**（未来） | 专有 | `deepseekcode-cloud`（私有） |
-| **商标** | 独立声明 | 名称 `DeepSeekCode`、`DeepSeekCode Pro` 仅官方构建可用 |
+| **Community**（当前 monorepo 全部 crate） | Apache-2.0 | `code-plus-plus`（公开） |
+| **Pro / Enterprise**（未来） | 专有 / 商业许可 | `code-plus-plus-pro`（私有，或独立 org 下 private repo） |
+| **Cloud 控制面**（未来） | 专有 | `code-plus-plus-cloud`（私有） |
+| **商标** | 独立声明 | 名称 `Code++`、`Code++ Pro` 仅官方构建可用 |
 
 **不做的事**
 
@@ -21,7 +21,7 @@
 
 **可选后手（仅当 SaaS 克隆成问题时）**
 
-- `deepseekcode-server` 单独 **AGPL-3.0 + 商业例外**；Core/SDK 仍 Apache-2.0  
+- `code-plus-plus-server` 单独 **AGPL-3.0 + 商业例外**；Core/SDK 仍 Apache-2.0  
 - 当前阶段 **不建议** 全仓库 AGPL
 
 ---
@@ -30,18 +30,18 @@
 
 | Crate | 开源？ | Community 定位 | 备注 |
 |-------|--------|----------------|------|
-| `deepseekcode-types` | ✅ | 共享 ID、错误 | crates.io 候选 |
-| `deepseekcode-schema` | ✅ | API / 领域 schema | OpenAPI 真源 |
-| `deepseekcode-config` | ✅ | `deepseekcode.jsonc` 加载 | |
-| `deepseekcode-telemetry` | ✅ | 日志、诊断导出 | 无账号遥测 |
-| `deepseekcode-storage` | ✅ | SQLite、凭据加密、事件 | 本地单用户 |
-| `deepseekcode-llm` | ✅ | 多 Provider 协议层 | BYOK（用户自带 Key） |
-| `deepseekcode-core` | ✅ | Session、Policy、Tools、MCP、Compaction | **开放核心心脏** |
-| `deepseekcode-plugin` | ✅ | WASM / 原生插件宿主 | 运行时开源；商店可 Pro |
-| `deepseekcode-server` | ✅ | `/api/v1/*`、SSE、PTY | 见 §4 路由分层 |
-| `deepseekcode-sdk` | ✅ | `EmbeddedEngine`、HTTP 客户端 | 嵌入场景主入口 |
-| `deepseekcode-cli` | ✅ | `serve`、`run`、session 命令 | Community CLI |
-| `deepseekcode-desktop` | ✅ | GPUI Community 桌面 | 见 §3 功能上限 |
+| `code-plus-plus-types` | ✅ | 共享 ID、错误 | crates.io 候选 |
+| `code-plus-plus-schema` | ✅ | API / 领域 schema | OpenAPI 真源 |
+| `code-plus-plus-config` | ✅ | `code-plus-plus.jsonc` 加载 | |
+| `code-plus-plus-telemetry` | ✅ | 日志、诊断导出 | 无账号遥测 |
+| `code-plus-plus-storage` | ✅ | SQLite、凭据加密、事件 | 本地单用户 |
+| `code-plus-plus-llm` | ✅ | 多 Provider 协议层 | BYOK（用户自带 Key） |
+| `code-plus-plus-core` | ✅ | Session、Policy、Tools、MCP、Compaction | **开放核心心脏** |
+| `code-plus-plus-plugin` | ✅ | WASM / 原生插件宿主 | 运行时开源；商店可 Pro |
+| `code-plus-plus-server` | ✅ | `/api/v1/*`、SSE、PTY | 见 §4 路由分层 |
+| `code-plus-plus-sdk` | ✅ | `EmbeddedEngine`、HTTP 客户端 | 嵌入场景主入口 |
+| `code-plus-plus-cli` | ✅ | `serve`、`run`、session 命令 | Community CLI |
+| `code-plus-plus-desktop` | ✅ | GPUI Community 桌面 | 见 §3 功能上限 |
 | `examples/plugins/hello-hook` | ✅ | 插件示例 | |
 | `benches/` | ✅ | 性能冒烟 | |
 | `specs/` | ✅ | 行为契约 | 对外承诺的语义 |
@@ -53,16 +53,16 @@
 
 | Crate / 服务 | 协议 | 职责 |
 |--------------|------|------|
-| `deepseekcode-license` | 专有 | 订阅 / 离线 license JWT 校验 |
-| `deepseekcode-enterprise` | 专有 | SSO、组织 Policy、审计汇聚、License Server 客户端 |
-| `deepseekcode-desktop-pro` | 专有 | 桌面 Pro UI 模块（可选依赖） |
-| `deepseekcode-cloud`（服务） | 专有 | 账号、团队、同步、托管 Server、计费 |
+| `code-plus-plus-license` | 专有 | 订阅 / 离线 license JWT 校验 |
+| `code-plus-plus-enterprise` | 专有 | SSO、组织 Policy、审计汇聚、License Server 客户端 |
+| `code-plus-plus-desktop-pro` | 专有 | 桌面 Pro UI 模块（可选依赖） |
+| `code-plus-plus-cloud`（服务） | 专有 | 账号、团队、同步、托管 Server、计费 |
 
 ---
 
 ## 3. Community vs Pro 功能对照（产品）
 
-### 3.1 运行时与 API（`deepseekcode-core` + `server`）
+### 3.1 运行时与 API（`code-plus-plus-core` + `server`）
 
 | 能力 | Community | Pro / Enterprise |
 |------|-----------|------------------|
@@ -80,7 +80,7 @@
 | 会话跨设备云同步 | ❌ | ✅ |
 | 官方 LLM 网关（代付/token） | ❌ | ✅ 可选 |
 
-### 3.2 桌面（`deepseekcode-desktop`）
+### 3.2 桌面（`code-plus-plus-desktop`）
 
 | 能力 | Community | Pro |
 |------|-----------|-----|
@@ -116,7 +116,7 @@ diagnostics/export, event (SSE)
 fs/*, pty/*
 ```
 
-**Pro / Enterprise（未来，建议前缀 `/api/v1/org/` 或独立 `deepseekcode-cloud`）**
+**Pro / Enterprise（未来，建议前缀 `/api/v1/org/` 或独立 `code-plus-plus-cloud`）**
 
 ```
 POST   /api/v1/org                          # 创建组织
@@ -136,14 +136,14 @@ POST   /api/v1/auth/oidc/callback           # 企业 SSO
 
 以下 trait / 结构 **留在开源 crate**，实现分 `community`（noop）与 `pro`（闭源 crate）。
 
-### 5.1 认证与租户 — `deepseekcode-server`
+### 5.1 认证与租户 — `code-plus-plus-server`
 
 **现状**：`AppState { password: Option<String> }` + `auth.rs` Basic Auth  
 
 **建议扩展**：
 
 ```rust
-// deepseekcode-server/src/auth.rs（开源）
+// code-plus-plus-server/src/auth.rs（开源）
 pub trait RequestAuthenticator: Send + Sync {
     fn authenticate(&self, request: &Request) -> Result<AuthContext, AuthError>;
 }
@@ -161,7 +161,7 @@ pub authenticator: Arc<dyn RequestAuthenticator>,
 - Community：`NoopAuthenticator`（仅保留现有 Basic Auth 可选）  
 - Pro：`OidcAuthenticator` + license 校验（闭源 crate 提供）
 
-### 5.2 许可 / 功能门控 — 新 trait（可放 `deepseekcode-types` 或 `deepseekcode-core`）
+### 5.2 许可 / 功能门控 — 新 trait（可放 `code-plus-plus-types` 或 `code-plus-plus-core`）
 
 ```rust
 pub enum Feature {
@@ -180,7 +180,7 @@ pub trait FeatureGate: Send + Sync {
 - Community：`CommunityFeatureGate` → 仅 Community 功能为 true  
 - Desktop/Server 启动时注入；Pro 构建注入 `LicensedFeatureGate`
 
-### 5.3 Policy 组织层 — `deepseekcode-core/src/policy/`
+### 5.3 Policy 组织层 — `code-plus-plus-core/src/policy/`
 
 **现状**：`PolicyService` 按 project + session 规则  
 
@@ -195,7 +195,7 @@ pub trait OrgPolicyProvider: Send + Sync {
 - Community：返回 `None`  
 - Enterprise：从 Cloud 或本地 License Server 拉取组织规则，合并进 `PolicyService`（文档化优先级：org > project > agent）
 
-### 5.4 审计汇聚 — `deepseekcode-telemetry`
+### 5.4 审计汇聚 — `code-plus-plus-telemetry`
 
 **现状**：本地 `audit.log`、diagnostics zip  
 
@@ -210,7 +210,7 @@ pub trait AuditSink: Send + Sync {
 - Community：`FileAuditSink`（现有行为）  
 - Enterprise：`RemoteAuditSink`（HTTPS 批量上报，闭源实现）
 
-### 5.5 会话存储同步 — `deepseekcode-storage`
+### 5.5 会话存储同步 — `code-plus-plus-storage`
 
 **现状**：每 location  SQLite  
 
@@ -226,23 +226,23 @@ pub trait SessionSyncAdapter: Send + Sync {
 - Community：不编译 / noop  
 - Pro Cloud：闭源 adapter
 
-### 5.6 桌面 Pro UI — `deepseekcode-desktop`
+### 5.6 桌面 Pro UI — `code-plus-plus-desktop`
 
 **建议结构**（不破坏现有 `WorkspaceView`）：
 
 ```
-deepseekcode-desktop/          # 开源 Community
+code-plus-plus-desktop/          # 开源 Community
   src/pro/                     # 可选模块，Community 构建为空 stub
     mod.rs                     # pub fn register_pro_panels(...) 空实现
 
-deepseekcode-desktop-pro/      # 闭源（未来 repo）
-  依赖 deepseekcode-desktop
+code-plus-plus-desktop-pro/      # 闭源（未来 repo）
+  依赖 code-plus-plus-desktop
   实现 register_pro_panels、多窗口策略、Pro 设置页
 ```
 
-Community `Cargo.toml` 不依赖 pro crate；Pro 安装包链接 `deepseekcode-desktop-pro` 静态注册。
+Community `Cargo.toml` 不依赖 pro crate；Pro 安装包链接 `code-plus-plus-desktop-pro` 静态注册。
 
-### 5.7 插件目录 — `deepseekcode-plugin` + server `/api/v1/plugins`
+### 5.7 插件目录 — `code-plus-plus-plugin` + server `/api/v1/plugins`
 
 - Community：本地路径加载 + 示例 `hello-hook`  
 - Pro：**官方 Catalog API**（签名校验、版本兼容）→ 闭源 catalog 服务 + server 可选路由 `/api/v1/plugins/catalog`
@@ -257,7 +257,7 @@ Community `Cargo.toml` 不依赖 pro crate；Pro 安装包链接 `deepseekcode-d
 | **P1 门控骨架** | 可插 Pro 但不发 Pro | `FeatureGate`、`RequestAuthenticator` trait + noop 实现 | — |
 | **P2 桌面 Pro v1** | 多窗口 + 官方更新通道 | desktop stub `pro/` 模块 | `desktop-pro`、license 校验 |
 | **P3 Enterprise v1** | SSO + 组织 Policy | `OrgPolicyProvider`、audit sink trait | `enterprise` crate、License Server |
-| **P4 Cloud v1** | 账号 + 会话同步 | Session sync trait、OpenAPI 扩展草案 | `deepseekcode-cloud` |
+| **P4 Cloud v1** | 账号 + 会话同步 | Session sync trait、OpenAPI 扩展草案 | `code-plus-plus-cloud` |
 | **P5 商业化** | 计费、插件市场 | 文档 + 402 错误码规范 | 支付、Catalog 服务 |
 
 ---
@@ -266,15 +266,15 @@ Community `Cargo.toml` 不依赖 pro crate；Pro 安装包链接 `deepseekcode-d
 
 ### Community Edition
 
-DeepSeekCode Community is **Apache-2.0** software: full session runtime, CLI, SDK, and desktop for **local, single-user** AI-assisted development. You may use, modify, and distribute it under the Apache-2.0 license.
+Code++ Community is **Apache-2.0** software: full session runtime, CLI, SDK, and desktop for **local, single-user** AI-assisted development. You may use, modify, and distribute it under the Apache-2.0 license.
 
 ### Pro & Enterprise
 
-**DeepSeekCode Pro** and **Enterprise** add team collaboration, cloud sync, advanced desktop UX, SSO, centralized policy, and official hosted services. These components are **separate proprietary offerings** and are not included in this repository.
+**Code++ Pro** and **Enterprise** add team collaboration, cloud sync, advanced desktop UX, SSO, centralized policy, and official hosted services. These components are **separate proprietary offerings** and are not included in this repository.
 
 ### Trademark
 
-This license does not grant permission to use the DeepSeekCode name or logos for derivative products. See [TRADEMARK.md](TRADEMARK.md) (TODO).
+This license does not grant permission to use the Code++ name or logos for derivative products. See [TRADEMARK.md](TRADEMARK.md) (TODO).
 
 ---
 

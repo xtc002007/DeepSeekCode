@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
-  Build DeepSeekCode Windows NSIS installer from a release binary staging directory.
+  Build Code++ Windows NSIS installer from a release binary staging directory.
 .PARAMETER Version
-  Release version without leading v (e.g. 0.1.0).
+  Release version without leading v (e.g. 0.2.0).
 .PARAMETER TargetDir
   Cargo target directory (default: target).
 .PARAMETER RustTarget
@@ -44,9 +44,9 @@ function Import-DotEnv {
 
 $releaseDir = Join-Path $repoRoot "$TargetDir\$RustTarget\release"
 # P1-12: desktop binary renamed to avoid CLI collision.
-$exePath = Join-Path $releaseDir "deepseekcode-desktop.exe"
+$exePath = Join-Path $releaseDir "code-plus-plus-desktop.exe"
 if (-not (Test-Path $exePath)) {
-    throw "Release binary not found: $exePath`nRun: cargo build --release -p deepseekcode-desktop --target $RustTarget"
+    throw "Release binary not found: $exePath`nRun: cargo build --release -p code-plus-plus-desktop --target $RustTarget"
 }
 
 $packagingRoot = Join-Path $repoRoot "packaging\desktop\windows"
@@ -57,7 +57,7 @@ if (Test-Path $stagingDir) { Remove-Item $stagingDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 
-Copy-Item $exePath (Join-Path $stagingDir "deepseekcode-desktop.exe") -Force
+Copy-Item $exePath (Join-Path $stagingDir "code-plus-plus-desktop.exe") -Force
 # P1-13: verify `.minisig` alongside the exe when present; fail closed when
 # `-RequireSignature` is passed (CI release path).
 if ($RequireSignature) {
@@ -123,7 +123,7 @@ Write-Host "[*] Running makensis..." -ForegroundColor Cyan
 & $makensisPath @nsisArgs
 if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
 
-$installerName = "DeepSeekCode-$Version-x64-setup.exe"
+$installerName = "CodePlusPlus-$Version-x64-setup.exe"
 $installerPath = Join-Path $distDir $installerName
 if (-not (Test-Path $installerPath)) {
     throw "Installer not produced: $installerPath"
@@ -142,7 +142,7 @@ if (-not $SkipSign) {
 
 # SHA256 checksum for release manifest
 $hash = (Get-FileHash -Algorithm SHA256 $installerPath).Hash.ToLower()
-$checksumFile = Join-Path $distDir "DeepSeekCode-$Version-x64-setup.sha256"
+$checksumFile = Join-Path $distDir "CodePlusPlus-$Version-x64-setup.sha256"
 Set-Content -Path $checksumFile -Value "$hash  $installerName" -Encoding ascii -NoNewline
 Write-Host "[+] Checksum:" $checksumFile -ForegroundColor Green
 

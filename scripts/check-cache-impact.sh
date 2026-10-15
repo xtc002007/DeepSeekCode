@@ -13,7 +13,7 @@ SENSITIVE_GRAPH=""
 # P1-4: keep in sync with the .ps1 list — skills catalog bytes, token
 # estimation, lineage persistence, and the request-shape chain are all
 # cache-sensitive; omitting them lets changes bypass the gate.
-if git diff --name-only HEAD 2>/dev/null | grep -Eq "deepseekcode-llm/src/(axis|providers|request|overflow)|deepseekcode-core/src/(session/runner|session/projector|compaction|tools|system_context|memory|skills|token|cache_status)|deepseekcode-storage/src/(tool_output|session_store)|deepseekcode-config/src/schema"; then
+if git diff --name-only HEAD 2>/dev/null | grep -Eq "code-plus-plus-llm/src/(axis|providers|request|overflow)|code-plus-plus-core/src/(session/runner|session/projector|compaction|tools|system_context|memory|skills|token|cache_status)|code-plus-plus-storage/src/(tool_output|session_store)|code-plus-plus-config/src/schema"; then
   SENSITIVE_GRAPH="1"
 fi
 echo "Mode: $MODE (cold=fresh fair comparison, warm=primed steady-state)"
@@ -30,16 +30,16 @@ fi
 echo "Running DeepSeek cache test suite..."
 if [ "$MODE" = "warm" ]; then
   echo "Warm prime run (discarded)..."
-  cargo test -p deepseekcode-core --test cache_hit_guard cache_hit_warm_steady_state 2>&1 | tail -5
+  cargo test -p code-plus-plus-core --test cache_hit_guard cache_hit_warm_steady_state 2>&1 | tail -5
 fi
-cargo test -p deepseekcode-llm cache 2>&1 | tail -5
-cargo test -p deepseekcode-llm protocol 2>&1 | tail -5
-cargo test -p deepseekcode-llm framing 2>&1 | tail -5
-cargo test -p deepseekcode-core cache_status 2>&1 | tail -5
-cargo test -p deepseekcode-core compaction 2>&1 | tail -5
-cargo test -p deepseekcode-core --test cache_hit_guard 2>&1 | tail -10
+cargo test -p code-plus-plus-llm cache 2>&1 | tail -5
+cargo test -p code-plus-plus-llm protocol 2>&1 | tail -5
+cargo test -p code-plus-plus-llm framing 2>&1 | tail -5
+cargo test -p code-plus-plus-core cache_status 2>&1 | tail -5
+cargo test -p code-plus-plus-core compaction 2>&1 | tail -5
+cargo test -p code-plus-plus-core --test cache_hit_guard 2>&1 | tail -10
 if [ "${REASONIX_RELEASE_CACHE_GUARD:-0}" = "1" ] || [ -n "$SENSITIVE_GRAPH" ]; then
   echo "Enforcing 90% aggregate threshold..."
-  CACHE_SENSITIVE_TOUCHED=1 cargo test -p deepseekcode-core --test cache_hit_guard release_guard_90 2>&1 | tail -10
+  CACHE_SENSITIVE_TOUCHED=1 cargo test -p code-plus-plus-core --test cache_hit_guard release_guard_90 2>&1 | tail -10
 fi
 echo "Cache impact guard passed."

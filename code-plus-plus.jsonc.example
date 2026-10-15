@@ -1,0 +1,125 @@
+{
+  // Copy to code-plus-plus.jsonc or .code-plus-plus/code-plus-plus.jsonc
+  // NEVER commit real API keys — use environment variables instead.
+
+  "model": {
+    "provider": "deepseek",
+    "id": "deepseek-v4-pro"
+    // DeepSeek official: omit max_output_tokens so the server uses its 384K
+    // ceiling; thinking stays disabled for stable agent/tool loops.
+  },
+
+  // DeepSeek prefix-cache tuning (all optional — defaults are cache-optimal).
+  // system+tools stay byte-stable; history is append-only; tool projections
+  // are bounded to 32KiB with full output on disk for paged `read` recovery.
+  // Compaction fires once at 80% into `system + summary + 16% tail`.
+  "compaction": {
+    "auto": true,
+    "compact_ratio": 0.80,
+    "recent_tail_ratio": 0.16
+  },
+  "tool_output": {
+    "max_lines": 400,
+    "max_bytes": 32768
+  },
+
+  // Read-only cost attribution for `GET /session/{id}/cache-status`
+  // (`estimated_cost`, `models[]`) and `GET /billing/rates`; never gates
+  // requests. Known models use the official per-model book (DeepSeek Flash
+  // CNY 0.04/2/8 peak, Pro 0.30/9/27 peak, off-peak half; LongCat/MiMo/Claude
+  // static rows — see `core::pricing::official_catalog`); the block below is
+  // only the fallback for unknown models. Defaults shown.
+  // "billing": {
+  //   "currency": "CNY",
+  //   "cache_hit_per_1m": 0.10,
+  //   "input_per_1m": 3.0,
+  //   "output_per_1m": 9.0
+  // },
+
+  // Standing-doc edits ride the turn tail by default (prefix stays warm).
+  // Opt in to baseline replacement for long-lived sessions whose standing
+  // docs change often (one expected miss per edit, shorter tail).
+  // "context": {
+  //   "standing_replacement_on_edit": false
+  // },
+
+  "providers": {
+    "deepseek": {
+      // Prefer: export DEEPSEEK_API_KEY=your-key
+      // "api_key": "YOUR_API_KEY_HERE",
+      // Official base URL has no `/v1` suffix (endpoint is POST /chat/completions).
+      "base_url": "https://api.deepseek.com"
+    },
+    "openai": {
+      // Prefer: export OPENAI_API_KEY=your-key
+      "base_url": "https://api.openai.com/v1"
+    }
+  },
+
+  "policy_mode": "interactive",
+
+  "policy": {
+    "read": { "*": "permit", "*.env": "block" },
+    "edit": { "*": "prompt" },
+    "bash": { "*": "prompt" }
+  },
+
+  // Product-grade logging: run-<ulid>/ holds app.log (+.1 when rotated),
+  // session.log (SESSION+TOOL+LLM per turn) + audit.log + panic.log + meta.json.
+  // Every event has run_id; HTTP adds request_id (joins middleware +
+  // service_error logs); session/tool add session_id + duration_ms.
+  // max_file_mb is enforced per-write (close-before-rename, keeps name+.1).
+  "logging": {
+    "level": "info",
+    "console": true,
+    "file": true,
+    // "dir": null, // override log root (else OS data_dir/code-plus-plus/logs)
+    // "max_file_mb": 50, // per-file cap, 1..1024
+    // "max_run_dirs": 10, // prune oldest runs
+    "audit": {
+      "enabled": true,
+      // Redacted 500-char output preview when true; size-only when false.
+      // Hot-reloads on config reload (no restart needed).
+      "include_tool_output": false,
+      // Full prompt when true; len+hash+80-char redacted prefix when false.
+      "include_prompts": false
+    }
+  },
+
+  "websearch": {
+    // "provider": "brave" requires BRAVE_SEARCH_API_KEY env var
+    "provider": "duckduckgo"
+  },
+
+  "mcp": {
+    "servers": {
+      // "example": {
+      //   "command": "npx",
+      //   "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"],
+      //   "enabled": true
+      // }
+      // Windows desktop automation (windows-mcp style stdio server):
+      // a server exposing screenshot/snapshot/click/type/powershell over
+      // MCP JSON-RPC line protocol. See
+      // crates/code-plus-plus-core/tests/support/mcp_windows_server.py for a
+      // minimal protocol-correct example, and docs/plugin-migration.md.
+      // "windows-desktop": {
+      //   "command": "python",
+      //   "args": ["D:/tools/windows-mcp-server.py"],
+      //   "enabled": true
+      // }
+    }
+  },
+
+  "ui": {
+    // Interface language. "auto" follows CODE_PLUS_PLUS_LANG, then the POSIX
+    // locale chain (LANGUAGE / LC_ALL / LC_MESSAGES / LANG), then the OS
+    // language. Pin a tag to override: "en", "zh-Hans", "zh-Hant", "ja", "ko",
+    // "es", "fr", "de", "pt-BR", "ru". System prompts and tool descriptions
+    // always stay English regardless of this setting.
+    "language": "auto",
+    // Print the per-turn cache receipt (`in 12,000 (10,800 cached / 1,200 new)
+    // · out 100`). Accounting is recorded either way; this only gates display.
+    "show_turn_usage": true
+  }
+}

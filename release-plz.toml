@@ -5,47 +5,47 @@
 changelog_config = "CHANGELOG.md"
 
 [[package]]
-name = "deepseekcode-types"
+name = "code-plus-plus-types"
 publish = false
 
 [[package]]
-name = "deepseekcode-schema"
+name = "code-plus-plus-schema"
 publish = false
 
 [[package]]
-name = "deepseekcode-config"
+name = "code-plus-plus-config"
 publish = false
 
 [[package]]
-name = "deepseekcode-telemetry"
+name = "code-plus-plus-telemetry"
 publish = false
 
 [[package]]
-name = "deepseekcode-storage"
+name = "code-plus-plus-storage"
 publish = false
 
 [[package]]
-name = "deepseekcode-llm"
+name = "code-plus-plus-llm"
 publish = false
 
 [[package]]
-name = "deepseekcode-core"
+name = "code-plus-plus-core"
 publish = false
 
 [[package]]
-name = "deepseekcode-plugin"
+name = "code-plus-plus-plugin"
 publish = false
 
 [[package]]
-name = "deepseekcode-server"
+name = "code-plus-plus-server"
 publish = false
 
 [[package]]
-name = "deepseekcode-sdk"
+name = "code-plus-plus-sdk"
 publish = false
 
 [[package]]
-name = "deepseekcode-cli"
+name = "code-plus-plus-cli"
 publish = false
 
 # When channels.crates is enabled, set publish = true on the crates you want on crates.io

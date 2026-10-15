@@ -92,7 +92,7 @@ jobs:
           echo "version=$ver" >> $env:GITHUB_OUTPUT
 
       - name: Build desktop release binary
-        run: cargo build --release -p deepseekcode-desktop --target ${{ env.RUST_TARGET_WINDOWS }}
+        run: cargo build --release -p code-plus-plus-desktop --target ${{ env.RUST_TARGET_WINDOWS }}
 
       - name: Install NSIS
         uses: negrutiu/nsis-install@v2
@@ -112,39 +112,39 @@ jobs:
       - name: Require release signing secrets
         shell: pwsh
         env:
-          SIGNING_KEY: ${{ secrets.DEEPSEEKCODE_SIGNING_PRIVATE_KEY }}
+          SIGNING_KEY: ${{ secrets.CODE_PLUS_PLUS_SIGNING_PRIVATE_KEY }}
         run: |
           if (-not $env:SIGNING_KEY) {
-            Write-Error "Repository secret DEEPSEEKCODE_SIGNING_PRIVATE_KEY is missing. Run scripts/release/set-github-secrets.ps1"
+            Write-Error "Repository secret CODE_PLUS_PLUS_SIGNING_PRIVATE_KEY is missing. Run scripts/release/set-github-secrets.ps1"
           }
 
       - name: Build NSIS installer
         shell: pwsh
         env:
-          DEEPSEEKCODE_SIGNING_PRIVATE_KEY: ${{ secrets.DEEPSEEKCODE_SIGNING_PRIVATE_KEY }}
-          DEEPSEEKCODE_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.DEEPSEEKCODE_SIGNING_PRIVATE_KEY_PASSWORD }}
+          CODE_PLUS_PLUS_SIGNING_PRIVATE_KEY: ${{ secrets.CODE_PLUS_PLUS_SIGNING_PRIVATE_KEY }}
+          CODE_PLUS_PLUS_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.CODE_PLUS_PLUS_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           ./packaging/desktop/windows/build-installer.ps1 -Version "${{ steps.version.outputs.version }}" -SkipSign
-          $installer = "packaging/desktop/windows/dist/DeepSeekCode-${{ steps.version.outputs.version }}-x64-setup.exe"
+          $installer = "packaging/desktop/windows/dist/CodePlusPlus-${{ steps.version.outputs.version }}-x64-setup.exe"
           ./scripts/release/sign-artifact.ps1 -ArtifactPath $installer -Required
 
       - name: Authenticode sign installer (optional)
         shell: pwsh
         env:
-          DEEPSEEKCODE_WINDOWS_PFX_BASE64: ${{ secrets.DEEPSEEKCODE_WINDOWS_PFX_BASE64 }}
-          DEEPSEEKCODE_WINDOWS_PFX_PASSWORD: ${{ secrets.DEEPSEEKCODE_WINDOWS_PFX_PASSWORD }}
+          CODE_PLUS_PLUS_WINDOWS_PFX_BASE64: ${{ secrets.CODE_PLUS_PLUS_WINDOWS_PFX_BASE64 }}
+          CODE_PLUS_PLUS_WINDOWS_PFX_PASSWORD: ${{ secrets.CODE_PLUS_PLUS_WINDOWS_PFX_PASSWORD }}
         run: |
-          $installer = "packaging/desktop/windows/dist/DeepSeekCode-${{ steps.version.outputs.version }}-x64-setup.exe"
+          $installer = "packaging/desktop/windows/dist/CodePlusPlus-${{ steps.version.outputs.version }}-x64-setup.exe"
           ./scripts/release/sign-authenticode.ps1 -ArtifactPath $installer
 
       - name: Create updater manifest
         shell: pwsh
         env:
-          DEEPSEEKCODE_SIGNING_PUBLIC_KEY: ${{ secrets.DEEPSEEKCODE_SIGNING_PUBLIC_KEY }}
+          CODE_PLUS_PLUS_SIGNING_PUBLIC_KEY: ${{ secrets.CODE_PLUS_PLUS_SIGNING_PUBLIC_KEY }}
         run: |
           $ver = "${{ steps.version.outputs.version }}"
-          $installer = "DeepSeekCode-$ver-x64-setup.exe"
-          $hash = (Get-Content "packaging/desktop/windows/dist/DeepSeekCode-$ver-x64-setup.sha256" -Raw).Split()[0]
+          $installer = "CodePlusPlus-$ver-x64-setup.exe"
+          $hash = (Get-Content "packaging/desktop/windows/dist/CodePlusPlus-$ver-x64-setup.sha256" -Raw).Split()[0]
           ./scripts/release/create-updater-manifest.ps1 `
             -Version $ver `
             -InstallerName $installer `
@@ -154,24 +154,24 @@ jobs:
       - name: Generate SBOM (SPDX) for the installer
         uses: anchore/sbom-action@v0
         with:
-          path: packaging/desktop/windows/dist/DeepSeekCode-${{ steps.version.outputs.version }}-x64-setup.exe
+          path: packaging/desktop/windows/dist/CodePlusPlus-${{ steps.version.outputs.version }}-x64-setup.exe
           format: spdx-json
-          output-file: packaging/desktop/windows/dist/DeepSeekCode-${{ steps.version.outputs.version }}-x64-setup.spdx.json
+          output-file: packaging/desktop/windows/dist/CodePlusPlus-${{ steps.version.outputs.version }}-x64-setup.spdx.json
 
       - name: Attest installer provenance (SLSA via GitHub OIDC)
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: packaging/desktop/windows/dist/DeepSeekCode-${{ steps.version.outputs.version }}-x64-setup.exe
+          subject-path: packaging/desktop/windows/dist/CodePlusPlus-${{ steps.version.outputs.version }}-x64-setup.exe
 
       - name: Upload desktop artifacts
         uses: actions/upload-artifact@v4
         with:
           name: desktop-windows-x64
           path: |
-            packaging/desktop/windows/dist/DeepSeekCode-*-x64-setup.exe
-            packaging/desktop/windows/dist/DeepSeekCode-*-x64-setup.exe.minisig
-            packaging/desktop/windows/dist/DeepSeekCode-*-x64-setup.sha256
-            packaging/desktop/windows/dist/DeepSeekCode-*-x64-setup.spdx.json
+            packaging/desktop/windows/dist/CodePlusPlus-*-x64-setup.exe
+            packaging/desktop/windows/dist/CodePlusPlus-*-x64-setup.exe.minisig
+            packaging/desktop/windows/dist/CodePlusPlus-*-x64-setup.sha256
+            packaging/desktop/windows/dist/CodePlusPlus-*-x64-setup.spdx.json
             packaging/desktop/windows/dist/latest.json
           if-no-files-found: error
 
@@ -242,7 +242,7 @@ jobs:
             sed -n "/^## .*${RELEASE_TAG#v}/,/^## /p" CHANGELOG.md | head -n -1 > release-notes.md || true
           fi
           if [ ! -s release-notes.md ]; then
-            printf '## DeepSeekCode %s\n\n- Windows desktop installer (NSIS)\n' "${RELEASE_TAG}" > release-notes.md
+            printf '## Code++ %s\n\n- Windows desktop installer (NSIS)\n' "${RELEASE_TAG}" > release-notes.md
           fi
 
       - name: Collect release files
@@ -264,7 +264,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: DeepSeekCode ${{ env.RELEASE_TAG }}
+          name: Code++ ${{ env.RELEASE_TAG }}
           body_path: release-notes.md
           draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
           prerelease: ${{ contains(env.RELEASE_TAG, '-') }}

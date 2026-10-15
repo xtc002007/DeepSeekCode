@@ -7,19 +7,14 @@
 **/*.db
 **/*.db-*
 
-# DeepSeekCode local runtime (generated)
-.deepseekcode/snapshots/
-.deepseekcode/tool-output/
-.deepseekcode/worktrees/
-.deepseekcode/plugins/*.wasm
-.deepseekcode/plugins/*.dll
-.deepseekcode/plugins/*.so
-.deepseekcode/plugins/*.dylib
-
-# CodeVibe legacy runtime (migration compat)
-.codevibe/snapshots/
-.codevibe/tool-output/
-.codevibe/worktrees/
+# Code++ local runtime (generated)
+.code-plus-plus/snapshots/
+.code-plus-plus/tool-output/
+.code-plus-plus/worktrees/
+.code-plus-plus/plugins/*.wasm
+.code-plus-plus/plugins/*.dll
+.code-plus-plus/plugins/*.so
+.code-plus-plus/plugins/*.dylib
 
 # Secrets & local env
 .env

@@ -20,29 +20,29 @@ param([string]$Mode = "cold")
 $ErrorActionPreference = "Stop"
 
 $Sensitive = @(
-  "crates/deepseekcode-llm/src/axis/protocol.rs",
-  "crates/deepseekcode-llm/src/axis/framing.rs",
-  "crates/deepseekcode-llm/src/providers/deepseek.rs",
-  "crates/deepseekcode-llm/src/request.rs",
-  "crates/deepseekcode-llm/src/event.rs",
-  "crates/deepseekcode-core/src/session/runner/mod.rs",
-  "crates/deepseekcode-core/src/session/runner/repair.rs",
-  "crates/deepseekcode-core/src/compaction.rs",
-  "crates/deepseekcode-core/src/tools/registry.rs",
-  "crates/deepseekcode-core/src/tools/use_capability.rs",
-  "crates/deepseekcode-core/src/tools/tool_result_page.rs",
-  "crates/deepseekcode-core/src/system_context/",
-  "crates/deepseekcode-core/src/memory.rs",
-  "crates/deepseekcode-core/src/skills.rs",
-  "crates/deepseekcode-core/src/token.rs",
-  "crates/deepseekcode-core/src/cache_status.rs",
-  "crates/deepseekcode-core/src/session/projector.rs",
-  "crates/deepseekcode-core/src/session/runner/context_reconciler.rs",
-  "crates/deepseekcode-core/src/session/runner/tool_executor.rs",
-  "crates/deepseekcode-llm/src/overflow.rs",
-  "crates/deepseekcode-storage/src/tool_output.rs",
-  "crates/deepseekcode-storage/src/session_store.rs",
-  "crates/deepseekcode-config/src/schema.rs"
+  "crates/code-plus-plus-llm/src/axis/protocol.rs",
+  "crates/code-plus-plus-llm/src/axis/framing.rs",
+  "crates/code-plus-plus-llm/src/providers/deepseek.rs",
+  "crates/code-plus-plus-llm/src/request.rs",
+  "crates/code-plus-plus-llm/src/event.rs",
+  "crates/code-plus-plus-core/src/session/runner/mod.rs",
+  "crates/code-plus-plus-core/src/session/runner/repair.rs",
+  "crates/code-plus-plus-core/src/compaction.rs",
+  "crates/code-plus-plus-core/src/tools/registry.rs",
+  "crates/code-plus-plus-core/src/tools/use_capability.rs",
+  "crates/code-plus-plus-core/src/tools/tool_result_page.rs",
+  "crates/code-plus-plus-core/src/system_context/",
+  "crates/code-plus-plus-core/src/memory.rs",
+  "crates/code-plus-plus-core/src/skills.rs",
+  "crates/code-plus-plus-core/src/token.rs",
+  "crates/code-plus-plus-core/src/cache_status.rs",
+  "crates/code-plus-plus-core/src/session/projector.rs",
+  "crates/code-plus-plus-core/src/session/runner/context_reconciler.rs",
+  "crates/code-plus-plus-core/src/session/runner/tool_executor.rs",
+  "crates/code-plus-plus-llm/src/overflow.rs",
+  "crates/code-plus-plus-storage/src/tool_output.rs",
+  "crates/code-plus-plus-storage/src/session_store.rs",
+  "crates/code-plus-plus-config/src/schema.rs"
 )
 # P1-4: `skills.rs` (catalog bytes enter the prefix), `token.rs` (rewrites
 # move the estimation denominator), `session_store.rs` (lineage/covered
@@ -94,20 +94,20 @@ if ($Mode -eq "warm") {
   # Warm = prime once (compilation + steady-state), then measure. The prime
   # run is discarded; the second run is the gate.
   Write-Host "Warm prime run (discarded)..."
-  cargo test -p deepseekcode-core --test cache_hit_guard cache_hit_warm_steady_state 2>&1 | Select-Object -Last 5
+  cargo test -p code-plus-plus-core --test cache_hit_guard cache_hit_warm_steady_state 2>&1 | Select-Object -Last 5
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
-cargo test -p deepseekcode-llm cache 2>&1 | Select-Object -Last 5
+cargo test -p code-plus-plus-llm cache 2>&1 | Select-Object -Last 5
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-cargo test -p deepseekcode-llm protocol 2>&1 | Select-Object -Last 5
+cargo test -p code-plus-plus-llm protocol 2>&1 | Select-Object -Last 5
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-cargo test -p deepseekcode-llm framing 2>&1 | Select-Object -Last 5
+cargo test -p code-plus-plus-llm framing 2>&1 | Select-Object -Last 5
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-cargo test -p deepseekcode-core cache_status 2>&1 | Select-Object -Last 5
+cargo test -p code-plus-plus-core cache_status 2>&1 | Select-Object -Last 5
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-cargo test -p deepseekcode-core compaction 2>&1 | Select-Object -Last 5
+cargo test -p code-plus-plus-core compaction 2>&1 | Select-Object -Last 5
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-cargo test -p deepseekcode-core --test cache_hit_guard 2>&1 | Select-Object -Last 10
+cargo test -p code-plus-plus-core --test cache_hit_guard 2>&1 | Select-Object -Last 10
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # 90% gate: release always; PRs touching sensitive files always (not only
@@ -117,7 +117,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if (($env:REASONIX_RELEASE_CACHE_GUARD -eq "1") -or $SensitiveTouched) {
   Write-Host "Enforcing 90% aggregate threshold via cache_hit_guard e2e..."
   $env:CACHE_SENSITIVE_TOUCHED = "1"
-  cargo test -p deepseekcode-core --test cache_hit_guard release_guard_90 2>&1 | Select-Object -Last 10
+  cargo test -p code-plus-plus-core --test cache_hit_guard release_guard_90 2>&1 | Select-Object -Last 10
   if ($LASTEXITCODE -ne 0) {
     Write-Error "Cache hit guard failed: long sessions must hold 90%+ hit rate."
     exit 1

@@ -1,11 +1,11 @@
 <# .SYNOPSIS
-  Generate minisign ed25519 keypair for DeepSeekCode release signing.
+  Generate minisign ed25519 keypair for Code++ release signing.
 #>
 $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $signingDir = Join-Path $root "signing"
-$privateKey = Join-Path $signingDir "deepseekcode.key"
-$publicKey = Join-Path $signingDir "deepseekcode.key.pub"
+$privateKey = Join-Path $signingDir "code-plus-plus.key"
+$publicKey = Join-Path $signingDir "code-plus-plus.key.pub"
 
 New-Item -ItemType Directory -Force -Path $signingDir | Out-Null
 

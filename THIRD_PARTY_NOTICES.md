@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-DeepSeekCode is licensed under the [Apache License, Version 2.0](LICENSE). See also [NOTICE](NOTICE).
+Code++ is licensed under the [Apache License, Version 2.0](LICENSE). See also [NOTICE](NOTICE).
 
 This file lists major third-party components and their licenses. For a full dependency tree, run:
 
@@ -13,7 +13,7 @@ cargo license --json
 
 | Component | Source | License |
 |-----------|--------|---------|
-| GPUI, gpui_platform | [zed-industries/zed](https://github.com/zed-industries/zed) (pinned git rev in `deepseekcode-desktop/Cargo.toml`) | Apache-2.0 (Zed project) |
+| GPUI, gpui_platform | [zed-industries/zed](https://github.com/zed-industries/zed) (pinned git rev in `code-plus-plus-desktop/Cargo.toml`) | Apache-2.0 (Zed project) |
 
 
 ## Major Rust Dependencies

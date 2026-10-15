@@ -1,4 +1,4 @@
-# DeepSeekCode Policy System
+# Code++ Policy System
 
 Native permission governance for tool execution. Replaces the legacy allow/deny list with a three-state ruleset model.
 
@@ -14,7 +14,7 @@ Legacy aliases (`allow` / `ask` / `deny`) deserialize to the same values.
 
 ## Configuration
 
-In the DeepSeekCode project config file (`deepseekcode.jsonc`):
+In the Code++ project config file (`code-plus-plus.jsonc`):
 
 ```jsonc
 {
@@ -27,7 +27,7 @@ In the DeepSeekCode project config file (`deepseekcode.jsonc`):
   "agents": {
     "plan": {
       "policy": {
-        "edit": { "*": "block", ".deepseekcode/plan/**": "permit" }
+        "edit": { "*": "block", ".code-plus-plus/plan/**": "permit" }
       }
     }
   }
@@ -101,13 +101,13 @@ legacy `permissions` table (see `PermissionStore` deprecation). Migration:
 
 ## Policy mode (Phase 2)
 
-`policy_mode` in the DeepSeekCode config file (`deepseekcode.jsonc`):
+`policy_mode` in the Code++ config file (`code-plus-plus.jsonc`):
 
 | Value | Behavior |
 |-------|----------|
 | `interactive` (default) | Prompt the user for `prompt` rules |
 | `auto` | YOLO — auto-permit non-`block` rules; no dock/composer block |
 
-CLI: `deepseekcode serve --auto`, `deepseekcode run --auto`, or `DEEPSEEKCODE_POLICY_MODE=auto`.
+CLI: `code-plus-plus serve --auto`, `code-plus-plus run --auto`, or `CODE_PLUS_PLUS_POLICY_MODE=auto`.
 
-Headless replies: `deepseekcode policy pending`, `deepseekcode policy reply --id … --reply once|project|reject [--message …]`.
+Headless replies: `code-plus-plus policy pending`, `code-plus-plus policy reply --id … --reply once|project|reject [--message …]`.

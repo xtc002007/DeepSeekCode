@@ -1,4 +1,4 @@
-# DeepSeekCode Parity Scenarios
+# Code++ Parity Scenarios
 
 |-----------|------------|-------------------|
 | Prompt admission | `prompt_admission.json` | sessions.prompt queue |

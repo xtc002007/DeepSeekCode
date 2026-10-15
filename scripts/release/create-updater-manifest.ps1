@@ -22,8 +22,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
-$publicKeyPath = Join-Path $root "signing\deepseekcode.key.pub"
-$publicKey = [Environment]::GetEnvironmentVariable("DEEPSEEKCODE_SIGNING_PUBLIC_KEY")
+$publicKeyPath = Join-Path $root "signing\code-plus-plus.key.pub"
+$publicKey = [Environment]::GetEnvironmentVariable("CODE_PLUS_PLUS_SIGNING_PUBLIC_KEY")
 if (-not $publicKey -and (Test-Path $publicKeyPath)) {
     $publicKey = (Get-Content $publicKeyPath -Raw).Trim()
 }
@@ -43,7 +43,7 @@ $manifest = [ordered]@{
     sha256 = $Sha256
     signature = "$InstallerName.minisig"
     pubkey = $publicKey
-    notes = "DeepSeekCode $Version"
+    notes = "Code++ $Version"
 }
 
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -Path $OutputPath -Encoding utf8

@@ -1,70 +1,70 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/deepseekcode-types",
-    "crates/deepseekcode-schema",
-    "crates/deepseekcode-config",
-    "crates/deepseekcode-i18n",
-    "crates/deepseekcode-telemetry",
-    "crates/deepseekcode-storage",
-    "crates/deepseekcode-llm",
-    "crates/deepseekcode-core",
-    "crates/deepseekcode-plugin",
-    "crates/deepseekcode-embed",
-    "crates/deepseekcode-server",
-    "crates/deepseekcode-sdk",
-    "crates/deepseekcode-cli",
-    "crates/deepseekcode-desktop",
+    "crates/code-plus-plus-types",
+    "crates/code-plus-plus-schema",
+    "crates/code-plus-plus-config",
+    "crates/code-plus-plus-i18n",
+    "crates/code-plus-plus-telemetry",
+    "crates/code-plus-plus-storage",
+    "crates/code-plus-plus-llm",
+    "crates/code-plus-plus-core",
+    "crates/code-plus-plus-plugin",
+    "crates/code-plus-plus-embed",
+    "crates/code-plus-plus-server",
+    "crates/code-plus-plus-sdk",
+    "crates/code-plus-plus-cli",
+    "crates/code-plus-plus-desktop",
     "examples/plugins/hello-hook",
 ]
 # P1-9: bare `cargo build/test` covers everything except the desktop shell
 # (previously CLI-only, masking server/SDK breakage). Desktop is excluded
 # because it depends on a git `gpui` revision (network); build it explicitly
-# via `cargo build -p deepseekcode-desktop`.
+# via `cargo build -p code-plus-plus-desktop`.
 default-members = [
-    "crates/deepseekcode-types",
-    "crates/deepseekcode-schema",
-    "crates/deepseekcode-config",
-    "crates/deepseekcode-i18n",
-    "crates/deepseekcode-telemetry",
-    "crates/deepseekcode-storage",
-    "crates/deepseekcode-llm",
-    "crates/deepseekcode-core",
-    "crates/deepseekcode-plugin",
-    "crates/deepseekcode-embed",
-    "crates/deepseekcode-server",
-    "crates/deepseekcode-sdk",
-    "crates/deepseekcode-cli",
+    "crates/code-plus-plus-types",
+    "crates/code-plus-plus-schema",
+    "crates/code-plus-plus-config",
+    "crates/code-plus-plus-i18n",
+    "crates/code-plus-plus-telemetry",
+    "crates/code-plus-plus-storage",
+    "crates/code-plus-plus-llm",
+    "crates/code-plus-plus-core",
+    "crates/code-plus-plus-plugin",
+    "crates/code-plus-plus-embed",
+    "crates/code-plus-plus-server",
+    "crates/code-plus-plus-sdk",
+    "crates/code-plus-plus-cli",
     "examples/plugins/hello-hook",
 ]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/deepseekcode/deepseekcode"
+repository = "https://github.com/xtc002007/code-plus-plus"
 rust-version = "1.85"
 
 [workspace.dependencies]
 # Internal crates
-deepseekcode-types = { path = "crates/deepseekcode-types" }
-deepseekcode-schema = { path = "crates/deepseekcode-schema" }
-deepseekcode-config = { path = "crates/deepseekcode-config" }
-deepseekcode-i18n = { path = "crates/deepseekcode-i18n" }
-deepseekcode-telemetry = { path = "crates/deepseekcode-telemetry" }
-deepseekcode-storage = { path = "crates/deepseekcode-storage" }
-deepseekcode-llm = { path = "crates/deepseekcode-llm" }
+code-plus-plus-types = { path = "crates/code-plus-plus-types" }
+code-plus-plus-schema = { path = "crates/code-plus-plus-schema" }
+code-plus-plus-config = { path = "crates/code-plus-plus-config" }
+code-plus-plus-i18n = { path = "crates/code-plus-plus-i18n" }
+code-plus-plus-telemetry = { path = "crates/code-plus-plus-telemetry" }
+code-plus-plus-storage = { path = "crates/code-plus-plus-storage" }
+code-plus-plus-llm = { path = "crates/code-plus-plus-llm" }
 # NOTE: per-edge `default-features = false` does NOT work combined with
 # `{ workspace = true }` inheritance (cargo ignores it with a warning, and
 # enabling any `wasm-plugins` feature then leaks wasmtime into slim builds).
 # Slim edges therefore spell out full `path` dependencies instead of
 # inheriting these five entries; do not "simplify" them back.
-deepseekcode-core = { path = "crates/deepseekcode-core" }
-deepseekcode-plugin = { path = "crates/deepseekcode-plugin" }
-deepseekcode-embed = { path = "crates/deepseekcode-embed" }
-deepseekcode-server = { path = "crates/deepseekcode-server" }
-deepseekcode-sdk = { path = "crates/deepseekcode-sdk" }
-deepseekcode-desktop = { path = "crates/deepseekcode-desktop" }
+code-plus-plus-core = { path = "crates/code-plus-plus-core" }
+code-plus-plus-plugin = { path = "crates/code-plus-plus-plugin" }
+code-plus-plus-embed = { path = "crates/code-plus-plus-embed" }
+code-plus-plus-server = { path = "crates/code-plus-plus-server" }
+code-plus-plus-sdk = { path = "crates/code-plus-plus-sdk" }
+code-plus-plus-desktop = { path = "crates/code-plus-plus-desktop" }
 
 # Async runtime — trimmed from `full` for a lighter workspace footprint
 tokio = { version = "1.44", features = [
@@ -103,7 +103,7 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono"] }
 refinery = { version = "0.8" }
 tokio-stream = { version = "0.1", features = ["sync"] }
 # Pinned-IP transport stack (DeepSeek VPN fallback only) — workspace-pinned so
-# `deepseekcode-llm` cannot drift from the reqwest TLS stack independently.
+# `code-plus-plus-llm` cannot drift from the reqwest TLS stack independently.
 hyper = { version = "1.10" }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "webpki-tokio", "native-tokio", "ring"] }

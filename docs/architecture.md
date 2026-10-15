@@ -1,10 +1,10 @@
 
 ## Goals
 
-DeepSeekCode is a Rust-native AI programming environment:
+Code++ is a Rust-native AI programming environment:
 
 - **Session-driven agent** with tools, policy, file/terminal/diff review, multi-provider LLM
-- **Embeddable SDK** (`deepseekcode-sdk`) shared by desktop, CLI, and future clients
+- **Embeddable SDK** (`code-plus-plus-sdk`) shared by desktop, CLI, and future clients
 - **GPUI desktop shell** with in-process Axum server + SSE (low latency vs sidecar)
 
 ## Layered architecture
@@ -12,16 +12,16 @@ DeepSeekCode is a Rust-native AI programming environment:
 ```mermaid
 flowchart TB
   subgraph clients [Clients]
-    Desktop[deepseekcode-desktop]
-    CLI[deepseekcode-cli]
+    Desktop[code-plus-plus-desktop]
+    CLI[code-plus-plus-cli]
   end
 
   subgraph sdk [SDK]
-    Sdk[deepseekcode-sdk]
+    Sdk[code-plus-plus-sdk]
   end
 
   subgraph server [Server]
-    Axum[deepseekcode-server]
+    Axum[code-plus-plus-server]
   end
 
   subgraph core [Core]
@@ -31,9 +31,9 @@ flowchart TB
   end
 
   subgraph infra [Infrastructure]
-    LLM[deepseekcode-llm]
-    DB[deepseekcode-storage]
-    Plugin[deepseekcode-plugin]
+    LLM[code-plus-plus-llm]
+    DB[code-plus-plus-storage]
+    Plugin[code-plus-plus-plugin]
   end
 
   Desktop --> Sdk
@@ -47,16 +47,16 @@ flowchart TB
 
 | Layer | Crate | Role |
 |-------|-------|------|
-| Types / schema | `deepseekcode-types`, `deepseekcode-schema` | IDs, errors, API shapes |
-| Config | `deepseekcode-config` | `deepseekcode.jsonc`,  |
-| Core | `deepseekcode-core` | Session runner, tools, policy, MCP |
-| LLM | `deepseekcode-llm` | OpenAI / Anthropic / OpenRouter / DeepSeek |
-| Storage | `deepseekcode-storage` | SQLite, events, encrypted credentials |
-| Server | `deepseekcode-server` | HTTP `/api/v1/*`, SSE, OpenAPI |
-| SDK | `deepseekcode-sdk` | `EmbeddedEngine`, HTTP client |
-| API types | `deepseekcode-schema::api` | Single source of truth for HTTP shapes (SDK/server share; no hand-rolled `json!`) |
-| Desktop | `deepseekcode-desktop` | GPUI UI |
-| CLI | `deepseekcode-cli` | `serve`, `run`, session commands |
+| Types / schema | `code-plus-plus-types`, `code-plus-plus-schema` | IDs, errors, API shapes |
+| Config | `code-plus-plus-config` | `code-plus-plus.jsonc`,  |
+| Core | `code-plus-plus-core` | Session runner, tools, policy, MCP |
+| LLM | `code-plus-plus-llm` | OpenAI / Anthropic / OpenRouter / DeepSeek |
+| Storage | `code-plus-plus-storage` | SQLite, events, encrypted credentials |
+| Server | `code-plus-plus-server` | HTTP `/api/v1/*`, SSE, OpenAPI |
+| SDK | `code-plus-plus-sdk` | `EmbeddedEngine`, HTTP client |
+| API types | `code-plus-plus-schema::api` | Single source of truth for HTTP shapes (SDK/server share; no hand-rolled `json!`) |
+| Desktop | `code-plus-plus-desktop` | GPUI UI |
+| CLI | `code-plus-plus-cli` | `serve`, `run`, session commands |
 
 ## Session runtime (summary)
 
@@ -70,7 +70,7 @@ Authoritative detail: [`specs/session-runtime.md`](../specs/session-runtime.md).
 ## Embedded vs standalone server
 
 - **Desktop / SDK default**: bind `127.0.0.1`, engine in-process
-- **CLI `serve`**: standalone HTTP server; set `DEEPSEEKCODE_SERVER_PASSWORD` when exposed beyond localhost ([`SECURITY.md`](../SECURITY.md))
+- **CLI `serve`**: standalone HTTP server; set `CODE_PLUS_PLUS_SERVER_PASSWORD` when exposed beyond localhost ([`SECURITY.md`](../SECURITY.md))
 
 ## Performance smoke targets (local dev)
 
@@ -83,12 +83,12 @@ Benchmarks under `benches/` track rough targets:
 | `file_tree` | 10k-node listing < 200ms |
 | `memory` | RSS after engine start (regression guard) |
 
-Run: `cargo bench -p deepseekcode-sdk --bench startup`
+Run: `cargo bench -p code-plus-plus-sdk --bench startup`
 
 ## Known structural debts (tracked, phased)
 
-- **SDK → server dependency**: `deepseekcode-sdk` currently depends on
-  `deepseekcode-server` (Axum + PTY + core) for `EmbeddedEngine`, forcing
+- **SDK → server dependency**: `code-plus-plus-sdk` currently depends on
+  `code-plus-plus-server` (Axum + PTY + core) for `EmbeddedEngine`, forcing
   desktop/CLI to link the full server. Phase-out: extract a
   `server-api-types`-only surface (done for DTOs via `schema::api`) and route
   `EmbeddedEngine` through it, leaving the Axum router to `serve`-only builds.
